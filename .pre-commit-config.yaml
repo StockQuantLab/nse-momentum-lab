@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: local
+    hooks:
+      # Fast checks for pre-commit (lint + format check only)
+      - id: quality-gates-pre-commit
+        name: quality-gates-pre-commit
+        entry: uv run python scripts/quality_gate.py --with-format-check
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      # Full checks for pre-push (includes tests, typecheck, etc.)
+      - id: quality-gates-pre-push
+        name: quality-gates-pre-push
+        entry: uv run python scripts/quality_gate.py --with-format-check --with-full
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

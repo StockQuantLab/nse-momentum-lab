@@ -1,0 +1,152 @@
+[project]
+name = "nse-momentum-lab"
+version = "0.1.0"
+description = "Local-first NSE momentum research + paper trading lab"
+readme = "docs/README.md"
+requires-python = ">=3.14"
+dependencies = [
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.7.0",
+  "httpx>=0.28.0",
+  "sqlalchemy>=2.0.0",
+  "psycopg[binary,pool]>=3.2.0",
+  "anyio>=4.0.0",
+  "pandas>=2.2.0",
+  "numpy>=2.0.0",
+  "pyarrow>=18.0.0",
+  "duckdb>=1.1.0",
+  "polars>=0.20.0",
+  "plotly>=5.24.0",
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.32.0",
+
+  "prometheus-client>=0.21.0",
+  "rich>=13.9.0",
+  "phidata>=0.11.0",
+  "openai>=1.60.0",
+  "minio>=7.2.0",
+  "playwright>=1.58.0",
+  "vectorbt>=0.26.0",
+  "click>=8.1.0",
+  "apscheduler>=3.10.0",
+  "nicegui>=3.8.0",
+]
+
+[project.scripts]
+# CLI entrypoints (run with: doppler run -- uv run <script>)
+nseml-api = "nse_momentum_lab.cli.api:main"
+nseml-dashboard = "nse_momentum_lab.cli.dashboard_nicegui:main"
+
+nseml-pipeline = "nse_momentum_lab.cli.pipeline:main"
+nse-agent = "nse_momentum_lab.agents.agent:main"
+nseml-optimizer = "nse_momentum_lab.services.backtest.optimizer:main"
+nseml-quality = "nse_momentum_lab.services.quality_monitor:main"
+nseml-db-init = "nse_momentum_lab.cli.db_init:main"
+nseml-db-verify = "nse_momentum_lab.cli.db_verify:main"
+nseml-build-features = "nse_momentum_lab.cli.build_features:main"
+nseml-backtest = "nse_momentum_lab.cli.backtest:main"
+nseml-backtest-status = "nse_momentum_lab.cli.backtest_status:main"
+nseml-backtest-batch = "nse_momentum_lab.cli.backtest_batch:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nse_momentum_lab"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.24.0",
+  "pytest-cov>=6.0.0",
+  "ruff>=0.9.0",
+  "pre-commit>=4.1.0",
+  "mypy>=1.14.0",
+  "types-requests>=2.32.0.20241016",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/migrations/*",
+    "*/__pycache__/*",
+    # CLI entry point wrappers - minimal logic tested elsewhere
+    "*/cli/dashboard.py",
+    "*/cli/pipeline.py",
+    # FastAPI endpoints - mostly declarative, logic tested via unit tests
+    "*/api/app.py",
+    "*/api/scheduler.py",
+    # External API clients - difficult to test without actual services
+    "*/services/ingest/client.py",
+    "*/services/ingest/web_scraper.py",
+    "*/services/ingest/playwright_scraper.py",
+    # Worker orchestrates - tested via integration tests
+    "*/services/ingest/worker.py",
+    "*/services/adjust/worker.py",
+    "*/services/scan/worker.py",
+    "*/services/rollup/worker.py",
+    "*/services/backtest/worker.py",
+    # Registry/metadata - simple persistence logic
+    "*/services/backtest/registry.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "@abstractmethod",
+]
+precision = 2
+show_missing = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "RUF"]
+ignore = ["E501", "RUF001", "RUF012"]
+
+# Per-file ignores for apps/ directory (requires sys.path manipulation before imports)
+[tool.ruff.lint.per-file-ignores]
+"apps/nicegui/**/*.py" = ["E402", "I001", "UP031", "C408"]  # Imports, percent format in CSS, dict() calls
+"apps/**/*.py" = ["E402", "I001", "UP031", "C408"]
+"src/nse_momentum_lab/cli/dashboard_nicegui.py" = ["E402", "I001"]  # CLI wrapper needs sys.path before imports
+# Test files - allow common test patterns
+"tests/**/*.py" = ["F541", "C401", "B007", "F841", "RUF059", "F401"]  # Test output style, unused vars in tests
+
+[tool.mypy]
+python_version = "3.14"
+namespace_packages = true
+explicit_package_bases = true
+ignore_missing_imports = true
+follow_imports = "silent"
+strict = false
+check_untyped_defs = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+allow_untyped_globals = true
+warn_unused_ignores = false
+disable_error_code = [
+  "import-untyped",
+  "var-annotated",
+  "arg-type",
+  "attr-defined",
+  "call-arg",
+  "dict-item",
+  "assignment",
+  "return-value",
+  "truthy-function",
+  "valid-type",
+]

@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Local outputs
+logs/
+output/
+artifacts/
+data/
+test_data/
+screenshots/
+.tmp_*
+*.tmp
+
+# Playwright
+.playwright-cli/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Doppler secrets (local only, never commit)
+doppler.json
+
+# Artifact tracks
+.claude/settings.local.json
+*.wal
+*.lock.db
+*.lock
+
+# Node artifacts
+node_modules/
+package-lock.json
+
+# Doppler / coverage
+.coverage
