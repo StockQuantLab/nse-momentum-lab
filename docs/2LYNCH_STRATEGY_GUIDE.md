@@ -1,7 +1,7 @@
 # NSE Momentum Lab - 2LYNCH Strategy Implementation
 
 **Status**: PRODUCTION READY (Indian Market Adapted)
-**Last Updated**: 2026-02-28
+**Last Updated**: 2026-03-02
 
 ---
 
@@ -14,20 +14,22 @@ This strategy is adapted from Stockbee's US-market "4% breakout / momentum burst
 | Min Price | $3 | **Rs.10** | Filters penny stocks while keeping small-cap universe |
 | Volume | 100,000 shares | **Rs.30 lakh value** | Value-traded is market-appropriate |
 | Gap Threshold | 4% | 4% | Same - momentum is universal |
-| Filters Required | All 6 | **4 of 6** | Balances quality with signal volume |
+| Filters Required | All 6 | **5 of 6** | Higher selectivity, better risk-adjusted returns |
 
 ---
 
-## Performance (2015-2024, Top 500 Stocks)
+## Performance (2015-2025, Full Universe ~1,776 Stocks)
 
 | Metric | Value |
 |--------|-------|
-| Total Return | **840.67%** |
-| Annualized Return | **84.07%** |
-| Win Rate | 37.8% |
-| Max Drawdown | 23.0% |
-| Total Trades | 9,261 |
-| Profitable Years | 10/10 (2015-2024) |
+| Total Return | **1,939%** (10 years) |
+| Annualized Return | **193.9%** |
+| Win Rate | 51.3% |
+| Max Drawdown | **4.4%** |
+| Calmar Ratio | **43.67** |
+| Total Trades | 7,073 |
+| FEE Window | 60 min (entry cutoff: 09:15-10:15 IST) |
+| Experiment ID | `429c79ac45b65086` |
 
 ---
 
@@ -53,7 +55,7 @@ Streamlit Dashboard (pages/15_Backtest_Results.py)
 
 ## 2LYNCH Filters
 
-Six quality filters applied to each 4% gap-up signal. Require 4/6 to pass.
+Six quality filters applied to each 4% gap-up signal. Require 5/6 to pass.
 
 ### H - Close Near High
 Close position in the day's range >= 0.70 (close near the high = strong buying pressure).

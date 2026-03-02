@@ -1,13 +1,13 @@
 # 2LYNCH Filters - Implementation Summary
 
-**Date**: 2026-02-28
-**Status**: IMPLEMENTED AND VALIDATED (840.67% total return, 84.07% annualized, 9,261 trades)
+**Date**: 2026-03-02
+**Status**: PRODUCTION (exp 429c79ac45b65086: Calmar 43.67, Ann Ret 193.9%, Max DD 4.4%)
 
 ---
 
 ## Filter Definitions
 
-Six filters applied to every 4% gap-up signal. Require **4 of 6** to pass.
+Six filters applied to every 4% gap-up signal. Require **5 of 6** to pass.
 
 | # | Letter | Name | Condition | Rationale |
 |---|--------|------|-----------|-----------|
@@ -57,4 +57,4 @@ Six filters applied to every 4% gap-up signal. Require **4 of 6** to pass.
 
 ---
 
-*Validated against the 2015-2024 decade: 840.67% total return, 84.07% annualized, 9,261 trades*
+*Production baseline (exp 429c79ac45b65086): 2015-2025, ~1,776 stocks, 60min FEE window, 5/6 filters required*
