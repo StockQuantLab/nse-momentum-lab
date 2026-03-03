@@ -16,10 +16,10 @@ Usage::
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time
 from pathlib import Path
@@ -33,12 +33,12 @@ from tqdm.auto import tqdm
 
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db.market_db import MarketDataDB, get_market_db
-from nse_momentum_lab.services.backtest.engine import ExitReason
 from nse_momentum_lab.services.backtest.persistence import (
     BacktestArtifactPublisher,
     build_strategy_hash,
     upsert_exp_run_with_artifacts_sync,
 )
+from nse_momentum_lab.services.backtest.signal_models import BacktestSignal, SignalMetadata
 from nse_momentum_lab.services.backtest.vectorbt_engine import (
     VectorBTConfig,
     VectorBTEngine,
@@ -47,6 +47,14 @@ from nse_momentum_lab.services.dataset import (
     build_code_hash,
     build_manifest_payload_from_snapshot,
     upsert_dataset_manifest_sync,
+)
+from nse_momentum_lab.utils import (
+    ALL_FILTERS,
+    compute_composite_hash,
+    compute_short_hash,
+    get_exit_time_for_reason,
+    minutes_from_nse_open,
+    normalize_candle_time,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,10 +107,14 @@ class BacktestParams:
     # the setup is invalid (e.g. stock crashed then bounced — FEE was still violated).
     max_stop_dist_pct: float = 0.08
 
+    # Parallel execution: number of worker threads for year-by-year backtest
+    # Set to 1 for sequential (default), >1 for parallel (e.g., 4 for 4-way parallel)
+    # Note: DuckDB read-only connections are thread-safe
+    parallel_workers: int = 1
+
     def to_hash(self) -> str:
         """Deterministic SHA-256 of all parameters (for dedup)."""
-        blob = json.dumps(asdict(self), sort_keys=True)
-        return hashlib.sha256(blob.encode()).hexdigest()[:16]
+        return compute_short_hash(asdict(self), length=16)
 
     def to_vbt_config(self) -> VectorBTConfig:
         return VectorBTConfig(
@@ -135,8 +147,7 @@ class DuckDBBacktestRunner:
     @staticmethod
     def build_experiment_id(params_hash: str, dataset_hash: str, code_hash: str = "default") -> str:
         """Stable experiment ID derived from params + dataset fingerprints."""
-        blob = f"{params_hash}:{dataset_hash}:{code_hash}"
-        return hashlib.sha256(blob.encode()).hexdigest()[:16]
+        return compute_composite_hash(params_hash, dataset_hash, code_hash, length=16)
 
     def run(
         self,
@@ -535,16 +546,68 @@ class DuckDBBacktestRunner:
         on_year_complete: Callable[[int, int, int, dict], None] | None = None,
         on_year_heartbeat: Callable[[int, int, int, str], None] | None = None,
     ) -> tuple[dict[int, dict], list[dict]]:
-        """Run backtest year by year using parameterized queries."""
-        yearly_results: dict[int, dict] = {}
-        all_trades: list[dict] = []
+        """Run backtest year by year using parameterized queries.
+
+        Supports parallel execution when params.parallel_workers > 1.
+        Each year runs independently in a separate thread.
+        """
         window_start = self._parse_optional_iso_date(params.start_date, "start_date")
         window_end = self._parse_optional_iso_date(params.end_date, "end_date")
         effective_start_year, effective_end_year = self._effective_year_range(params)
 
         years_total = effective_end_year - effective_start_year + 1
+        years_to_run = list(range(effective_start_year, effective_end_year + 1))
 
-        for idx, year in enumerate(range(effective_start_year, effective_end_year + 1), start=1):
+        # Determine if we should run in parallel
+        use_parallel = params.parallel_workers > 1 and years_total > 1
+
+        if use_parallel:
+            logger.info(
+                "Running %d years in parallel with %d workers",
+                years_total,
+                params.parallel_workers,
+            )
+            return self._run_year_by_year_parallel(
+                params,
+                symbols,
+                years_to_run,
+                window_start,
+                window_end,
+                on_year_start,
+                on_year_complete,
+                on_year_heartbeat,
+                years_total,
+            )
+        else:
+            return self._run_year_by_year_sequential(
+                params,
+                symbols,
+                years_to_run,
+                window_start,
+                window_end,
+                on_year_start,
+                on_year_complete,
+                on_year_heartbeat,
+                years_total,
+            )
+
+    def _run_year_by_year_sequential(
+        self,
+        params: BacktestParams,
+        symbols: list[str],
+        years_to_run: list[int],
+        window_start: date | None,
+        window_end: date | None,
+        on_year_start: Callable[[int, int, int], None] | None,
+        on_year_complete: Callable[[int, int, int, dict], None] | None,
+        on_year_heartbeat: Callable[[int, int, int, str], None] | None,
+        years_total: int,
+    ) -> tuple[dict[int, dict], list[dict]]:
+        """Run backtest sequentially year by year (original implementation)."""
+        yearly_results: dict[int, dict] = {}
+        all_trades: list[dict] = []
+
+        for idx, year in enumerate(years_to_run, start=1):
             year_window_start = date(year, 1, 1)
             year_window_end = date(year, 12, 31)
             if window_start and window_start > year_window_start:
@@ -597,6 +660,93 @@ class DuckDBBacktestRunner:
                 on_year_complete(year, idx, years_total, stats)
 
         return yearly_results, all_trades
+
+    def _run_year_by_year_parallel(
+        self,
+        params: BacktestParams,
+        symbols: list[str],
+        years_to_run: list[int],
+        window_start: date | None,
+        window_end: date | None,
+        on_year_start: Callable[[int, int, int], None] | None,
+        on_year_complete: Callable[[int, int, int, dict], None] | None,
+        on_year_heartbeat: Callable[[int, int, int, str], None] | None,
+        years_total: int,
+    ) -> tuple[dict[int, dict], list[dict]]:
+        """Run backtest in parallel using ThreadPoolExecutor.
+
+        Each year runs independently. Results are collected and aggregated.
+        DuckDB read-only connections are thread-safe for concurrent reads.
+        """
+        from threading import Lock
+
+        yearly_results: dict[int, dict] = {}
+        all_trades: list[dict] = []
+        results_lock = Lock()
+
+        def run_single_year_thread(year: int, idx: int) -> tuple[int, dict, list]:
+            """Run a single year in a worker thread."""
+            year_window_start = date(year, 1, 1)
+            year_window_end = date(year, 12, 31)
+            if window_start and window_start > year_window_start:
+                year_window_start = window_start
+            if window_end and window_end < year_window_end:
+                year_window_end = window_end
+
+            if on_year_start:
+                on_year_start(year, idx - 1, years_total)
+            logger.info("[YEAR %d] [Thread %d] Running...", year, idx)
+
+            # Note: Disable heartbeat in parallel mode to avoid concurrent callback issues
+            stats, trades = self._run_single_year(
+                params,
+                symbols,
+                year,
+                year_window_start,
+                year_window_end,
+                heartbeat_cb=None,  # No heartbeat in parallel mode
+            )
+
+            if stats["trades"] > 0:
+                logger.info(
+                    "[YEAR %d] [Thread %d] Trades: %d  Return: %+.2f%%  Win Rate: %.1f%%  Avg R: %.2f",
+                    year,
+                    idx,
+                    stats["trades"],
+                    stats["return_pct"],
+                    stats["win_rate_pct"],
+                    stats["avg_r"],
+                )
+            if stats.get("skipped_intraday_entry", 0) > 0:
+                logger.info(
+                    "[YEAR %d] [Thread %d] Skipped (no 5min entry): %d",
+                    year,
+                    idx,
+                    int(stats["skipped_intraday_entry"]),
+                )
+            if on_year_complete:
+                on_year_complete(year, idx, years_total, stats)
+
+            return year, stats, trades
+
+        # Run all years in parallel
+        with ThreadPoolExecutor(max_workers=params.parallel_workers) as executor:
+            # Submit all jobs
+            futures = {
+                executor.submit(run_single_year_thread, year, idx): year
+                for idx, year in enumerate(years_to_run, start=1)
+            }
+
+            # Collect results as they complete
+            for future in as_completed(futures):
+                year, stats, trades = future.result()
+                with results_lock:
+                    yearly_results[year] = stats
+                    all_trades.extend(trades)
+
+        # Sort results by year for consistent output
+        sorted_results = dict(sorted(yearly_results.items()))
+        return sorted_results, all_trades
 
     def _run_single_year(
         self,
@@ -700,8 +850,8 @@ class DuckDBBacktestRunner:
         df_pl = pl.from_pandas(df)
 
         # Apply filters
-        for f in ["filter_h", "filter_n", "filter_2", "filter_y", "filter_c", "filter_l"]:
-            df_pl = df_pl.with_columns(pl.col(f).fill_null(False))
+        for f in ALL_FILTERS:
+            df_pl = df_pl.with_columns(pl.col(f.value).fill_null(False))
 
         df_pl = df_pl.with_columns(
             (
@@ -861,28 +1011,31 @@ class DuckDBBacktestRunner:
                         skipped_intraday_entry += 1
                         signal_bar.update(1)
                         continue
+                # Store signal context for progress tracking
+                filters_passed = (
+                    int(row["filters_passed"]) if row["filters_passed"] is not None else 0
+                )
                 signal_context[(symbol_id, sig_date)] = {
                     "gap_pct": row["gap_pct"],
-                    "filters_passed": int(row["filters_passed"])
-                    if row["filters_passed"] is not None
-                    else None,
+                    "filters_passed": filters_passed,
                     "entry_time": intraday_entry.get("entry_time") if intraday_entry else None,
                 }
+
+                # Create typed signal instead of tuple
                 vbt_signals.append(
-                    (
-                        sig_date,
-                        symbol_id,
-                        symbol,
-                        initial_stop,
-                        {
-                            "gap_pct": row["gap_pct"],
-                            "atr": row["atr_20"] if row["atr_20"] else 0.0,
-                            "filters_passed": signal_context[(symbol_id, sig_date)][
-                                "filters_passed"
-                            ],
-                            "entry_price": entry_price,
-                            "same_day_stop_hit": same_day_stop_hit,
-                        },
+                    BacktestSignal(
+                        signal_date=sig_date,
+                        symbol_id=symbol_id,
+                        symbol=symbol,
+                        initial_stop=initial_stop,
+                        metadata=SignalMetadata(
+                            gap_pct=row["gap_pct"],
+                            atr=row["atr_20"] if row["atr_20"] else 0.0,
+                            filters_passed=filters_passed,
+                            entry_price=entry_price,
+                            same_day_stop_hit=same_day_stop_hit,
+                            entry_time=intraday_entry.get("entry_time") if intraday_entry else None,
+                        ),
                     )
                 )
 
@@ -964,17 +1117,7 @@ class DuckDBBacktestRunner:
             # Gap-based exits occur at market open (09:15 IST).
             # Close-based exits occur at market close (15:30 IST).
             # Intraday stop exits have unknown timing — stored as NULL.
-            if t.exit_reason in (ExitReason.ABNORMAL_GAP_EXIT, ExitReason.GAP_THROUGH_STOP):
-                exit_time = time(9, 15)
-            elif t.exit_reason in (
-                ExitReason.TIME_STOP,
-                ExitReason.ABNORMAL_PROFIT,
-                ExitReason.EXIT_EOD,
-                ExitReason.DELISTING,
-            ):
-                exit_time = time(15, 30)
-            else:
-                exit_time = None  # STOP_INITIAL / STOP_TRAIL etc. — intraday time unknown
+            exit_time = get_exit_time_for_reason(t.exit_reason.value)
 
             trades_out.append(
                 {
@@ -1004,17 +1147,7 @@ class DuckDBBacktestRunner:
         Handles datetime.time, datetime.datetime, and integer microseconds (DuckDB TIME64).
         Returns None if the format is unrecognised.
         """
-        import datetime as _dt
-
-        if isinstance(candle_time, _dt.datetime):
-            return (candle_time.hour - 9) * 60 + (candle_time.minute - 15)
-        if isinstance(candle_time, _dt.time):
-            return (candle_time.hour - 9) * 60 + (candle_time.minute - 15)
-        if isinstance(candle_time, (int, float)):
-            # DuckDB stores TIME as microseconds since midnight
-            total_minutes = int(candle_time) // 60_000_000
-            return total_minutes - (9 * 60 + 15)
-        return None
+        return minutes_from_nse_open(candle_time)
 
     @staticmethod
     def _normalize_candle_time(candle_time: object) -> time | None:
@@ -1024,21 +1157,7 @@ class DuckDBBacktestRunner:
         when fetched via the Python API. This helper normalises all three
         possible types: datetime, time, and int/float microseconds.
         """
-        import datetime as _dt
-
-        if isinstance(candle_time, _dt.datetime):
-            return candle_time.time()
-        if isinstance(candle_time, _dt.time):
-            return candle_time
-        if isinstance(candle_time, (int, float)):
-            total_seconds = int(candle_time) // 1_000_000
-            h, remainder = divmod(total_seconds, 3600)
-            m, s = divmod(remainder, 60)
-            try:
-                return _dt.time(h, m, s)
-            except ValueError:
-                return None
-        return None
+        return normalize_candle_time(candle_time)
 
     @staticmethod
     def _resolve_intraday_entry_from_5min(

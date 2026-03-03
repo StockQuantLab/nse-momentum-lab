@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -14,6 +13,7 @@ from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
     BacktestParams,
     DuckDBBacktestRunner,
 )
+from nse_momentum_lab.utils import compute_short_hash
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,8 +67,7 @@ def _parse_optional_iso_date(value: str | None, field_name: str) -> date | None:
 
 
 def _compute_batch_id(payload: dict[str, Any]) -> str:
-    blob = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+    return compute_short_hash(payload, length=16)
 
 
 def _write_checkpoint(path: Path, state: dict[str, Any]) -> None:

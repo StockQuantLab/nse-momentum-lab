@@ -1,7 +1,6 @@
 """CLI for running the daily pipeline."""
 
 import asyncio
-import hashlib
 import logging
 import sys
 from datetime import UTC, date, datetime, timedelta
@@ -19,6 +18,7 @@ from nse_momentum_lab.db.models import JobRun
 from nse_momentum_lab.services.ingest.worker import IngestionWorker
 from nse_momentum_lab.services.rollup.worker import run_daily_rollup
 from nse_momentum_lab.services.scan.worker import ScanWorker
+from nse_momentum_lab.utils import compute_short_hash
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def _generate_idempotency_key(job_name: str, trading_date: date, skip_ingest: bool = False) -> str:
     content = f"{job_name}:{trading_date.isoformat()}:{skip_ingest}"
-    return hashlib.sha256(content.encode()).hexdigest()[:32]
+    return compute_short_hash(content, length=32)
 
 
 async def _get_existing_job(idempotency_key: str) -> JobRun | None:

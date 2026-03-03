@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass
 from datetime import date
@@ -12,11 +11,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db.models import DatasetManifest
+from nse_momentum_lab.utils import compute_short_hash
 
 
 def build_code_hash(tag: str, extra: dict[str, Any] | None = None) -> str:
-    payload = {"tag": tag, "extra": extra or {}}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
+    """Build a code hash from tag and optional extra metadata."""
+    return compute_short_hash({"tag": tag, "extra": extra or {}}, length=16)
 
 
 def _to_date(value: Any) -> date | None:

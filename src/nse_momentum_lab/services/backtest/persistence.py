@@ -13,6 +13,7 @@ import psycopg
 
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.services.ingest.minio import MinioArtifactStore
+from nse_momentum_lab.utils import compute_short_hash
 
 
 @dataclass(frozen=True)
@@ -24,9 +25,9 @@ class ExperimentArtifact:
 
 
 def build_strategy_hash(strategy_name: str, params_hash: str) -> str:
-    payload = {"strategy_name": strategy_name, "params_hash": params_hash}
-    blob = json.dumps(payload, sort_keys=True)
-    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+    return compute_short_hash(
+        {"strategy_name": strategy_name, "params_hash": params_hash}, length=16
+    )
 
 
 class BacktestArtifactPublisher:

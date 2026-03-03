@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 from dataclasses import dataclass
 from datetime import date
@@ -14,6 +12,10 @@ from nse_momentum_lab.db.models import (
     BtTrade,
     ExpMetric,
     ExpRun,
+)
+from nse_momentum_lab.utils import (
+    compute_composite_hash,
+    compute_short_hash,
 )
 
 logger = logging.getLogger(__name__)
@@ -175,12 +177,10 @@ class ExperimentRegistry:
         }
 
     def _compute_strategy_hash(self, strategy_name: str, params: dict[str, Any]) -> str:
-        content = json.dumps({"name": strategy_name, "params": params}, sort_keys=True)
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        return compute_short_hash({"name": strategy_name, "params": params}, length=16)
 
     def _compute_exp_hash(self, strategy_hash: str, dataset_hash: str) -> str:
-        content = f"{strategy_hash}:{dataset_hash}"
-        return hashlib.sha256(content.encode()).hexdigest()[:16]
+        return compute_composite_hash(strategy_hash, dataset_hash, length=16)
 
     async def get_experiment(self, exp_hash: str) -> dict[str, Any] | None:
         from nse_momentum_lab.db import get_sessionmaker

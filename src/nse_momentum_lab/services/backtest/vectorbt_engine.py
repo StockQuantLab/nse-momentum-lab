@@ -13,6 +13,7 @@ import vectorbt as vbt
 
 from nse_momentum_lab.db.market_db import get_market_db
 from nse_momentum_lab.services.backtest.engine import ExitReason
+from nse_momentum_lab.services.backtest.signal_models import BacktestSignal
 
 logger = logging.getLogger(__name__)
 
@@ -497,10 +498,21 @@ class VectorBTEngine:
 
         return exits, order_price, exit_reason_map, initial_stop_map
 
+    def _normalize_signal(
+        self, signal: BacktestSignal | tuple
+    ) -> tuple[date, int, str, float, dict]:
+        """Normalize signal to tuple format for internal processing.
+
+        Accepts both BacktestSignal objects and legacy tuples for backward compatibility.
+        """
+        if isinstance(signal, BacktestSignal):
+            return signal.to_tuple()
+        return signal
+
     def run_backtest(
         self,
         strategy_name: str,
-        signals: list[tuple[date, int, str, float, dict]],
+        signals: list[BacktestSignal | tuple[date, int, str, float, dict]],
         price_data: dict[int, dict[date, dict[str, float]]],
         value_traded_inr: dict[int, float],
         delisting_dates: dict[int, date] | None = None,
@@ -508,7 +520,9 @@ class VectorBTEngine:
         """Run backtest for gap-up breakout strategy.
 
         SIGNAL FORMAT:
-            signals: [(signal_date, symbol_id, symbol, initial_stop, metadata), ...]
+            Accepts both BacktestSignal objects and legacy tuples:
+            - BacktestSignal(signal_date, symbol_id, symbol, initial_stop, metadata)
+            - (signal_date, symbol_id, symbol, initial_stop, metadata)
 
         ENTRY TIMING:
             - Signal date T from daily setup
@@ -521,7 +535,7 @@ class VectorBTEngine:
 
         Args:
             strategy_name: Name of the strategy
-            signals: List of (date, symbol_id, symbol, initial_stop, metadata)
+            signals: List of BacktestSignal or (date, symbol_id, symbol, initial_stop, metadata)
                      metadata may include entry_price and same_day_stop_hit
             price_data: Dict of symbol_id -> {date -> {open_adj, close_adj, high_adj, low_adj}}
             value_traded_inr: Dict of symbol_id -> 20-day avg value traded
@@ -533,12 +547,15 @@ class VectorBTEngine:
         if not signals:
             return VectorBTResult(strategy_name=strategy_name, entry_mode="gap_open", trades=[])
 
+        # Normalize signals to tuple format for processing
+        normalized_signals = [self._normalize_signal(s) for s in signals]
+
         symbol_ids = list(price_data.keys())
         if not symbol_ids:
             return VectorBTResult(strategy_name=strategy_name, entry_mode="gap_open", trades=[])
 
-        min_date = min(d for s in signals for d in [s[0]] if isinstance(d, date))
-        max_date = max(d for s in signals for d in [s[0]] if isinstance(d, date))
+        min_date = min(s[0] for s in normalized_signals)
+        max_date = max(s[0] for s in normalized_signals)
         max_date = max_date + timedelta(
             days=self.config.time_stop_days + 5
         )  # Buffer for weekends/holidays
@@ -577,7 +594,7 @@ class VectorBTEngine:
 
         # Signal date equals entry date; actual entry price can be overridden
         # per signal via metadata (entry_price).
-        entries = self.prepare_signals(signals, close_df)
+        entries = self.prepare_signals(normalized_signals, close_df)
 
         if entries.empty or not entries.any().any():
             return VectorBTResult(strategy_name=strategy_name, entry_mode="gap_open", trades=[])
@@ -593,7 +610,7 @@ class VectorBTEngine:
             open_prices,
             high_prices,
             low_prices,
-            signals,
+            normalized_signals,
             delisting_dates,
         )
 
