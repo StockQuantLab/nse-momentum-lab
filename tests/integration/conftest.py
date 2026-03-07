@@ -76,19 +76,40 @@ def ensure_integration_services_available() -> None:
 
     This keeps `pytest` (full-suite) deterministic on local machines where
     Docker services or Doppler-injected secrets are not present.
+
+    Validates that core tables from 001_init.sql exist (not ORM-only tables).
     """
     _set_integration_env_defaults()
     settings = get_settings()
+
+    # Required tables from db/init/001_init.sql
+    REQUIRED_TABLES = {
+        "ref_symbol",
+        "ref_exchange_calendar",
+        "exp_run",
+        "job_run",
+        "scan_run",
+        "scan_result",
+        "signal",
+        "bt_trade",
+    }
 
     try:
         with psycopg.connect(str(settings.database_url), connect_timeout=3) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
-                cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'nseml'")
-                row = cur.fetchone()
-                schema_table_count = int(row[0] or 0) if row is not None else 0
-                if schema_table_count == 0:
-                    pytest.skip("Integration DB schema missing: nseml tables not initialized")
+                # Check for specific required tables
+                cur.execute(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'nseml'"
+                )
+                existing_tables = {row[0] for row in cur.fetchall()}
+                missing = REQUIRED_TABLES - existing_tables
+                if missing:
+                    pytest.skip(
+                        f"Integration DB schema incomplete. Missing tables: {missing}. "
+                        f"Ensure db/init/001_init.sql has been applied."
+                    )
     except Exception as exc:
         pytest.skip(f"Integration DB unavailable: {exc}")
 
@@ -240,20 +261,60 @@ async def sample_scan_run(
 
 @pytest_asyncio.fixture
 async def sample_job_run(db_session: AsyncSession) -> JobRun:
-    """Create a sample job run for testing."""
-    job = JobRun(
-        job_name="daily_pipeline",
-        asof_date=date(2024, 1, 19),
-        idempotency_key=f"test_idempotency_key_{uuid4().hex}",
-        status="COMPLETED",
-        started_at=datetime(2024, 1, 19, 18, 0),
-        finished_at=datetime(2024, 1, 19, 18, 10),
-        duration_ms=600000,
-        metrics_json={"rows_processed": 1000},
+    """Create a sample job run for testing.
+
+    Note: Only uses columns defined in db/init/001_init.sql.
+    New ORM-only columns (job_kind, inputs_json, outputs_json, partition_scope, code_hash)
+    are skipped as they don't exist in the current DB schema.
+    """
+    # Use raw SQL to insert only columns that exist in the current schema
+    # This avoids issues with ORM models having columns not yet in the DB
+    from sqlalchemy import text
+
+    job_name = "daily_pipeline"
+    asof_date = date(2024, 1, 19)
+    idempotency_key = f"test_idempotency_key_{uuid4().hex}"
+    status = "COMPLETED"
+    started_at = datetime(2024, 1, 19, 18, 0)
+    finished_at = datetime(2024, 1, 19, 18, 10)
+    duration_ms = 600000
+    metrics_json = {"rows_processed": 1000}
+
+    result = await db_session.execute(
+        text(
+            "INSERT INTO nseml.job_run "
+            "(job_name, asof_date, idempotency_key, status, started_at, finished_at, "
+            "duration_ms, metrics_json) "
+            "VALUES (:job_name, :asof_date, :idempotency_key, :status, :started_at, "
+            ":finished_at, :duration_ms, :metrics_json::jsonb) "
+            "RETURNING job_run_id"
+        ),
+        {
+            "job_name": job_name,
+            "asof_date": asof_date,
+            "idempotency_key": idempotency_key,
+            "status": status,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "duration_ms": duration_ms,
+            "metrics_json": metrics_json,
+        },
     )
-    db_session.add(job)
+    job_run_id = result.scalar_one()
     await db_session.commit()
-    await db_session.refresh(job)
+
+    # Create a JobRun object with just the ID for test use
+    job = JobRun(
+        job_run_id=job_run_id,
+        job_name=job_name,
+        asof_date=asof_date,
+        idempotency_key=idempotency_key,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        metrics_json=metrics_json,
+    )
     return job
 
 

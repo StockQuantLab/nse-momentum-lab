@@ -126,16 +126,34 @@ def get_experiment(exp_id: str) -> dict | None:
     return db.get_experiment(exp_id)
 
 
+async def aget_experiment(exp_id: str) -> dict | None:
+    """Async wrapper for get_experiment."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, lambda: get_experiment(exp_id))
+
+
 def get_experiment_trades(exp_id: str) -> pd.DataFrame:
     """Get all trades for an experiment."""
     df = db.get_experiment_trades(exp_id)
     return df.to_pandas() if not df.is_empty() else pd.DataFrame()
 
 
+async def aget_experiment_trades(exp_id: str) -> pd.DataFrame:
+    """Async wrapper for get_experiment_trades."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, lambda: get_experiment_trades(exp_id))
+
+
 def get_experiment_yearly_metrics(exp_id: str) -> pd.DataFrame:
     """Get yearly metrics for an experiment."""
     df = db.get_experiment_yearly_metrics(exp_id)
     return df.to_pandas() if not df.is_empty() else pd.DataFrame()
+
+
+async def aget_experiment_yearly_metrics(exp_id: str) -> pd.DataFrame:
+    """Async wrapper for get_experiment_yearly_metrics."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(_executor, lambda: get_experiment_yearly_metrics(exp_id))
 
 
 def _strategy_display_name(row: pd.Series) -> str:
@@ -191,21 +209,41 @@ def prepare_trades_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # Convert date columns
     if "entry_date" in df.columns:
         df["entry_date"] = pd.to_datetime(df["entry_date"], errors="coerce")
     if "exit_date" in df.columns:
         df["exit_date"] = pd.to_datetime(df["exit_date"], errors="coerce")
 
-    # Format time columns
     if "entry_time" in df.columns:
         df["entry_time"] = df["entry_time"].apply(format_time)
     if "exit_time" in df.columns:
         df["exit_time"] = df["exit_time"].apply(format_time)
 
-    # Convert numeric columns
     for col in ["pnl_pct", "pnl_r", "holding_days", "year", "entry_price", "exit_price"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
     return df
+
+
+_experiment_callbacks: list = []
+
+
+def on_new_experiments(callback) -> None:
+    """Register callback for new experiments."""
+    _experiment_callbacks.append(callback)
+
+
+async def poll_new_experiments(force_refresh: bool = True) -> pd.DataFrame:
+    """Check for new experiments and notify listeners."""
+    global _experiments_cache, _experiments_cache_time
+
+    old_count = len(_experiments_cache) if _experiments_cache is not None else 0
+    result = await aget_experiments(force_refresh=force_refresh)
+    new_count = len(_experiments_cache) if _experiments_cache is not None else 0
+
+    if new_count > old_count and old_count > 0:
+        for cb in _experiment_callbacks:
+            cb()
+
+    return result

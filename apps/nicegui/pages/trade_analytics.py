@@ -30,6 +30,8 @@ from apps.nicegui.components import (
     apply_chart_theme,
     COLORS,
     THEME,
+    empty_state,
+    page_header,
 )
 
 
@@ -39,7 +41,12 @@ def trade_analytics_page() -> None:
         experiments_df = get_experiments()
 
         if experiments_df.empty:
-            ui.label("No experiments available.").style(f"color: {COLORS['error']};")
+            page_header("Trade Analytics")
+            empty_state(
+                "No experiments available",
+                "Run a backtest first to see trade analytics.",
+                icon="analytics",
+            )
             return
 
         exp_options = build_experiment_options(experiments_df)
@@ -53,8 +60,10 @@ def trade_analytics_page() -> None:
             trades_df = prepare_trades_df(trades_df)
 
             if trades_df.empty:
-                ui.label("No trades found for this experiment.").style(
-                    f"color: {THEME['text_secondary']};"
+                empty_state(
+                    "No trades for this experiment",
+                    "This experiment doesn't have any trades to analyze.",
+                    icon="receipt_long",
                 )
                 return
 

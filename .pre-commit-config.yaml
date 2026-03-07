@@ -18,10 +18,10 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
-      # Full checks for pre-push (includes tests, typecheck, etc.)
+      # Pre-push checks: lint, typecheck, unit tests (no integration - those run in CI)
       - id: quality-gates-pre-push
         name: quality-gates-pre-push
-        entry: uv run python scripts/quality_gate.py --with-format-check --with-full
+        entry: uv run python scripts/quality_gate.py --with-format-check
         language: system
         pass_filenames: false
         stages: [pre-push]

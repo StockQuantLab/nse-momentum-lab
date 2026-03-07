@@ -20,7 +20,15 @@ import pandas as pd
 from nicegui import ui
 
 from apps.nicegui.state import get_experiments
-from apps.nicegui.components import page_layout, divider, info_box, COLORS, THEME
+from apps.nicegui.components import (
+    page_layout,
+    divider,
+    info_box,
+    COLORS,
+    THEME,
+    empty_state,
+    page_header,
+)
 
 
 def _strategy_display_name(row: pd.Series) -> str:
@@ -46,8 +54,11 @@ def strategy_page() -> None:
         experiments_df = get_experiments()
 
         if experiments_df.empty:
-            ui.label("No experiments available for analysis.").style(
-                f"color: {THEME['text_secondary']};"
+            page_header("Strategy Analysis")
+            empty_state(
+                "No experiments available",
+                "Run a backtest first to analyze strategy performance.",
+                icon="tune",
             )
             return
 

@@ -32,10 +32,13 @@ from apps.nicegui.components import (
     page_layout,
     kpi_grid,
     divider,
-    export_button,
     apply_chart_theme,
     COLORS,
     THEME,
+    empty_state,
+    page_header,
+    paginated_table,
+    export_menu,
 )
 
 
@@ -45,29 +48,20 @@ def backtest_page() -> None:
         experiments_df = get_experiments()
 
         if experiments_df.empty:
-            ui.label("Backtest Results").classes("text-3xl font-bold mb-4").style(
-                f"color: {THEME['text_primary']};"
+            page_header("Backtest Results")
+            empty_state(
+                "No backtest experiments found",
+                "Run a backtest first to see results here.",
+                action_label="Run Backtest",
+                action_callback=lambda: ui.navigate.to("/"),
+                icon="science",
             )
-            with ui.column().classes("kpi-card p-6"):
-                ui.label("No backtest experiments found.").style(
-                    f"color: {THEME['text_secondary']};"
-                )
-                ui.label("Run a backtest first:").classes("mt-2").style(
-                    f"color: {THEME['text_muted']};"
-                )
-                ui.label("doppler run -- uv run nseml-backtest --universe-size 500").classes(
-                    "font-mono text-sm mt-1 px-3 py-2 rounded"
-                ).style(
-                    f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
-                )
             return
 
-        # Build options: {human-readable label: exp_id}
         exp_options = build_experiment_options(experiments_df)
         labels = list(exp_options.keys())
         first_label = labels[0]
 
-        # ── refreshable content area ──────────────────────────────
         @ui.refreshable
         def render_experiment(exp_id: str) -> None:
             """Render all data for the selected experiment."""
@@ -76,9 +70,10 @@ def backtest_page() -> None:
                 ui.label("Could not load experiment details.").style(f"color: {COLORS['error']};")
                 return
 
-            # Overview KPIs
-            kpi_grid(
-                [
+            page_header(
+                "Backtest Results",
+                f"Experiment: {exp_id[:16]}...",
+                kpi_row=[
                     dict(
                         title="Strategy",
                         value=str(exp.get("strategy_name", "-")),
@@ -98,14 +93,6 @@ def backtest_page() -> None:
                         color=COLORS["success"],
                     ),
                 ],
-                columns=3,
-            )
-
-            divider()
-
-            # Key metrics
-            ui.label("Key Metrics").classes("text-xl font-semibold mb-4").style(
-                f"color: {THEME['text_primary']};"
             )
 
             ret_val = float(exp.get("total_return_pct", 0))
@@ -145,8 +132,8 @@ def backtest_page() -> None:
                 columns=5,
             )
 
-            # Yearly breakdown
             divider()
+
             ui.label("Yearly Breakdown").classes("text-xl font-semibold mb-4").style(
                 f"color: {THEME['text_primary']};"
             )
@@ -179,7 +166,7 @@ def backtest_page() -> None:
                             return f"{float(val):.2f}" if pd.notna(val) else "-"
                         return f"{int(val)}" if pd.notna(val) else "-"
 
-                    ui.table(
+                    paginated_table(
                         columns=[
                             {"name": col, "label": col, "field": col} for col in display_df.columns
                         ],
@@ -187,8 +174,8 @@ def backtest_page() -> None:
                             {col: format_for_display(row[col], col) for col in display_df.columns}
                             for _, row in display_df.iterrows()
                         ],
-                        pagination=20,
-                    ).classes("w-full mb-4")
+                        page_size=10,
+                    )
 
                 if "return_pct" in yearly_df.columns and "year" in yearly_df.columns:
                     fig_yearly = px.bar(
@@ -204,25 +191,25 @@ def backtest_page() -> None:
                     apply_chart_theme(fig_yearly)
                     ui.plotly(fig_yearly).classes("w-full h-64")
 
-            # Load trades
             trades_df = get_experiment_trades(exp_id)
             trades_df = prepare_trades_df(trades_df)
 
             if trades_df.empty:
                 divider()
-                with ui.column().classes("kpi-card p-6"):
-                    ui.label("No trade data available for this experiment.").style(
-                        f"color: {THEME['text_secondary']};"
-                    )
+                empty_state(
+                    "No trade data available",
+                    "This experiment doesn't have any trades.",
+                    icon="receipt_long",
+                )
                 return
 
             divider()
 
             with ui.row().classes("mb-4 gap-2"):
-                export_button(trades_df, f"{exp_id}_all_trades.csv", "Download All Trades")
+                export_menu(trades_df, f"{exp_id}_all_trades", "Export Trades")
 
-            # Analytics tabs
             divider()
+
             ui.label("Trade Analytics").classes("text-xl font-semibold mb-4").style(
                 f"color: {THEME['text_primary']};"
             )
@@ -234,34 +221,55 @@ def backtest_page() -> None:
                 tab_r = ui.tab("R-Multiple")
                 tab_wl = ui.tab("Winners/Losers")
                 tab_stock = ui.tab("Per-Stock")
+                tab_monthly = ui.tab("Monthly Heatmap")
 
             with ui.tab_panels(tabs, value=tab_equity).classes("w-full"):
-                # Equity Curve
                 with ui.tab_panel(tab_equity):
                     if "pnl_pct" in trades_df.columns and "entry_date" in trades_df.columns:
                         equity = trades_df.sort_values("entry_date").copy()
                         equity["cumulative_return"] = equity["pnl_pct"].cumsum()
+                        equity["cummax"] = equity["cumulative_return"].cummax()
+                        equity["drawdown"] = equity["cumulative_return"] - equity["cummax"]
+
+                        def hex_to_rgba(hex_color: str, alpha: float = 0.2) -> str:
+                            hex_color = hex_color.lstrip("#")
+                            r, g, b = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+                            return f"rgba({r},{g},{b},{alpha})"
 
                         fig_eq = go.Figure()
+
+                        fig_eq.add_trace(
+                            go.Scatter(
+                                x=equity["entry_date"],
+                                y=equity["drawdown"],
+                                fill="tozeroy",
+                                fillcolor=hex_to_rgba(COLORS["error"], 0.15),
+                                line_color=COLORS["error"],
+                                name="Drawdown",
+                                hovertemplate="%{x}<br>Drawdown: %{y:.2f}%<extra></extra>",
+                            )
+                        )
+
                         fig_eq.add_trace(
                             go.Scatter(
                                 x=equity["entry_date"],
                                 y=equity["cumulative_return"],
                                 mode="lines",
                                 name="Cumulative Return %",
-                                line=dict(color=COLORS["primary"], width=2),
+                                line=dict(color=COLORS["primary"], width=2.5),
+                                hovertemplate="%{x}<br>Return: %{y:.2f}%<extra></extra>",
                             )
                         )
+
                         fig_eq.update_layout(
-                            title="Equity Curve",
+                            title="Equity Curve with Drawdown",
                             xaxis_title="Date",
-                            yaxis_title="Cumulative Return %",
+                            yaxis_title="Return %",
                             hovermode="x unified",
                         )
                         apply_chart_theme(fig_eq)
                         ui.plotly(fig_eq).classes("w-full h-80")
 
-                # Exit Reasons
                 with ui.tab_panel(tab_exit):
                     if "exit_reason" in trades_df.columns:
                         exit_pnl = (
@@ -289,7 +297,16 @@ def backtest_page() -> None:
                                 ui.plotly(fig_pie).classes("w-full h-64")
 
                             with ui.column().classes("flex-1"):
-                                ui.table(
+                                exit_rows = [
+                                    {
+                                        "exit_reason": row["exit_reason"],
+                                        "count": int(row["count"]),
+                                        "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
+                                        "avg_r_fmt": f"{row['avg_r']:.2f}R",
+                                    }
+                                    for _, row in exit_pnl.iterrows()
+                                ]
+                                paginated_table(
                                     columns=[
                                         {
                                             "name": "exit_reason",
@@ -308,37 +325,65 @@ def backtest_page() -> None:
                                             "field": "avg_r_fmt",
                                         },
                                     ],
-                                    rows=[
-                                        {
-                                            "exit_reason": row["exit_reason"],
-                                            "count": int(row["count"]),
-                                            "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
-                                            "avg_r_fmt": f"{row['avg_r']:.2f}R",
-                                        }
-                                        for _, row in exit_pnl.iterrows()
-                                    ],
-                                ).classes("w-full")
+                                    rows=exit_rows,
+                                    page_size=10,
+                                )
 
-                # R-Multiple
                 with ui.tab_panel(tab_r):
                     if "pnl_r" in trades_df.columns:
                         r_vals = trades_df["pnl_r"].dropna()
                         if len(r_vals) > 0:
                             fig_r = go.Figure()
+
                             fig_r.add_trace(
-                                go.Histogram(x=r_vals, nbinsx=50, marker_color="#6366f1")
+                                go.Histogram(
+                                    x=r_vals,
+                                    nbinsx=50,
+                                    marker_color=COLORS["primary"],
+                                    name="Distribution",
+                                    opacity=0.7,
+                                )
                             )
-                            fig_r.add_vline(x=0, line_dash="dash", line_color=COLORS["error"])
+
+                            mu, sigma = r_vals.mean(), r_vals.std()
+                            if sigma > 0:
+                                x_norm = np.linspace(r_vals.min(), r_vals.max(), 100)
+                                y_norm = (
+                                    pd.Series(x_norm)
+                                    .apply(
+                                        lambda x: (
+                                            (1 / (sigma * np.sqrt(2 * np.pi)))
+                                            * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+                                        )
+                                    )
+                                    .values
+                                )
+                                bin_width = (r_vals.max() - r_vals.min()) / 50
+                                y_norm_scaled = y_norm * len(r_vals) * bin_width
+
+                                fig_r.add_trace(
+                                    go.Scatter(
+                                        x=x_norm,
+                                        y=y_norm_scaled,
+                                        mode="lines",
+                                        name="Normal Dist",
+                                        line=dict(color=COLORS["error"], dash="dash"),
+                                    )
+                                )
+
+                            fig_r.add_vline(x=0, line_dash="dash", line_color=THEME["text_muted"])
                             fig_r.add_vline(
-                                x=r_vals.mean(),
+                                x=mu,
                                 line_dash="dot",
                                 line_color=COLORS["success"],
-                                annotation_text=f"Mean: {r_vals.mean():.2f}R",
+                                annotation_text=f"Mean: {mu:.2f}R",
                             )
+
                             fig_r.update_layout(
                                 title="R-Multiple Distribution",
                                 xaxis_title="R-Multiple",
                                 yaxis_title="Count",
+                                barmode="overlay",
                             )
                             apply_chart_theme(fig_r)
                             ui.plotly(fig_r).classes("w-full h-64")
@@ -355,7 +400,7 @@ def backtest_page() -> None:
                                     {"Percentile": "Max", "Value": f"{r_vals.max():.2f}R"},
                                 ]
                             )
-                            ui.table(
+                            paginated_table(
                                 columns=[
                                     {
                                         "name": "Percentile",
@@ -365,9 +410,9 @@ def backtest_page() -> None:
                                     {"name": "Value", "label": "R-Multiple", "field": "Value"},
                                 ],
                                 rows=pct_data,
-                            ).classes("w-full mt-4")
+                                page_size=10,
+                            )
 
-                # Winners/Losers — includes entry_time, exit_time, holding_days, exit_date
                 with ui.tab_panel(tab_wl):
                     if "pnl_pct" in trades_df.columns:
                         trade_cols = [
@@ -430,7 +475,6 @@ def backtest_page() -> None:
                                     pagination=5,
                                 ).classes("w-full")
 
-                # Per-Stock
                 with ui.tab_panel(tab_stock):
                     if "symbol" in trades_df.columns and "pnl_pct" in trades_df.columns:
                         stock_stats = (
@@ -448,7 +492,21 @@ def backtest_page() -> None:
                             .sort_values("total_pnl", ascending=False)
                         )
 
-                        ui.table(
+                        stock_rows = [
+                            {
+                                "symbol": row["symbol"],
+                                "trades_fmt": f"{int(row['trades'])}",
+                                "total_pnl_fmt": f"{row['total_pnl']:.2f}%",
+                                "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
+                                "avg_r_fmt": f"{row['avg_r']:.2f}R",
+                                "win_rate_fmt": f"{row['win_rate']:.1f}%",
+                                "best_fmt": f"{row['best']:.1f}%",
+                                "worst_fmt": f"{row['worst']:.1f}%",
+                            }
+                            for _, row in stock_stats.head(50).iterrows()
+                        ]
+
+                        paginated_table(
                             columns=[
                                 {"name": "symbol", "label": "Symbol", "field": "symbol"},
                                 {"name": "trades", "label": "Trades", "field": "trades_fmt"},
@@ -459,23 +517,55 @@ def backtest_page() -> None:
                                 {"name": "best", "label": "Best", "field": "best_fmt"},
                                 {"name": "worst", "label": "Worst", "field": "worst_fmt"},
                             ],
-                            rows=[
-                                {
-                                    "symbol": row["symbol"],
-                                    "trades_fmt": f"{int(row['trades'])}",
-                                    "total_pnl_fmt": f"{row['total_pnl']:.2f}%",
-                                    "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
-                                    "avg_r_fmt": f"{row['avg_r']:.2f}R",
-                                    "win_rate_fmt": f"{row['win_rate']:.1f}%",
-                                    "best_fmt": f"{row['best']:.1f}%",
-                                    "worst_fmt": f"{row['worst']:.1f}%",
-                                }
-                                for _, row in stock_stats.head(20).iterrows()
-                            ],
-                            pagination=10,
-                        ).classes("w-full")
+                            rows=stock_rows,
+                            page_size=15,
+                        )
 
-            # Run new backtest
+                with ui.tab_panel(tab_monthly):
+                    if "entry_date" in trades_df.columns and "pnl_pct" in trades_df.columns:
+                        trades_df_copy = trades_df.copy()
+                        trades_df_copy["year"] = pd.to_datetime(
+                            trades_df_copy["entry_date"]
+                        ).dt.year
+                        trades_df_copy["month"] = pd.to_datetime(
+                            trades_df_copy["entry_date"]
+                        ).dt.month
+
+                        monthly_pivot = trades_df_copy.pivot_table(
+                            index="year",
+                            columns="month",
+                            values="pnl_pct",
+                            aggfunc="sum",
+                            fill_value=0,
+                        )
+
+                        monthly_pivot = monthly_pivot.reindex(columns=range(1, 13))
+
+                        fig = px.imshow(
+                            monthly_pivot,
+                            labels=dict(x="Month", y="Year", color="Return %"),
+                            x=[
+                                "Jan",
+                                "Feb",
+                                "Mar",
+                                "Apr",
+                                "May",
+                                "Jun",
+                                "Jul",
+                                "Aug",
+                                "Sep",
+                                "Oct",
+                                "Nov",
+                                "Dec",
+                            ],
+                            color_continuous_scale=[COLORS["error"], "#f1f5f9", COLORS["success"]],
+                            color_continuous_midpoint=0,
+                            title="Monthly Returns Heatmap",
+                        )
+                        fig.update_xaxes(side="top")
+                        apply_chart_theme(fig)
+                        ui.plotly(fig).classes("w-full h-80")
+
             divider()
             with ui.expansion("Run New Backtest", icon="play_arrow").classes("w-full"):
                 ui.label("Configure and launch a new backtest run.").classes("mb-4").style(
@@ -498,7 +588,6 @@ def backtest_page() -> None:
                     "text-sm mt-2"
                 ).style(f"color: {THEME['text_muted']};")
 
-        # ── experiment selector (outside refreshable) ─────────────
         with ui.row().classes("kpi-card w-full items-center gap-4 mb-6"):
             ui.icon("science").classes("text-xl").style(f"color: {THEME['primary']};")
             ui.label("Experiment").classes("text-sm font-medium").style(
@@ -517,5 +606,4 @@ def backtest_page() -> None:
                 on_change=on_select,
             ).classes("flex-grow")
 
-        # Initial render with first (latest) experiment
         render_experiment(exp_options[first_label])
