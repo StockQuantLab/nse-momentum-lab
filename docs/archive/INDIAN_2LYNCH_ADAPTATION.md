@@ -274,7 +274,7 @@ STOP/EXIT:
 | Win Rate | 37.8% |
 | Profitable Years | 10/10 (2015-2024) |
 
-See [BACKTEST_RESULTS.md](../../BACKTEST_RESULTS.md) for full yearly breakdown.
+See [RESULTS.md](../RESULTS.md) for full yearly breakdown.
 
 ---
 

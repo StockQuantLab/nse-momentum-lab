@@ -3,7 +3,7 @@
 from datetime import date
 
 from nse_momentum_lab.db.market_db import get_market_db
-from nse_momentum_lab.services.backtest.vectorbt_engine import VectorBTEngine, VectorBTConfig
+from nse_momentum_lab.services.backtest.vectorbt_engine import VectorBTConfig, VectorBTEngine
 
 
 def main():
@@ -43,7 +43,7 @@ def main():
         end_date=end_date,
     )
 
-    print(f"\nData loaded successfully!")
+    print("\nData loaded successfully!")
     print(f"  Market data: {sum(len(v) for v in market_data.values()):,} candles")
     print(f"  Features: {sum(len(v) for v in features.values()):,} feature-records")
 

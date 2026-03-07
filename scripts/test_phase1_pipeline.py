@@ -30,6 +30,7 @@ if sys.platform == "win32":
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from nse_momentum_lab.services.adjust.worker import AdjustmentWorker
 from sqlalchemy import func, select
 
 from nse_momentum_lab.db import get_sessionmaker
@@ -40,7 +41,6 @@ from nse_momentum_lab.db.models import (
     RefSymbol,
     ScanResult,
 )
-from nse_momentum_lab.services.adjust.worker import AdjustmentWorker
 from nse_momentum_lab.services.backtest.registry import ExperimentRegistry
 from nse_momentum_lab.services.scan.worker import ScanWorker
 

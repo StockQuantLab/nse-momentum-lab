@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import numpy as np
+
 from nse_momentum_lab.db.market_db import get_market_db
 
 
@@ -114,7 +115,7 @@ def fix_r2_for_symbol(db, symbol: str) -> int:
         batch_dates = dates[i:batch_end]
         batch_r2 = r2_values[i:batch_end]
 
-        for trading_date, r2_val in zip(batch_dates, batch_r2):
+        for trading_date, r2_val in zip(batch_dates, batch_r2, strict=False):
             db.con.execute("""
                 UPDATE feat_daily
                 SET r2_65 = ?
@@ -143,7 +144,7 @@ def main():
     symbols = [row[0] for row in symbols_result]
 
     print(f"\nProcessing {len(symbols)} symbols...")
-    print(f"This will take approximately 10-15 minutes...\n")
+    print("This will take approximately 10-15 minutes...\n")
 
     total_updates = 0
 

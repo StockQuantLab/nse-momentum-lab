@@ -45,8 +45,8 @@ def main():
 
     # Sample feature data
     if features:
-        first_symbol = list(features.keys())[0]
-        first_date = list(features[first_symbol].keys())[0]
+        first_symbol = next(iter(features.keys()))
+        first_date = next(iter(features[first_symbol].keys()))
         print(f"\nSample features for {first_symbol} on {first_date}:")
         for key, value in features[first_symbol][first_date].items():
             if value is not None:

@@ -180,7 +180,7 @@ DuckDB Queries
     └──▶ PostgreSQL (bt_trade, exp_metric)
             │
             ▼
-        Streamlit UI + AI Agent
+        NiceGUI UI + AI Agent
 ```
 
 ### Phase 2: Query Layer

@@ -1,6 +1,7 @@
 # ADR-001: Market Data Sources & Licensing
 
-Status: Accepted
+**Status**: Accepted
+**Date**: 2026-02-15
 
 ## Context
 

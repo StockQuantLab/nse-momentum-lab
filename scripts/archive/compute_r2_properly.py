@@ -9,9 +9,8 @@ Estimated time: 15-20 minutes
 
 import sys
 from pathlib import Path
-from datetime import date
+
 import numpy as np
-from tqdm import tqdm
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -28,7 +27,7 @@ def compute_r2_for_all_symbols():
     db = get_market_db()
 
     # Check current state
-    print(f"\n[CHECKING CURRENT STATE]")
+    print("\n[CHECKING CURRENT STATE]")
     total_rows = db.con.execute("SELECT COUNT(*) FROM feat_daily").fetchone()[0]
     r2_zero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL").fetchone()[0]
     r2_nonzero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 > 0").fetchone()[0]
@@ -38,14 +37,14 @@ def compute_r2_for_all_symbols():
     print(f"  R² > 0: {r2_nonzero_count:,}")
 
     if r2_nonzero_count > 1000:
-        print(f"\n  R² appears to already be computed!")
+        print("\n  R² appears to already be computed!")
         response = input("  Re-compute anyway? (y/N): ").strip().lower()
         if response != 'y':
             print("  Aborted.")
             return
 
     # Get all symbols
-    print(f"\n[LOADING SYMBOLS]")
+    print("\n[LOADING SYMBOLS]")
     symbols_result = db.con.execute("SELECT DISTINCT symbol FROM v_daily ORDER BY symbol").fetchall()
     all_symbols = [row[0] for row in symbols_result]
     print(f"  Total symbols: {len(all_symbols)}")
@@ -61,9 +60,9 @@ def compute_r2_for_all_symbols():
         print("  Column r2_computed already exists, continuing...")
 
     # Process each symbol
-    print(f"\n[COMPUTING R² VALUES]")
+    print("\n[COMPUTING R² VALUES]")
     print(f"  Processing {total_symbols} symbols in batches of {batch_size}...")
-    print(f"  Estimated time: 15-20 minutes", flush=True)
+    print("  Estimated time: 15-20 minutes", flush=True)
 
     completed_symbols = []
     failed_symbols = []
@@ -136,7 +135,7 @@ def compute_r2_for_all_symbols():
         print(f"    Completed: {len(completed_symbols)}/{total_symbols}", flush=True)
 
     # Final verification
-    print(f"\n[VERIFICATION]")
+    print("\n[VERIFICATION]")
     r2_zero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL").fetchone()[0]
     r2_nonzero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 > 0").fetchone()[0]
     r2_null_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 IS NULL").fetchone()[0]
@@ -147,8 +146,8 @@ def compute_r2_for_all_symbols():
     print(f"  Computed: {db.con.execute('SELECT COUNT(*) FROM feat_daily WHERE r2_computed = TRUE').fetchone()[0]:,}")
 
     # Show sample R² values
-    print(f"\n[SAMPLE R² VALUES]")
-    print(f"  Top 10 highest R² (most linear):")
+    print("\n[SAMPLE R² VALUES]")
+    print("  Top 10 highest R² (most linear):")
     sample = db.con.execute("""
         SELECT symbol, trading_date, r2_65
         FROM feat_daily
@@ -160,7 +159,7 @@ def compute_r2_for_all_symbols():
     for i, row in enumerate(sample):
         print(f"    {i+1}. {row[0]} @ {row[1]}: R² = {row[2]:.4f}")
 
-    print(f"\n  Bottom 10 R² (least linear / most choppy):")
+    print("\n  Bottom 10 R² (least linear / most choppy):")
     sample = db.con.execute("""
         SELECT symbol, trading_date, r2_65
         FROM feat_daily
@@ -172,24 +171,24 @@ def compute_r2_for_all_symbols():
     for i, row in enumerate(sample):
         print(f"    {i+1}. {row[0]} @ {row[1]}: R² = {row[2]:.4f}")
 
-    print(f"\n  [FAILED SYMBOLS]")
+    print("\n  [FAILED SYMBOLS]")
     if failed_symbols:
         print(f"    Failed: {len(failed_symbols)}")
         for symbol, error in failed_symbols[:5]:
             print(f"      - {symbol}: {error}")
     else:
-        print(f"    All symbols processed successfully!")
+        print("    All symbols processed successfully!")
 
     # Drop temporary column
-    print(f"\n[CLEANUP]")
+    print("\n[CLEANUP]")
     db.con.execute("ALTER TABLE feat_daily DROP COLUMN IF EXISTS r2_computed")
 
     print(f"\n{'=' * 80}")
-    print(f"R² COMPUTATION COMPLETE")
+    print("R² COMPUTATION COMPLETE")
     print(f"{'=' * 80}")
     print(f"\n  {len(completed_symbols)} symbols processed successfully")
     print(f"  {r2_nonzero_count:,} R² values computed")
-    print(f"\n  Ready for proper 2LYNCH filtering!")
+    print("\n  Ready for proper 2LYNCH filtering!")
     print(f"{'=' * 80}\n")
 
 
@@ -226,7 +225,7 @@ def compute_r2_vectorized(closes: np.ndarray, period: int = 65) -> np.ndarray:
             sum_y = np.sum(window)
             sum_xy = np.sum(x * window)
             sum_x2 = np.sum(x ** 2)
-            sum_y2 = np.sum(window ** 2)
+            np.sum(window ** 2)
 
             # Calculate slope and intercept
             denominator = (n_points * sum_x2 - sum_x ** 2)
@@ -247,7 +246,7 @@ def compute_r2_vectorized(closes: np.ndarray, period: int = 65) -> np.ndarray:
             else:
                 r2[i] = 1.0 - (ss_res / ss_tot)
 
-        except Exception as e:
+        except Exception:
             r2[i] = 0.0
 
     return r2

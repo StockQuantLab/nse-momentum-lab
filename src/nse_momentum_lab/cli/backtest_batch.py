@@ -13,12 +13,17 @@ from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
     BacktestParams,
     DuckDBBacktestRunner,
 )
+from nse_momentum_lab.services.backtest.strategy_registry import list_strategies, resolve_strategy
 from nse_momentum_lab.utils import compute_short_hash
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run backtests year-by-year with checkpoint/resume support"
+    )
+    parser.add_argument("--strategy", type=str, default="indian_2lynch", help="Strategy name")
+    parser.add_argument(
+        "--list-strategies", action="store_true", help="List available strategies and exit"
     )
     parser.add_argument("--start-year", type=int, default=2015)
     parser.add_argument("--end-year", type=int, default=2025)
@@ -66,10 +71,6 @@ def _parse_optional_iso_date(value: str | None, field_name: str) -> date | None:
         raise ValueError(f"{field_name} must be in YYYY-MM-DD format") from exc
 
 
-def _compute_batch_id(payload: dict[str, Any]) -> str:
-    return compute_short_hash(payload, length=16)
-
-
 def _write_checkpoint(path: Path, state: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile("w", encoding="utf-8", delete=False, dir=path.parent) as tmp:
@@ -100,6 +101,16 @@ def _year_window(
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    if args.list_strategies:
+        for strategy in list_strategies():
+            print(f"{strategy.name} ({strategy.version}) - {strategy.description}")
+        return
+
+    try:
+        resolve_strategy(args.strategy)  # validate strategy name before any I/O or checkpointing
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     global_start = _parse_optional_iso_date(args.start_date, "start_date")
     global_end = _parse_optional_iso_date(args.end_date, "end_date")
     if global_start and global_end and global_start > global_end:
@@ -108,6 +119,7 @@ def main() -> None:
         raise SystemExit("start_year must be <= end_year")
 
     batch_fingerprint = {
+        "strategy": args.strategy,
         "start_year": args.start_year,
         "end_year": args.end_year,
         "start_date": args.start_date,
@@ -124,7 +136,7 @@ def main() -> None:
         "abnormal_gap_exit_pct": args.abnormal_gap_exit_pct,
         "snapshot": bool(args.snapshot),
     }
-    batch_id = _compute_batch_id(batch_fingerprint)
+    batch_id = compute_short_hash(batch_fingerprint, length=16)
     checkpoint_file = (
         Path(args.checkpoint_file).expanduser()
         if args.checkpoint_file
@@ -153,6 +165,7 @@ def main() -> None:
 
     print(f"[BATCH] id={batch_id} years={args.start_year}-{args.end_year}")
     print(f"[BATCH] checkpoint={checkpoint_file}")
+    print(f"[BATCH] strategy={args.strategy}")
     print(f"[BATCH] already completed={len(completed)} failed={len(failed)}")
 
     for year in years:
@@ -168,6 +181,7 @@ def main() -> None:
         year_start, year_end = window
 
         year_params = BacktestParams(
+            strategy=args.strategy,
             universe_size=args.universe_size,
             min_price=args.min_price,
             min_filters=args.min_filters,

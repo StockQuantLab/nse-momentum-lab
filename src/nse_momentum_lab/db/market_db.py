@@ -113,6 +113,7 @@ class MarketDataDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.con = duckdb.connect(str(db_path), read_only=read_only)
+        self._read_only = read_only
         self._parquet_dir = self.lake.local_parquet_dir
         self._data_source = self.lake.mode
         self._five_min_glob = ""
@@ -120,7 +121,8 @@ class MarketDataDB:
         self._has_5min = False
         self._has_daily = False
         self._setup()
-        self._ensure_backtest_tables()
+        if not self._read_only:
+            self._ensure_backtest_tables()
 
     @staticmethod
     def _sql_literal(value: str) -> str:
@@ -171,9 +173,11 @@ class MarketDataDB:
         if file_count is not None and file_count == 0:
             return False
 
+        # In read-only mode, use TEMP VIEW so no write is attempted on the DB file.
+        view_qualifier = "TEMP VIEW" if self._read_only else "VIEW"
         try:
             self.con.execute(f"""
-                CREATE OR REPLACE VIEW {view_name} AS
+                CREATE OR REPLACE {view_qualifier} {view_name} AS
                 SELECT * FROM read_parquet('{self._sql_literal(glob_path)}', hive_partitioning=false)
             """)
             # Validate that the view is queryable.
@@ -586,8 +590,8 @@ class MarketDataDB:
     def list_experiments(self) -> pl.DataFrame:
         """List all experiments ordered by creation time."""
         return self.con.execute(
-            """SELECT exp_id, strategy_name, params_hash, dataset_hash, code_hash, data_source,
-                      start_year, end_year, total_return_pct, annualized_return_pct,
+            """SELECT exp_id, strategy_name, params_json, params_hash, dataset_hash, code_hash,
+                      data_source, start_year, end_year, total_return_pct, annualized_return_pct,
                       total_trades, win_rate_pct, max_drawdown_pct, status, created_at
                FROM bt_experiment ORDER BY created_at DESC"""
         ).pl()
@@ -842,18 +846,103 @@ class MarketDataDB:
             FROM breakouts
         """)
 
-    def build_all(self, force: bool = False) -> None:
-        """Build all materialized tables."""
+    def build_all(self, force: bool = False, use_modular: bool = True) -> None:
+        """Build all materialized tables.
+
+        Args:
+            force: Force rebuild even if up-to-date
+            use_modular: Use new modular feature store (default: True).
+                        Set False for legacy monolithic feat_daily behavior.
+        """
         logger.info("Building materialized feature tables...")
-        self.build_feat_daily_table(force=force)
+        if use_modular:
+            self._build_modular_features(force=force)
+        else:
+            self.build_feat_daily_table(force=force)
         logger.info("Done: market.duckdb is ready for backtesting.")
 
-    def drop_and_rebuild(self) -> None:
-        """Drop all materialized tables and rebuild from Parquet."""
+    def _build_modular_features(self, force: bool = False) -> None:
+        """Build modular feature store (feat_daily_core, feat_intraday_core, etc.)."""
+        from nse_momentum_lab.features import (
+            IncrementalFeatureMaterializer,
+            create_legacy_feat_daily_view,
+        )
+
+        materializer = IncrementalFeatureMaterializer()
+        summary = materializer.build_all(self.con, force=force, stop_on_error=False)
+
+        logger.info(
+            "Feature build complete: %d success, %d skipped, %d failed in %.1fs",
+            summary.successful,
+            summary.skipped,
+            summary.failed,
+            summary.total_duration_seconds,
+        )
+
+        # Create backward-compatible feat_daily view
+        create_legacy_feat_daily_view(self.con)
+        logger.info("Created backward-compatible feat_daily view")
+
+    def build_feat_daily_core(self, force: bool = False) -> int:
+        """Build feat_daily_core materialized table.
+
+        This is the new modular feature store approach.
+        Returns the row count of the built table.
+        """
+        from nse_momentum_lab.features.daily_core import build_feat_daily_core
+
+        return build_feat_daily_core(self.con, force=force)
+
+    def build_feat_intraday_core(self, force: bool = False) -> int:
+        """Build feat_intraday_core materialized table.
+
+        Returns the row count of the built table.
+        """
+        from nse_momentum_lab.features.intraday_core import build_feat_intraday_core
+
+        return build_feat_intraday_core(self.con, force=force)
+
+    def build_feat_event_core(self, force: bool = False) -> int:
+        """Build feat_event_core materialized table (placeholder).
+
+        Returns the row count of the built table.
+        """
+        from nse_momentum_lab.features.event_core import build_feat_event_core
+
+        return build_feat_event_core(self.con, force=force)
+
+    def build_2lynch_derived(self, force: bool = False) -> int:
+        """Build feat_2lynch_derived materialized table.
+
+        Returns the row count of the built table.
+        """
+        from nse_momentum_lab.features.strategy_derived import build_2lynch_derived
+
+        return build_2lynch_derived(self.con, force=force)
+
+    def drop_and_rebuild(self, use_modular: bool = True) -> None:
+        """Drop all materialized tables and rebuild from Parquet.
+
+        Args:
+            use_modular: Drop and rebuild modular feature store tables.
+        """
         logger.info("Dropping and rebuilding all materialized tables...")
-        for table in ["feat_daily"]:
-            self.con.execute(f"DROP TABLE IF EXISTS {table}")
-        self.build_all(force=True)
+
+        if use_modular:
+            # Drop new modular feature tables
+            for table in [
+                "feat_2lynch_derived",
+                "feat_intraday_core",
+                "feat_event_core",
+                "feat_daily_core",
+            ]:
+                self.con.execute(f"DROP TABLE IF EXISTS {table}")
+            self.build_all(force=True, use_modular=True)
+        else:
+            # Legacy behavior
+            for table in ["feat_daily"]:
+                self.con.execute(f"DROP TABLE IF EXISTS {table}")
+            self.build_all(force=True, use_modular=False)
 
     def query_5min(
         self,
@@ -1089,6 +1178,10 @@ class MarketDataDB:
             "tables": tables_status,
         }
         for table in [
+            "feat_daily_core",
+            "feat_intraday_core",
+            "feat_event_core",
+            "feat_2lynch_derived",
             "feat_daily",
             "bt_experiment",
             "bt_trade",
@@ -1134,6 +1227,40 @@ class MarketDataDB:
 
         return status
 
+    def get_feature_status(self) -> dict:
+        """Get status of all feature sets from the feature registry."""
+        from nse_momentum_lab.features import get_feature_registry
+        from nse_momentum_lab.features.materializer import IncrementalFeatureMaterializer
+
+        registry = get_feature_registry()
+        materializer = IncrementalFeatureMaterializer(registry)
+
+        features = {}
+        for feat_def in registry.list_all():
+            state = materializer.get_feature_state(self.con, feat_def.name)
+            if state:
+                features[feat_def.name] = {
+                    "name": feat_def.name,
+                    "version": feat_def.version,
+                    "layer": feat_def.layer,
+                    "row_count": state.row_count,
+                    "min_date": state.min_date.isoformat() if state.min_date else None,
+                    "max_date": state.max_date.isoformat() if state.max_date else None,
+                    "status": state.status,
+                }
+            else:
+                features[feat_def.name] = {
+                    "name": feat_def.name,
+                    "version": feat_def.version,
+                    "layer": feat_def.layer,
+                    "status": "not_built",
+                }
+
+        return {
+            "features": features,
+            "total_count": len(features),
+        }
+
     def close(self) -> None:
         self.con.close()
 
@@ -1147,11 +1274,15 @@ class MarketDataDB:
 _db: MarketDataDB | None = None
 
 
-def get_market_db() -> MarketDataDB:
-    """Return the global MarketDataDB instance (creates on first call)."""
+def get_market_db(read_only: bool = False) -> MarketDataDB:
+    """Return the global MarketDataDB instance (creates on first call).
+
+    Pass read_only=True for read-only consumers (e.g. dashboard) so they can
+    coexist with a running backtest writer without hitting the DuckDB lock.
+    """
     global _db
     if _db is None:
-        _db = MarketDataDB()
+        _db = MarketDataDB(read_only=read_only)
     return _db
 
 

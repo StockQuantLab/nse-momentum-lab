@@ -84,6 +84,11 @@ def ensure_integration_services_available() -> None:
         with psycopg.connect(str(settings.database_url), connect_timeout=3) as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
+                cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'nseml'")
+                row = cur.fetchone()
+                schema_table_count = int(row[0] or 0) if row is not None else 0
+                if schema_table_count == 0:
+                    pytest.skip("Integration DB schema missing: nseml tables not initialized")
     except Exception as exc:
         pytest.skip(f"Integration DB unavailable: {exc}")
 
@@ -204,12 +209,12 @@ async def sample_scan_run(
     sample_symbols: list[RefSymbol],
 ) -> ScanRun:
     """Create a sample scan run with results."""
-    from hashlib import sha256
+    from nse_momentum_lab.utils import compute_short_hash
 
     scan_run = ScanRun(
         scan_def_id=1,
         asof_date=date(2024, 1, 19),
-        dataset_hash=sha256(b"test_dataset").hexdigest()[:16],
+        dataset_hash=compute_short_hash(b"test_dataset", length=16),
         status="COMPLETED",
         started_at=datetime(2024, 1, 19, 18, 0),
         finished_at=datetime(2024, 1, 19, 18, 5),

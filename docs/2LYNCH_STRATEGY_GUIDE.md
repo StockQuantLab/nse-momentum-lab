@@ -1,117 +1,342 @@
-# NSE Momentum Lab - 2LYNCH Strategy Implementation
+# NSE Momentum Lab — 2LYNCH Strategy Guide
 
-**Status**: PRODUCTION READY (Indian Market Adapted)
-**Last Updated**: 2026-03-02
+**Status**: PRODUCTION READY
+**Last Updated**: 2026-03-07
+**Baseline**: exp `429c79ac45b65086` — Calmar 43.67, Ann Ret 193.9%, Max DD 4.4%
+
+---
+
+## What Is 2LYNCH?
+
+2LYNCH is an **intraday momentum burst** strategy from Stockbee (US), adapted for NSE equities. The core idea: stocks that gap up 4%+ on a breakout day with specific quality conditions tend to continue higher within the first hour of trading.
+
+**The 2LYNCH filter stack is the golden standard for ALL breakout variants in this system.** Every strategy in this repo — regardless of threshold — applies the same 6 filters. The threshold (4%, 2%, etc.) is a parameter; the filters are non-negotiable.
 
 ---
 
 ## Indian Market Adaptations
 
-This strategy is adapted from Stockbee's US-market "4% breakout / momentum burst" approach for Indian (NSE) equities. See [INDIAN_2LYNCH_ADAPTATION.md](docs/INDIAN_2LYNCH_ADAPTATION.md) for full rationale.
+Adapted from Stockbee's US-market approach for NSE equities. Full rationale: [INDIAN_2LYNCH_ADAPTATION.md](archive/INDIAN_2LYNCH_ADAPTATION.md).
 
-| Parameter | US (Stockbee) | India (NSE) | Why? |
-|-----------|---------------|-------------|------|
-| Min Price | $3 | **Rs.10** | Filters penny stocks while keeping small-cap universe |
-| Volume | 100,000 shares | **Rs.30 lakh value** | Value-traded is market-appropriate |
-| Gap Threshold | 4% | 4% | Same - momentum is universal |
-| Filters Required | All 6 | **5 of 6** | Higher selectivity, better risk-adjusted returns |
+| Parameter | US (Stockbee) | India (NSE) | Why |
+|-----------|---------------|-------------|-----|
+| Min Price | $3 | **Rs. 10** | Filters penny stocks while keeping small-cap universe |
+| Liquidity | 100,000 shares | **Rs. 30L value-traded** | Value-traded is more market-appropriate than raw share count |
+| Gap Threshold | 4% | 4% (configurable) | Momentum is universal; threshold is a research parameter |
+| Filters Required | All 6 | **5 of 6** | Higher selectivity, better risk-adjusted returns in India |
 
 ---
 
-## Performance (2015-2025, Full Universe ~1,776 Stocks)
+## Production Performance (2015–2025)
+
+Full NSE universe (~1,820 stocks), 60-min FEE window.
+
+### All Strategy Variants — Validated Results (2026-03-07)
+
+| Strategy | Threshold | Dir | Trades | Win% | Ann Ret | Max DD | Calmar | Total Ret |
+|----------|-----------|-----|--------|------|---------|--------|--------|-----------|
+| **Indian2LYNCH** | 4% | LONG | **7,073** | **51.3%** | **193.9%** | **4.44%** | **43.67** | **2132%** |
+| 2LYNCHBreakout | 4% | LONG | 7,073 | 51.3% | 193.9% | 4.44% | 43.67 | 2132% |
+| 2LYNCHBreakout | 2% | LONG | 18,657 | 45.8% | 338.7% | 5.75% | **58.94** | 3725% |
+| 2LYNCHBreakdown | 4% | SHORT | 4,717 | 38.9% | 61.4% | 36.69% | 1.67 | 675% |
+| 2LYNCHBreakdown | 2% | SHORT | 23,252 | 39.5% | 286.2% | 23.15% | 12.36 | 3148% |
+
+**Key validation**: Indian2LYNCH and 2LYNCHBreakout at 4% are **identical** — same trades, same year-by-year returns, same every metric. This confirms the 2LYNCH filter stack is correctly shared across all breakout variants.
+
+**Key insight on 2% breakout**: Lower threshold generates more signals (18,657 vs 7,073) but the 2LYNCH filter stack maintains quality — Calmar 58.94 beats 4% (43.67). The filter stack, not the threshold, drives the edge.
+
+**Short side note**: Breakdown strategies have structurally lower win rates (38–39% vs 51%) in a 10-year bull market (2015–2025). 2LYNCHBreakdown 2% (Calmar 12.36) is more viable than 4% (Calmar 1.67). Short strategies perform better in bear/choppy regimes.
+
+### Production Baseline (Indian2LYNCH)
 
 | Metric | Value |
 |--------|-------|
-| Total Return | **1,939%** (10 years) |
+| Total Return | **2,132%** |
 | Annualized Return | **193.9%** |
 | Win Rate | 51.3% |
 | Max Drawdown | **4.4%** |
 | Calmar Ratio | **43.67** |
 | Total Trades | 7,073 |
-| FEE Window | 60 min (entry cutoff: 09:15-10:15 IST) |
+| FEE Window | 60 min (09:15–10:15 IST) |
 | Experiment ID | `429c79ac45b65086` |
 
 ---
 
-## Architecture
+## The 6 Filters — The Core Edge
 
+Six quality filters applied to every breakout signal. **Require 5 of 6 to pass**.
+
+Filters are computed **inline in the candidate SQL query** using `feat_daily` for pre-computed features and inline `LAG()` functions for same-day context.
+
+### Filter H — Close Near High
+
+> "Strong buying pressure: stock closed near its day's high."
+
+```sql
+close_pos_in_range >= 0.70
+-- where close_pos_in_range = (close - low) / (high - low)
 ```
-DuckDB + Parquet (data layer)
-    |
-    v
-Signal Generation SQL (2LYNCH filters applied in DuckDB)
-    |
-    v
-VectorBTEngine (trade simulation with stops/exits)
-    |
-    v
-DuckDB result storage (bt_experiment / bt_trade / bt_yearly_metric)
-    |
-    v
-Streamlit Dashboard (pages/15_Backtest_Results.py)
+
+For SHORT (breakdown): `close_pos_in_range <= 0.30` (closed near the day's low).
+
+---
+
+### Filter N — Narrow / Negative T-1
+
+> "The day before the breakout was compressed or red — a 'coiled spring' setup."
+
+```sql
+(prev_high - prev_low) < (atr_20 * 0.5)   -- narrow range
+OR prev_close < prev_open                   -- OR red day
+```
+
+This is evaluated on T-1 (the day before the breakout), not on the breakout day itself.
+For SHORT: `OR prev_close > prev_open` (T-1 was a green/up day before the breakdown).
+
+---
+
+### Filter 2 — Not Up 2 Days in a Row
+
+> "Avoids chasing already-extended moves. At least one of the two days before the breakout must be flat or down."
+
+```sql
+ret_1d_lag1 <= 0 OR ret_1d_lag2 <= 0
+-- ret_1d_lag1 = return of T-1, ret_1d_lag2 = return of T-2
+-- computed inline: (close[T-1] - close[T-2]) / close[T-2]
+```
+
+**This is the most selective filter in trending markets.** In a strong bull run, many stocks have been up 3–5 days in a row; filter_2 eliminates them cleanly.
+
+**Implementation note**: `ret_1d_lag1` and `ret_1d_lag2` are computed **inline in the SQL CTE** using `LAG(close, 2)` and `LAG(close, 3)`. They are **not** from `feat_daily`. Adding `AND ret_1d_lag1 IS NOT NULL` to the candidate query ensures at least 4 rows of price history before the signal day.
+
+For SHORT: `ret_1d_lag1 >= 0 OR ret_1d_lag2 >= 0` — at least one of the last 2 days was UP. This avoids shorting a stock already in a free-fall cascade.
+
+---
+
+### Filter Y — Young Breakout
+
+> "First breakouts from consolidation succeed more than 4th or 5th repeated breakouts."
+
+```sql
+COALESCE(prior_breakouts_30d, 0) <= 2
+-- prior_breakouts_30d = count of 4%+ daily returns in the last 30 trading days
+-- pre-computed in feat_daily
 ```
 
 ---
 
-## 2LYNCH Filters
+### Filter C — Consolidation / Volume Dry-Up
 
-Six quality filters applied to each 4% gap-up signal. Require 5/6 to pass.
+> "Below-average volume before the breakout confirms accumulation, not distribution."
 
-### H - Close Near High
-Close position in the day's range >= 0.70 (close near the high = strong buying pressure).
+```sql
+vol_dryup_ratio < 1.3
+-- vol_dryup_ratio = today's volume / 20-day avg volume
+-- pre-computed in feat_daily
+```
 
-### N - Narrow Range / Negative Day (T-1)
-The day before the breakout should show compression:
-- `(prev_high - prev_low) < 0.5 * ATR_20` (narrow range), OR
-- `prev_close < prev_open` (negative/red day)
+---
 
-This confirms a "coiled spring" setup before the gap.
+### Filter L — Trend Quality
 
-### 2 - Not Up 2 Days in Row
-At least one of the two days before the breakout must be flat or down:
-- `ret_1d_lag1 <= 0 OR ret_1d_lag2 <= 0`
+> "The stock is in an orderly uptrend, not a random walk."
 
-Avoids entering already-extended moves.
+```sql
+(CAST(close > ma_20 AS INTEGER)
+ + CAST(ret_5d > 0 AS INTEGER)
+ + CAST(COALESCE(NULLIF(r2_65, 0), 0) >= 0.70 AS INTEGER)) >= 2
+```
 
-### Y - Young Breakout
-Max 2 prior 4%+ breakouts in the last 30 days:
-- `prior_breakouts_30d <= 2`
+Requires 2 of 3 sub-conditions:
+1. `close > ma_20` — above 20-day moving average
+2. `ret_5d > 0` — positive 5-day momentum
+3. `r2_65 >= 0.70` — R² of 65-day linear regression ≥ 0.70 (orderly trend)
 
-First breakouts from consolidation succeed more; later ones fail.
+**Note on TI65**: The original Stockbee filter uses `TI65 = MA7/MA65 >= 1.05`. This implementation uses the 2-of-3 check as an equivalent. TI65 is available as `ma_7/ma_65_sma` in features but is NOT used as a same-day entry filter — breakouts often fire before TI65 is established.
 
-### C - Consolidation / Volume Dryup
-Volume below average before breakout (consolidation):
-- `vol_dryup_ratio < 1.3`
+For SHORT: `close < ma_20`, `ret_5d < 0`, R² still ≥ 0.70 (orderly downtrend).
 
-### L - Trend Quality
-Requires 2 of 3 sub-checks:
-1. Close above 20-day MA
-2. Positive 5-day momentum
-3. R-squared of 65-day trend >= 0.70
+---
+
+## Filter Summary Table
+
+| Letter | Name | LONG condition | SHORT condition | Source |
+|--------|------|---------------|-----------------|--------|
+| **H** | Close Near High | `close_pos_in_range >= 0.70` | `close_pos_in_range <= 0.30` | `feat_daily` |
+| **N** | Narrow/Negative T-1 | narrow OR red day before | narrow OR green day before | inline LAG |
+| **2** | Not Up 2 Days | `ret_1d_lag1 <= 0 OR ret_1d_lag2 <= 0` | `ret_1d_lag1 >= 0 OR ret_1d_lag2 >= 0` | inline LAG |
+| **Y** | Young Breakout | `prior_breakouts_30d <= 2` | `prior_breakouts_30d <= 2` | `feat_daily` |
+| **C** | Consolidation | `vol_dryup_ratio < 1.3` | `vol_dryup_ratio < 1.3` | `feat_daily` |
+| **L** | Trend Quality | 2 of 3: above MA20, pos 5d, R²≥0.70 | 2 of 3: below MA20, neg 5d, R²≥0.70 | `feat_daily` |
+
+---
+
+## Strategy Naming
+
+| Strategy name | CLI flag | Description |
+|---------------|----------|-------------|
+| `Indian2LYNCH` | `--strategy indian2lynch` | 4% threshold, LONG, original 2LYNCH (production baseline) |
+| `2LYNCHBreakout` | `--strategy 2lynchbreakout` | Configurable threshold, LONG, **same 2LYNCH filter stack** |
+| `2LYNCHBreakdown` | `--strategy 2lynchbreakdown` | Configurable threshold, SHORT, **mirrored 2LYNCH filter stack** |
+| `EpisodicPivot` | `--strategy episodicpivot` | Gap-based episodic setups, LONG |
+
+**Key rule**: `2LYNCHBreakout` at `--breakout-threshold 0.04` must produce **identical results** to `Indian2LYNCH`. If they diverge, the filter stack has drifted — investigate immediately.
+
+Old aliases `thresholdbreakout` and `thresholdbreakdown` still resolve to `2LYNCHBreakout` and `2LYNCHBreakdown` for backward compatibility.
+
+---
+
+## FEE Window (Find and Enter Early)
+
+The strategy enters on the **breakout day itself**, within the first 60 minutes of trading.
+
+| FEE Window | Trades | Win% | Ann Ret | Max DD | Calmar |
+|------------|--------|------|---------|--------|--------|
+| 30 min | 4,604 | 54.6% | 149.6% | 3.7% | 40.39 |
+| 45 min | 5,955 | 51.9% | 172.0% | 4.5% | 38.45 |
+| **60 min** | **7,073** | **51.3%** | **193.9%** | **4.4%** | **43.67** |
+
+**Production default: 60 minutes** — best Calmar even though win rate is slightly lower.
+
+Entry mechanics (from 5-min bars):
+- LONG: first 5-min bar where `high >= prev_close × (1 + threshold)` within 09:15–10:15 IST
+- SHORT: first 5-min bar where `low <= prev_close × (1 − threshold)` within 09:15–10:15 IST
 
 ---
 
 ## Stop / Exit Logic
 
-The exit system follows Stockbee's layered approach:
+Layered exit system (Stockbee-derived):
 
-1. **Initial Stop**: T-1's low (the setup day's low — natural support)
-2. **Breakeven Stop**: Once close > entry price, stop moves up to entry
-3. **Trailing Stop**: Once up 8%+, trail at 2% below the highest high
-4. **Time Stop**: Exit at close of day 5 if no other exit triggered
+| Layer | Trigger | Action |
+|-------|---------|--------|
+| **Initial Stop** | Entry | Stop = low of the breakout day (from 5-min intraday) |
+| **Breakeven Stop** | Close > entry | Stop moves up to entry price |
+| **Post-Day-3 Tightening** | Day 3+ | LONG: stop = max(stop, day's low); SHORT: stop = min(stop, day's high) |
+| **Trail Stop** | Up 8%+ | Trail 2% below highest high (LONG) / above lowest low (SHORT) |
+| **Time Stop** | Day 5 | Exit at day 5 close if still in position |
+| **Gap-Through Stop** | Open gaps past stop | Exit at open price |
+| **Abnormal Gap** | Gap > 20% | Take profit at open |
 
-**No weak follow-through exit** — disabled (`follow_through_threshold=0.0`) because Stockbee holds 3-5 days minimum.
+**No weak follow-through exit** — `follow_through_threshold=0.0`. Stockbee holds positions 3–5 days minimum.
+
+**Short-side stop note**: For SHORT positions, the initial stop is the day's running HIGH (not low). Stop must be ABOVE entry (not below).
+
+---
+
+## PnL Calculation (Direction-Aware)
+
+PnL percentage is direction-aware in the backtest runner:
+- **LONG**: `pct = (exit_price - entry_price) / entry_price × 100`
+- **SHORT**: `pct = (entry_price - exit_price) / entry_price × 100`
+
+VectorBT handles absolute returns correctly for both directions. The `pnl_pct` stored per trade follows the same formula.
+
+---
+
+## System Architecture
+
+```
+Data Layer (DuckDB + Parquet)
+    data/parquet/daily/{SYMBOL}/all.parquet
+    data/parquet/5min/{SYMBOL}/all.parquet
+         |
+         v
+Feature Store (DuckDB: feat_daily)
+    ret_1d, ret_5d, atr_20, r2_65, vol_dryup_ratio,
+    prior_breakouts_30d, close_pos_in_range, ma_20, ma_7, ma_65_sma
+         |
+         v
+Strategy Registry (strategy_registry.py + strategy_families.py)
+    Candidate SQL: 2LYNCH filters applied inline + feat_daily join
+         |
+         v
+Backtest Runner (duckdb_backtest_runner.py)
+    Intraday entry resolution from 5-min data (FEE window)
+    Signal filtering: 5/6 filters required (params.min_filters)
+         |
+         v
+VectorBT Engine (vectorbt_engine.py)
+    Multi-year, multi-symbol simulation
+    Stop stack: initial → breakeven → post-day3 → trail → time
+         |
+         v
+Result Storage (DuckDB: bt_experiment, bt_trade, bt_yearly_metric)
+    + PostgreSQL lineage (exp_run, artifacts via MinIO)
+         |
+         v
+NiceGUI Dashboard (apps/nicegui/)
+    http://localhost:8501
+```
 
 ---
 
 ## How to Run
 
-```bash
-# Run backtest with default params
-doppler run -- uv run nseml-backtest
+### Production Baseline (Indian2LYNCH, 4%, 60-min FEE)
 
-# View results
+```bash
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --universe-size 2000 \
+  --start-year 2015 \
+  --end-year 2025
+```
+
+Expected: ~7,073 trades, 51.3% win rate, 193.9% annualized, 4.4% max DD, Calmar ~43.
+
+### 2LYNCHBreakout — Configurable Threshold
+
+```bash
+# 4% threshold (must match Indian2LYNCH baseline)
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakout --breakout-threshold 0.04 \
+  --universe-size 2000 --start-year 2015 --end-year 2025
+
+# 2% threshold
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakout --breakout-threshold 0.02 \
+  --universe-size 2000 --start-year 2015 --end-year 2025
+```
+
+### 2LYNCHBreakdown — SHORT
+
+```bash
+# 4% breakdown (short)
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakdown --breakout-threshold 0.04 \
+  --universe-size 2000 --start-year 2015 --end-year 2025
+
+# 2% breakdown (short)
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakdown --breakout-threshold 0.02 \
+  --universe-size 2000 --start-year 2015 --end-year 2025
+```
+
+### List All Strategies
+
+```bash
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest --list-strategies
+```
+
+### View Results in Dashboard
+
+```bash
 doppler run -- uv run nseml-dashboard
+# http://localhost:8501
+# Note: DuckDB single-writer — stop any running backtest first before launching dashboard
+```
+
+### Quality Gates
+
+```bash
+# Unit tests (must always pass before any commit)
+doppler run -- uv run pytest tests/unit/ -q    # Expected: 323 passed
+
+# Type checking
+doppler run -- uv run mypy src/ --ignore-missing-imports   # Expected: 0 errors
+
+# Linting
+doppler run -- uv run ruff check src/ tests/
 ```
 
 ---
@@ -120,13 +345,39 @@ doppler run -- uv run nseml-dashboard
 
 | File | Purpose |
 |------|---------|
-| `src/.../services/backtest/duckdb_backtest_runner.py` | Backtest orchestration service |
-| `src/.../services/backtest/vectorbt_engine.py` | VectorBT execution engine |
-| `src/.../db/market_db.py` | DuckDB data + result storage |
-| `src/.../services/scan/duckdb_signal_generator.py` | Signal generation with 2LYNCH filters |
-| `src/nse_momentum_lab/cli/backtest.py` | Packaged CLI entry point (`nseml-backtest`) |
-| `apps/dashboard/pages/15_Backtest_Results.py` | Dashboard visualization |
+| `src/nse_momentum_lab/services/backtest/strategy_registry.py` | Strategy registry — resolve/list strategies, 2LYNCH candidate query |
+| `src/nse_momentum_lab/services/backtest/strategy_families.py` | Candidate query builders for 2LYNCHBreakout, 2LYNCHBreakdown, EpisodicPivot |
+| `src/nse_momentum_lab/services/backtest/duckdb_backtest_runner.py` | Backtest orchestration, intraday entry, stop logic, persistence |
+| `src/nse_momentum_lab/services/backtest/vectorbt_engine.py` | VectorBT simulation engine (LONG + SHORT) |
+| `src/nse_momentum_lab/features/daily_core.py` | Feature computation (R², ATR, returns, vol_dryup, etc.) |
+| `src/nse_momentum_lab/cli/backtest.py` | CLI entry point (`--strategy`, `--breakout-threshold`, etc.) |
+| `apps/nicegui/` | NiceGUI dashboard |
 
 ---
 
-*Last validated: 2026-02-25*
+## Common Pitfalls to Avoid
+
+### 1. filter_2 must use ret_1d_lag1/lag2 — NOT ret_5d
+
+`filter_2` is the "Not Up 2 Days" check. It uses the return of T-1 and T-2 (computed inline with `LAG()`), NOT the 5-day return. Using `ret_5d <= 0` as a substitute is a different filter that will under-select signals in bull markets and over-select in bear markets.
+
+### 2. DuckDB is single-writer on Windows
+
+Only one read-write DuckDB connection at a time. Kill the dashboard before running a backtest, or the backtest will hang waiting for the lock.
+
+### 3. RUN_LOGIC_VERSION invalidates cache
+
+When the candidate SQL or stop logic changes, bump `RUN_LOGIC_VERSION` in `duckdb_backtest_runner.py`. The experiment cache key includes this version — forgetting to bump means stale cached results will be returned for the new strategy logic.
+
+### 4. Short PnL sign
+
+VectorBT handles SHORT returns correctly (inverted). However, any hand-computed `pnl_pct` using `(exit - entry)/entry` is sign-flipped for SHORT wins. Always use the direction-aware formula in the backtest runner.
+
+### 5. The scan worker is still 2LYNCH-specific
+
+The live scanning path (`services/scan/`) currently only supports the 2LYNCH filter logic via `ScanRuleEngine`. The `ScanWorker` accepts a `strategy_name` parameter but does not yet route to different scan engines. Multi-strategy live scanning is a planned Phase 1 completion item.
+
+---
+
+*Last validated: 2026-03-07 (exp 429c79ac45b65086: Calmar 43.67, Ann Ret 193.9%, Max DD 4.4%)*
+*Strategy families version: 1.1.0 (2LYNCHBreakout, 2LYNCHBreakdown with correct filter_2)*

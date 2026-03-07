@@ -16,7 +16,7 @@ def main():
     symbols = db.get_available_symbols()[:10]
 
     print(f"\nTesting with symbols: {symbols}")
-    print(f"Date range: 2024-01-01 to 2024-12-31")
+    print("Date range: 2024-01-01 to 2024-12-31")
 
     # Configure signal generator
     config = ScanConfig(
@@ -47,7 +47,7 @@ def main():
         for s in signals:
             by_symbol[s['symbol']] = by_symbol.get(s['symbol'], 0) + 1
 
-        print(f"\nSignals by symbol:")
+        print("\nSignals by symbol:")
         for symbol, count in sorted(by_symbol.items(), key=lambda x: x[1], reverse=True):
             print(f"  {symbol}: {count} signals")
 

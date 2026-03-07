@@ -6,7 +6,6 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-import numpy as np
 from nse_momentum_lab.db.market_db import get_market_db
 
 

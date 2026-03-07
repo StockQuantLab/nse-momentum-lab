@@ -1,8 +1,7 @@
 """DuckDB-native backtest runner for the Indian 2LYNCH strategy.
 
 Extracts the proven logic from ``scripts/backtest_10year_fixed.py`` into a
-reusable service that persists results in DuckDB (bt_experiment / bt_trade /
-bt_yearly_metric tables).
+reusable service that persists results in DuckDB (bt_experiment / bt_trade / bt_yearly_metric tables).
 
 Usage::
 
@@ -33,12 +32,18 @@ from tqdm.auto import tqdm
 
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db.market_db import MarketDataDB, get_market_db
+from nse_momentum_lab.services.backtest.engine import PositionSide
 from nse_momentum_lab.services.backtest.persistence import (
     BacktestArtifactPublisher,
     build_strategy_hash,
     upsert_exp_run_with_artifacts_sync,
 )
+from nse_momentum_lab.services.backtest.progress import BufferedProgressWriter
 from nse_momentum_lab.services.backtest.signal_models import BacktestSignal, SignalMetadata
+from nse_momentum_lab.services.backtest.strategy_registry import (
+    StrategyDefinition,
+    resolve_strategy,
+)
 from nse_momentum_lab.services.backtest.vectorbt_engine import (
     VectorBTConfig,
     VectorBTEngine,
@@ -84,6 +89,8 @@ class BacktestParams:
     start_date: str | None = None
     end_date: str | None = None
     entry_timeframe: str = "5min"
+    # Strategy selection
+    strategy: str = "indian_2lynch"
 
     # VectorBT engine config
     risk_per_trade_pct: float = 0.01
@@ -116,8 +123,9 @@ class BacktestParams:
         """Deterministic SHA-256 of all parameters (for dedup)."""
         return compute_short_hash(asdict(self), length=16)
 
-    def to_vbt_config(self) -> VectorBTConfig:
+    def to_vbt_config(self, direction: PositionSide = PositionSide.LONG) -> VectorBTConfig:
         return VectorBTConfig(
+            direction=direction,
             risk_per_trade_pct=self.risk_per_trade_pct,
             default_portfolio_value=self.portfolio_value,
             fees_per_trade=self.fees_per_trade,
@@ -132,13 +140,15 @@ class BacktestParams:
 
 
 class DuckDBBacktestRunner:
-    """Orchestrates an end-to-end 2LYNCH backtest and stores results in DuckDB."""
+    """Orchestrates an end-to-end backtest and stores results in DuckDB."""
 
     DATASET_KIND = "duckdb_market_daily"
-    RUN_LOGIC_VERSION = "duckdb_backtest_runner_v2026_03_01_guard_1pt5x_vbt_conflict"
+    RUN_LOGIC_VERSION = "duckdb_backtest_runner_v2026_03_07_2lynch_filter2_fix"
 
     def __init__(self, db: MarketDataDB | None = None) -> None:
         self.db = db or get_market_db()
+        self._active_strategy: StrategyDefinition | None = None
+        self._progress_writer: BufferedProgressWriter | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -164,19 +174,22 @@ class DuckDBBacktestRunner:
         """
         started_at = datetime.now(UTC)
         params = params or BacktestParams()
+        self._active_strategy = resolve_strategy(params.strategy)
+        strategy_name = self._active_strategy.name
         self._validate_required_lineage_dependencies()
         params_hash = params.to_hash()
         code_hash = build_code_hash(
             "duckdb_backtest_runner",
             {
-                "strategy": "Indian2LYNCH",
+                "strategy": strategy_name,
+                "strategy_version": self._active_strategy.version,
                 "run_logic_version": self.RUN_LOGIC_VERSION,
             },
         )
         dataset_snapshot = self.db.get_dataset_snapshot()
         dataset_hash = str(dataset_snapshot["dataset_hash"])
         exp_id = self.build_experiment_id(params_hash, dataset_hash, code_hash)
-        strategy_hash = build_strategy_hash("Indian2LYNCH", params_hash)
+        strategy_hash = build_strategy_hash(strategy_name, params_hash)
         params_json = json.dumps(asdict(params), sort_keys=True)
 
         if progress_file is None:
@@ -201,6 +214,10 @@ class DuckDBBacktestRunner:
         logger.info("[START] Experiment %s", exp_id)
         logger.info("  Params hash  : %s", params_hash)
         logger.info("  Dataset hash : %s", dataset_hash)
+        self._progress_writer = BufferedProgressWriter(
+            write_interval_seconds=60,
+            progress_file=progress_file,
+        )
         self.db.register_dataset_snapshot(dataset_snapshot)
         manifest_payload = build_manifest_payload_from_snapshot(
             dataset_kind=self.DATASET_KIND,
@@ -211,6 +228,7 @@ class DuckDBBacktestRunner:
         upsert_dataset_manifest_sync(manifest_payload)
         self._emit_progress(
             exp_id=exp_id,
+            strategy_name=strategy_name,
             strategy_hash=strategy_hash,
             dataset_hash=dataset_hash,
             params_json=params_json,
@@ -226,7 +244,7 @@ class DuckDBBacktestRunner:
         try:
             self.db.save_experiment(
                 exp_id=exp_id,
-                strategy_name="Indian2LYNCH",
+                strategy_name=strategy_name,
                 params_json=params_json,
                 start_year=params.start_year,
                 end_year=params.end_year,
@@ -238,6 +256,7 @@ class DuckDBBacktestRunner:
             )
             self._emit_progress(
                 exp_id=exp_id,
+                strategy_name=strategy_name,
                 strategy_hash=strategy_hash,
                 dataset_hash=dataset_hash,
                 params_json=params_json,
@@ -260,6 +279,7 @@ class DuckDBBacktestRunner:
             total_years = max(effective_end_year - effective_start_year + 1, 1)
             self._emit_progress(
                 exp_id=exp_id,
+                strategy_name=strategy_name,
                 strategy_hash=strategy_hash,
                 dataset_hash=dataset_hash,
                 params_json=params_json,
@@ -279,6 +299,7 @@ class DuckDBBacktestRunner:
                 pct = min(90.0, 10.0 + (completed_years / max(years_total, 1)) * 80.0)
                 self._emit_progress(
                     exp_id=exp_id,
+                    strategy_name=strategy_name,
                     strategy_hash=strategy_hash,
                     dataset_hash=dataset_hash,
                     params_json=params_json,
@@ -302,6 +323,7 @@ class DuckDBBacktestRunner:
                 pct = min(92.0, 10.0 + (completed_years / max(years_total, 1)) * 82.0)
                 self._emit_progress(
                     exp_id=exp_id,
+                    strategy_name=strategy_name,
                     strategy_hash=strategy_hash,
                     dataset_hash=dataset_hash,
                     params_json=params_json,
@@ -327,6 +349,7 @@ class DuckDBBacktestRunner:
                 pct = min(89.0, 10.0 + ((completed_years + 0.5) / max(years_total, 1)) * 80.0)
                 self._emit_progress(
                     exp_id=exp_id,
+                    strategy_name=strategy_name,
                     strategy_hash=strategy_hash,
                     dataset_hash=dataset_hash,
                     params_json=params_json,
@@ -348,6 +371,7 @@ class DuckDBBacktestRunner:
             )
             self._emit_progress(
                 exp_id=exp_id,
+                strategy_name=strategy_name,
                 strategy_hash=strategy_hash,
                 dataset_hash=dataset_hash,
                 params_json=params_json,
@@ -364,6 +388,7 @@ class DuckDBBacktestRunner:
             self._persist_results(exp_id, params, yearly_results, all_trades)
             self._emit_progress(
                 exp_id=exp_id,
+                strategy_name=strategy_name,
                 strategy_hash=strategy_hash,
                 dataset_hash=dataset_hash,
                 params_json=params_json,
@@ -380,6 +405,7 @@ class DuckDBBacktestRunner:
             self._persist_postgres_lineage(
                 exp_id=exp_id,
                 params=params,
+                strategy_name=strategy_name,
                 strategy_hash=strategy_hash,
                 params_hash=params_hash,
                 dataset_hash=dataset_hash,
@@ -394,6 +420,7 @@ class DuckDBBacktestRunner:
             finished_at = datetime.now(UTC)
             self._emit_progress(
                 exp_id=exp_id,
+                strategy_name=strategy_name,
                 strategy_hash=strategy_hash,
                 dataset_hash=dataset_hash,
                 params_json=params_json,
@@ -404,14 +431,12 @@ class DuckDBBacktestRunner:
                 progress_pct=None,
                 message=f"Backtest failed: {exc}",
                 progress_file=progress_file,
+                force_write=True,
                 finished_at=finished_at,
             )
             if self.db.experiment_exists(exp_id):
                 self.db.delete_experiment(exp_id)
             raise
-
-        exp = self.db.get_experiment(exp_id)
-        self._print_summary(exp)
 
         return exp_id
 
@@ -432,6 +457,7 @@ class DuckDBBacktestRunner:
         self,
         *,
         exp_id: str,
+        strategy_name: str,
         strategy_hash: str,
         dataset_hash: str,
         params_json: str,
@@ -442,8 +468,28 @@ class DuckDBBacktestRunner:
         message: str,
         progress_pct: float | None,
         progress_file: Path | None,
+        force_write: bool = False,
         finished_at: datetime | None = None,
     ) -> None:
+        if self._progress_writer is not None:
+            self._progress_writer.emit(
+                progress_pct=progress_pct,
+                stage=stage,
+                message=message,
+                exp_id=exp_id,
+                strategy_name=strategy_name,
+                strategy_hash=strategy_hash,
+                dataset_hash=dataset_hash,
+                params_json=params_json,
+                code_hash=code_hash,
+                started_at=started_at,
+                status=status,
+                finished_at=finished_at,
+                force_write=force_write,
+                postgres_upsert_fn=upsert_exp_run_with_artifacts_sync,
+            )
+            return
+
         pct_label = "--.-%" if progress_pct is None else f"{progress_pct:5.1f}%"
         logger.info("[PROGRESS] %s [%s] %s", pct_label, stage, message)
 
@@ -463,7 +509,7 @@ class DuckDBBacktestRunner:
 
         upsert_exp_run_with_artifacts_sync(
             exp_hash=exp_id,
-            strategy_name="Indian2LYNCH",
+            strategy_name=strategy_name,
             strategy_hash=strategy_hash,
             dataset_hash=dataset_hash,
             params_json=params_json,
@@ -774,76 +820,25 @@ class DuckDBBacktestRunner:
             "skipped_intraday_entry": 0,
         }
 
-        # Signal generation SQL (proven logic from backtest_10year_fixed.py)
-        # Uses parameterized query to prevent SQL injection
-        symbols_placeholders = ",".join("?" for _ in symbols)
-        query = f"""
-        WITH numbered_daily AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date) AS rn
-            FROM v_daily
-        WHERE date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-              AND symbol IN ({symbols_placeholders})
-        ),
-        with_lag AS (
-            SELECT
-                symbol, date AS trading_date, open, high, low, close, volume,
-                LAG(close) OVER (PARTITION BY symbol ORDER BY date) AS prev_close,
-                LAG(high) OVER (PARTITION BY symbol ORDER BY date) AS prev_high,
-                LAG(low) OVER (PARTITION BY symbol ORDER BY date) AS prev_low,
-                LAG(open) OVER (PARTITION BY symbol ORDER BY date) AS prev_open,
-                (LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date)
-                 - LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag1,
-                (LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date)
-                 - LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag2,
-                (open - LAG(close) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close) OVER (PARTITION BY symbol ORDER BY date), 0) AS gap_pct,
-                close * volume AS value_traded_inr
-            FROM numbered_daily WHERE rn > 1
-        ),
-        breakout_days AS (
-            SELECT * FROM with_lag
-            WHERE ((high - prev_close) / NULLIF(prev_close, 0)) >= {params.breakout_threshold}
-              AND prev_close IS NOT NULL
-              AND close >= {params.min_price}
-              AND value_traded_inr >= {params.min_value_traded_inr}
-              AND volume >= {params.min_volume}
-              AND ret_1d_lag1 IS NOT NULL
-        ),
-        with_features AS (
-            SELECT g.*,
-                f.close_pos_in_range, f.ma_20, f.ret_5d, f.atr_20,
-                f.vol_dryup_ratio, f.atr_compress_ratio, f.range_percentile,
-                f.prior_breakouts_30d, f.prior_breakouts_90d, f.r2_65,
-                f.ma_7, f.ma_65_sma
-            FROM breakout_days g
-            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.trading_date
-        )
-        SELECT
-            symbol, trading_date, open, high, low, close, prev_close, prev_low, gap_pct,
-            value_traded_inr, close_pos_in_range,
-            (close > ma_20) AS above_ma20,
-            (ret_5d > 0) AS positive_momentum,
-            atr_20, vol_dryup_ratio, atr_compress_ratio, range_percentile,
-            prior_breakouts_90d,
-            (close_pos_in_range >= 0.70) AS filter_h,
-            ((prev_high - prev_low) < (atr_20 * 0.5) OR prev_close < prev_open) AS filter_n,
-            (COALESCE(prior_breakouts_30d, 0) <= 2) AS filter_y,
-            (vol_dryup_ratio < 1.3) AS filter_c,
-            (CAST(close > ma_20 AS INTEGER) + CAST(ret_5d > 0 AS INTEGER)
-             + CAST(COALESCE(NULLIF(r2_65, 0), 0) >= 0.70 AS INTEGER) >= 2) AS filter_l,
-            (ret_1d_lag1 <= 0 OR ret_1d_lag2 <= 0) AS filter_2
-        FROM with_features
-        WHERE close_pos_in_range IS NOT NULL
-        ORDER BY trading_date, symbol
-        """
+        if not self._active_strategy:
+            raise RuntimeError(
+                "Strategy was not initialized. Call run() before running yearly backtests."
+            )
+        if not symbols:
+            return empty_stats, []
 
-        # Execute with parameterized values (dates first, then symbols)
-        df = self.db.con.execute(
-            query,
-            [year_window_start.isoformat(), year_window_end.isoformat(), *symbols],
-        ).fetchdf()
+        is_short = self._active_strategy.direction == PositionSide.SHORT
+
+        # Strategy-specific signal candidate query.
+        query, params_tuple = self._active_strategy.build_candidate_query(
+            params,
+            symbols,
+            year_window_start,
+            year_window_end,
+        )
+
+        # Execute with parameterized values.
+        df = self.db.con.execute(query, params_tuple).fetchdf()
         if df.empty:
             return empty_stats, []
 
@@ -962,6 +957,7 @@ class DuckDBBacktestRunner:
                 df_filtered=df_filtered,
                 breakout_threshold=params.breakout_threshold,
                 entry_cutoff_minutes=params.entry_cutoff_minutes,
+                is_short=is_short,
                 heartbeat_cb=maybe_heartbeat,
             )
         with tqdm(
@@ -990,7 +986,13 @@ class DuckDBBacktestRunner:
                 # Legacy daily execution fallback.
                 if intraday_entry is None:
                     entry_price = float(row["open"]) if row["open"] is not None else None
-                    initial_stop = row["low"] if row["low"] is not None else row["prev_low"]
+                    if is_short:
+                        # Stop for SHORT is above entry: use day high, then prev_high
+                        initial_stop = (
+                            row["high"] if row.get("high") is not None else row.get("prev_high")
+                        )
+                    else:
+                        initial_stop = row["low"] if row["low"] is not None else row.get("prev_low")
                     same_day_stop_hit = False
                 else:
                     entry_price = float(intraday_entry["entry_price"])
@@ -1002,15 +1004,20 @@ class DuckDBBacktestRunner:
                         signal_bar.update(1)
                         continue
 
-                    # Max stop distance guard: Stockbee FEE implies a tight stop.
-                    # If stop is >max_stop_dist_pct below entry, the setup is invalid
-                    # (e.g. crash-then-bounce where morning low is far from late entry).
-                    if entry_price > 0 and initial_stop < entry_price * (
-                        1 - params.max_stop_dist_pct
-                    ):
-                        skipped_intraday_entry += 1
-                        signal_bar.update(1)
-                        continue
+                    # Max stop distance guard: FEE implies a tight stop.
+                    # For LONG: stop must not be too far below entry.
+                    # For SHORT: stop must not be too far above entry.
+                    if entry_price > 0:
+                        if is_short and initial_stop > entry_price * (1 + params.max_stop_dist_pct):
+                            skipped_intraday_entry += 1
+                            signal_bar.update(1)
+                            continue
+                        elif not is_short and initial_stop < entry_price * (
+                            1 - params.max_stop_dist_pct
+                        ):
+                            skipped_intraday_entry += 1
+                            signal_bar.update(1)
+                            continue
                 # Store signal context for progress tracking
                 filters_passed = (
                     int(row["filters_passed"]) if row["filters_passed"] is not None else 0
@@ -1048,9 +1055,15 @@ class DuckDBBacktestRunner:
             }, []
 
         # Run VectorBT engine
-        engine = VectorBTEngine(config=params.to_vbt_config())
+        if self._active_strategy is None:
+            raise RuntimeError(
+                "Strategy was not initialized. Call run() before running yearly backtests."
+            )
+        strategy_label = self._active_strategy.label_for_year(year)
+        direction = self._active_strategy.direction
+        engine = VectorBTEngine(config=params.to_vbt_config(direction=direction))
         result = engine.run_backtest(
-            strategy_name=f"Indian2LYNCH_{year}",
+            strategy_name=strategy_label,
             signals=vbt_signals,
             price_data=price_data,
             value_traded_inr=value_traded_inr,
@@ -1067,6 +1080,7 @@ class DuckDBBacktestRunner:
         losses = sum(1 for t in result.trades if t.pnl and t.pnl < 0)
 
         # Calculate holding days and profit factor
+        # For SHORT trades: profit = entry > exit, so invert the formula.
         holding_days = []
         total_gains = 0.0
         total_losses_val = 0.0
@@ -1074,7 +1088,10 @@ class DuckDBBacktestRunner:
             if t.exit_date and t.entry_date:
                 holding_days.append((t.exit_date - t.entry_date).days)
             if t.entry_price and t.exit_price and t.entry_price > 0:
-                pct = ((t.exit_price - t.entry_price) / t.entry_price) * 100
+                if is_short:
+                    pct = ((t.entry_price - t.exit_price) / t.entry_price) * 100
+                else:
+                    pct = ((t.exit_price - t.entry_price) / t.entry_price) * 100
                 if pct > 0:
                     total_gains += pct
                 else:
@@ -1098,13 +1115,16 @@ class DuckDBBacktestRunner:
             "skipped_intraday_entry": skipped_intraday_entry,
         }
 
-        # Build trade dicts
+        # Build trade dicts — direction-aware PnL percentage
         trades_out: list[dict] = []
         for t in result.trades:
             hd = (t.exit_date - t.entry_date).days if t.exit_date and t.entry_date else 0
             pct = 0.0
             if t.entry_price and t.exit_price and t.entry_price > 0:
-                pct = ((t.exit_price - t.entry_price) / t.entry_price) * 100
+                if is_short:
+                    pct = ((t.entry_price - t.exit_price) / t.entry_price) * 100
+                else:
+                    pct = ((t.exit_price - t.entry_price) / t.entry_price) * 100
 
             real_symbol = id_to_symbol.get(t.symbol_id, t.symbol)
 
@@ -1164,17 +1184,63 @@ class DuckDBBacktestRunner:
         candles: pl.DataFrame,
         breakout_price: float,
         entry_cutoff_minutes: int = 30,
+        is_short: bool = False,
     ) -> dict[str, float | bool] | None:
-        """Resolve first intraday breakout touch and stop level known at entry time.
+        """Resolve first intraday breakout/breakdown touch and stop level at entry time.
 
-        FEE (Find and Enter Early) — Stockbee: enter in the first 30 minutes of
-        NSE open (09:15 IST cutoff 09:45). Candles after the cutoff are ignored.
-        Stop = low of the day up to the entry bar (naturally tight on early entries).
+        FEE (Find and Enter Early) — Stockbee: enter in the first N minutes of
+        NSE open (09:15 IST). Candles after the cutoff are ignored.
+
+        LONG: first bar where high >= breakout_price. Stop = day low up to entry bar.
+        SHORT: first bar where low <= breakdown_price. Stop = day high up to entry bar.
         """
         if candles.is_empty():
             return None
 
         rows = list(candles.sort("candle_time").iter_rows(named=True))
+
+        if is_short:
+            day_high_before = float("-inf")
+
+            for idx, row in enumerate(rows):
+                candle_time = row.get("candle_time")
+                if candle_time is not None:
+                    mins = DuckDBBacktestRunner._minutes_from_nse_open(candle_time)
+                    if mins is not None and mins > entry_cutoff_minutes:
+                        break
+
+                open_px = float(row["open"])
+                high_px = float(row["high"])
+                low_px = float(row["low"])
+
+                known_high_at_bar_open = max(day_high_before, open_px)
+                if low_px <= breakout_price:
+                    entry_price = open_px if open_px <= breakout_price else breakout_price
+
+                    # Sanity check: entry must not be wildly below the breakdown price.
+                    if entry_price < breakout_price * 0.5:
+                        return None
+
+                    initial_stop = known_high_at_bar_open
+
+                    same_day_stop_hit = False
+                    for follow_row in rows[idx + 1 :]:
+                        if float(follow_row["high"]) >= initial_stop:
+                            same_day_stop_hit = True
+                            break
+
+                    return {
+                        "entry_price": entry_price,
+                        "initial_stop": initial_stop,
+                        "same_day_stop_hit": same_day_stop_hit,
+                        "entry_time": DuckDBBacktestRunner._normalize_candle_time(candle_time),
+                    }
+
+                day_high_before = max(day_high_before, high_px)
+
+            return None
+
+        # LONG path (original FEE logic)
         day_low_before = float("inf")
 
         for idx, row in enumerate(rows):
@@ -1228,9 +1294,14 @@ class DuckDBBacktestRunner:
         df_filtered: pl.DataFrame,
         breakout_threshold: float,
         entry_cutoff_minutes: int = 30,
+        is_short: bool = False,
         heartbeat_cb: Callable[[str], None] | None = None,
     ) -> dict[tuple[str, date], dict[str, float | bool]]:
-        """Resolve intraday entries for all signal days with one 5-min batch query."""
+        """Resolve intraday entries for all signal days with one 5-min batch query.
+
+        For LONG: trigger = prev_close * (1 + threshold), look for high >= trigger.
+        For SHORT: trigger = prev_close * (1 - threshold), look for low <= trigger.
+        """
         targets = (
             df_filtered.select(["symbol", "trading_date", "prev_close"])
             .drop_nulls(["symbol", "trading_date", "prev_close"])
@@ -1252,9 +1323,9 @@ class DuckDBBacktestRunner:
             prev_close = float(row.prev_close)
             if prev_close <= 0:
                 continue
-            breakout_price_by_key[(str(row.symbol), row.trading_date)] = prev_close * (
-                1 + breakout_threshold
-            )
+            # SHORT: trigger price is below prev_close; LONG: above prev_close
+            multiplier = (1 - breakout_threshold) if is_short else (1 + breakout_threshold)
+            breakout_price_by_key[(str(row.symbol), row.trading_date)] = prev_close * multiplier
         if not breakout_price_by_key:
             return {}
 
@@ -1317,7 +1388,7 @@ class DuckDBBacktestRunner:
                     continue
 
                 intraday_entry = self._resolve_intraday_entry_from_5min(
-                    group_candles, breakout_price, entry_cutoff_minutes
+                    group_candles, breakout_price, entry_cutoff_minutes, is_short=is_short
                 )
                 if intraday_entry is not None:
                     resolved_entries[(symbol, trading_day)] = intraday_entry
@@ -1461,6 +1532,7 @@ class DuckDBBacktestRunner:
         *,
         exp_id: str,
         params: BacktestParams,
+        strategy_name: str,
         strategy_hash: str,
         params_hash: str,
         dataset_hash: str,
@@ -1487,7 +1559,7 @@ class DuckDBBacktestRunner:
         equity_df = self._to_equity_df(trades_df)
         summary = {
             "exp_id": exp_id,
-            "strategy_name": "Indian2LYNCH",
+            "strategy_name": strategy_name,
             "params_hash": params_hash,
             "dataset_hash": dataset_hash,
             "code_hash": code_hash,
@@ -1517,7 +1589,7 @@ class DuckDBBacktestRunner:
 
         upsert_exp_run_with_artifacts_sync(
             exp_hash=exp_id,
-            strategy_name="Indian2LYNCH",
+            strategy_name=strategy_name,
             strategy_hash=strategy_hash,
             dataset_hash=dataset_hash,
             params_json=json.dumps(asdict(params), sort_keys=True),

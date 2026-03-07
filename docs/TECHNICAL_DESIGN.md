@@ -74,13 +74,13 @@ Minimum set:
 
 ### 2.2 Data Flow (EOD)
 1. Download vendor candle files from Zerodha (manual) → store raw CSV in MinIO.
-2. Parse → store normalized raw OHLCV + reference tables in Postgres.
+2. Parse → store as Parquet files (`data/parquet/daily/{SYMBOL}/all.parquet`).
 3. Validate quality checks → quarantine failing days.
-4. Apply corporate actions → store adjusted OHLCV.
-5. Compute features (returns, volatility, RS, trend context) → store feature tables.
-6. Run scans (4% breakout + ANT/FHP) → store scan candidates with explanation columns.
-7. Backtest candidate selection logic + exits → store results + artifacts.
-8. Walk-forward evaluation (rolling windows) → store summary metrics.
+4. Apply corporate actions (adjustment factors computed on-the-fly in queries).
+5. Compute features (returns, volatility, RS, trend context) → materialize DuckDB `feat_daily` table.
+6. Run scans (4% breakout + 2LYNCH filters) → store scan candidates in PostgreSQL.
+7. Backtest candidate selection logic + exits → store results + artifacts in PostgreSQL/MinIO.
+8. Walk-forward evaluation (rolling windows) → store summary metrics in PostgreSQL.
 9. If eligible → create paper-trade signals, simulate entries/exits.
 10. Monitoring compares expected vs actual behavior; alerts on drift.
 
@@ -101,9 +101,22 @@ Why NiceGUI was chosen:
 - Modern reactive UI with Vue.js frontend and WebSocket reactivity
 - Python 3.14 compatible without compilation
 
-See `docs/NICEGUI_MIGRATION_PLAN.md` for migration rationale and `docs/adr/ADR-011-dashboard-architecture.md` for current architecture.
+See `docs/adr/ADR-011-dashboard-architecture.md` for current dashboard architecture.
 
-## 3) Storage Design (Postgres + MinIO)
+## 3) Storage Design (Hybrid: DuckDB + Parquet + PostgreSQL + MinIO)
+
+The system uses a hybrid storage architecture optimized for different data access patterns:
+
+| Component | Storage | Purpose |
+|-----------|---------|---------|
+| **Market Data (Raw)** | Parquet files (`data/parquet/daily/{SYMBOL}/all.parquet`) | Fast analytical queries, time-series operations |
+| **Features** | DuckDB (`feat_daily` table) | Computed features for backtesting (ATR, returns, R², etc.) |
+| **Experiment Results** | PostgreSQL | `exp_run`, `bt_trade`, `exp_metric` tables |
+| **Signals & Paper Trading** | PostgreSQL | `signal`, `paper_position`, `paper_fill` tables |
+| **Reference Data** | PostgreSQL | `ref_symbol`, `ref_exchange_calendar`, scan definitions |
+| **Artifacts** | MinIO | Parquet exports, charts, large files |
+
+**Rationale**: DuckDB excels at analytical queries on time-series data (100-1000x faster than PostgreSQL for aggregations). PostgreSQL provides transactional integrity for experiment tracking and paper trading. Parquet files enable efficient columnar access and data portability.
 
 ### 3.1 MinIO Layout
 Follow ADR-005 + ADR-014.
@@ -119,7 +132,10 @@ Artifacts (content-addressed):
 - `artifacts/experiments/{experiment_hash}/charts/...`
 - `artifacts/datasets/{dataset_hash}/snapshot.parquet`
 
-### 3.2 Postgres Schema (Core Tables)
+### 3.2 PostgreSQL Schema (Operational & Result Data)
+
+> **Note**: Raw market data and features are stored in DuckDB/Parquet (see Section 3.5). PostgreSQL stores operational results, signals, and reference data only.
+
 Naming: snake_case, use `timestamptz` for event time, `date` for trading_date.
 
 #### 3.2.1 Reference tables
@@ -127,47 +143,61 @@ Naming: snake_case, use `timestamptz` for event time, `date` for trading_date.
 - `ref_symbol(symbol_id bigserial pk, symbol text, series text, isin text, name text, listing_date date, delisting_date date null, status text)`
 - `ref_symbol_alias(symbol_id fk, vendor text, vendor_symbol text, valid_from date, valid_to date)`
 
-#### 3.2.2 Raw market data
-Partition monthly by trading_date:
-- `md_ohlcv_raw(symbol_id, trading_date, open, high, low, close, volume, value_traded, trades_count, vwap, source_file_uri, ingest_run_id, primary key(symbol_id, trading_date))`
-
-#### 3.2.3 Corporate actions
+#### 3.2.2 Corporate actions
 - `ca_event(event_id bigserial pk, symbol_id, ex_date date, record_date date null, action_type text, ratio_num numeric, ratio_den numeric, cash_amount numeric, currency text default 'INR', source_uri text, created_at timestamptz)`
 
-#### 3.2.4 Adjusted OHLCV
-- `md_ohlcv_adj(symbol_id, trading_date, open_adj, high_adj, low_adj, close_adj, volume, value_traded, adj_factor numeric, primary key(symbol_id, trading_date))`
-
-Design note:
-- Keep volume unadjusted unless you explicitly define volume adjustment rules; store `adj_factor` to reproduce prices.
-
-#### 3.2.5 Derived features
-Partition monthly:
-- `feat_daily(symbol_id, trading_date, ret_1d, ret_5d, atr_20, range_pct, close_pos_in_range, ma_20, ma_65, rs_252, vol_20, dollar_vol_20, primary key(symbol_id, trading_date))`
-
-#### 3.2.6 Scans
+#### 3.2.3 Scans
 - `scan_definition(scan_def_id pk, name text, version text, config_json jsonb, code_sha text, created_at timestamptz)`
 - `scan_run(scan_run_id pk, scan_def_id fk, asof_date date, dataset_hash text, status text, started_at timestamptz, finished_at timestamptz, logs_uri text)`
 - `scan_result(scan_run_id fk, symbol_id fk, asof_date date, score numeric null, passed bool, reason_json jsonb, primary key(scan_run_id, symbol_id))`
 
-#### 3.2.7 Experiment registry
+#### 3.2.5 Experiment registry
 - `exp_run(exp_run_id pk, exp_hash text unique, strategy_name text, strategy_hash text, dataset_hash text, params_json jsonb, code_sha text, started_at timestamptz, finished_at timestamptz, status text)`
 - `exp_metric(exp_run_id fk, metric_name text, metric_value numeric, primary key(exp_run_id, metric_name))`
 - `exp_artifact(exp_run_id fk, artifact_name text, uri text, sha256 text, primary key(exp_run_id, artifact_name))`
 
-#### 3.2.8 Paper trading
+#### 3.2.6 Paper trading
 State machine per ADR-015:
 - `signal(signal_id pk, symbol_id, asof_date date, strategy_hash text, state text, entry_mode text, planned_entry_date date, initial_stop numeric, metadata_json jsonb, created_at timestamptz)`
 - `paper_order(order_id pk, signal_id fk, side text, qty numeric, order_type text, limit_price numeric null, status text, created_at timestamptz)`
 - `paper_fill(fill_id pk, order_id fk, fill_time timestamptz, fill_price numeric, qty numeric, fees numeric, slippage_bps numeric)`
 - `paper_position(position_id pk, symbol_id, opened_at timestamptz, closed_at timestamptz null, avg_entry numeric, avg_exit numeric null, qty numeric, pnl numeric null, state text, metadata_json jsonb)`
 
-### 3.3 Partitioning & Indexes
-- Partition `md_ohlcv_raw`, `md_ohlcv_adj`, `feat_daily` monthly.
-- Indexes:
-  - `md_ohlcv_* (trading_date, symbol_id)`
-  - `scan_result(asof_date)`
-  - `exp_run(strategy_hash, dataset_hash)`
-  - `signal(state, planned_entry_date)`
+### 3.3 DuckDB + Parquet Market Data Storage
+
+Market data is stored in columnar Parquet files and accessed via DuckDB for high-performance analytical queries.
+
+#### 3.3.1 File Layout
+```
+data/parquet/
+├── daily/
+│   ├── SYMBOL1/all.parquet      # All daily data for SYMBOL1
+│   ├── SYMBOL2/all.parquet
+│   └── ...
+└── 5min/
+    ├── SYMBOL1/all.parquet      # All 5-min data for SYMBOL1
+    └── ...
+```
+
+Each Parquet file contains columns: `date`, `open`, `high`, `low`, `close`, `volume`, `value_traded`.
+
+#### 3.3.2 Feature Table (DuckDB)
+The `feat_daily` table is materialized in DuckDB with computed features:
+- Returns: `ret_1d`, `ret_5d`, `ret_20d`
+- Volatility: `atr_20`, `range_pct`
+- Trend: `ma_7`, `ma_20`, `ma_65`, `r2_65` (R² of 65-day linear trend)
+- Volume: `vol_dryup_ratio`
+- Filters: Filter H/N/2/Y/C/L pre-computed as boolean columns
+
+Built by: `src/nse_momentum_lab/features/daily_core.py` → `build_feat_daily_view()`
+
+#### 3.3.3 Why DuckDB for Market Data?
+- **100-1000x faster** than PostgreSQL for analytical queries (aggregations, window functions)
+- **Parquet columnar storage** enables reading only needed columns
+- **Vectorized execution** for time-series operations
+- **Zero-copy integration** with pandas, polars, arrow
+
+### 3.4 PostgreSQL Indexes
 
 ## 4) Ingestion Design (Vendor Candles)
 

@@ -11,7 +11,6 @@ import argparse
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
 
 import polars as pl
 
@@ -19,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from nse_momentum_lab.db.market_db import get_market_db
 from nse_momentum_lab.services.backtest.vectorbt_engine import (
-    VectorBTEngine,
     VectorBTConfig,
+    VectorBTEngine,
 )
 
 
@@ -45,7 +44,7 @@ def run_single_backtest(
     min_price: int,
     min_filters: int,
     vbt_config: VectorBTConfig,
-) -> Optional[dict]:
+) -> dict | None:
     """Run a single backtest configuration."""
 
     symbols_list_str = "', '".join(symbols)

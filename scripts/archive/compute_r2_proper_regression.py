@@ -13,8 +13,8 @@ where:
 """
 
 import sys
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import numpy as np
 import polars as pl
 from tqdm import tqdm
+
 from nse_momentum_lab.db.market_db import get_market_db
 
 
@@ -144,8 +145,8 @@ def main():
     symbols = [s[0] for s in symbols_result]
 
     print(f"\nProcessing {len(symbols)} symbols...")
-    print(f"Window size: 65 days (2LYNCH standard)")
-    print(f"Estimated time: ~15-20 minutes\n")
+    print("Window size: 65 days (2LYNCH standard)")
+    print("Estimated time: ~15-20 minutes\n")
 
     # Process symbols and collect results
     all_results = []
@@ -218,7 +219,7 @@ def main():
         WHERE trading_date >= '2020-01-01' AND trading_date <= '2024-12-31'
     """).fetchone()
 
-    print(f"\nBACKTEST PERIOD (2020-2024):")
+    print("\nBACKTEST PERIOD (2020-2024):")
     print(f"  Total rows: {backtest_result[0]:,}")
     print(f"  High trend (>= 0.7): {backtest_result[1]:,} ({backtest_result[1]/backtest_result[0]*100:.1f}%)")
     print(f"  Average R²: {backtest_result[2]:.4f}")

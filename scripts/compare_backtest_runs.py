@@ -17,11 +17,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import polars as pl
 
 from nse_momentum_lab.db.market_db import get_market_db
-from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
-    BacktestParams,
-    DuckDBBacktestRunner,
-)
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -117,19 +112,19 @@ def fetch_summary(db, exp_id: str, label: str) -> dict:
 
 def print_multi_comparison(summaries: list[dict]) -> None:
     labels = [s["label"] for s in summaries]
-    W = 100
+    width = 100
 
-    print("\n" + "=" * W)
+    print("\n" + "=" * width)
     print("  MULTI-RUN BACKTEST COMPARISON  (2015–2025, 500 stocks, 5/6 filters)")
     for s in summaries:
         print(f"  [{s['label']:6s}]  exp={s['exp_id']}  trades={s['total_trades']:,}")
-    print("=" * W)
+    print("=" * width)
 
     # ── KPI table ──────────────────────────────────────────────────────────
     col_w = 12
-    hdr = f"  {'KPI':<30}" + "".join(f"{l:>{col_w}}" for l in labels)
+    hdr = f"  {'KPI':<30}" + "".join(f"{label:>{col_w}}" for label in labels)
     print(f"\n{hdr}")
-    print("  " + "-" * (W - 2))
+    print("  " + "-" * (width - 2))
 
     def row(label: str, vals: list[str]) -> str:
         return f"  {label:<30}" + "".join(f"{v:>{col_w}}" for v in vals)
@@ -160,12 +155,12 @@ def print_multi_comparison(summaries: list[dict]) -> None:
     for s in summaries:
         yr_hdr += f"  [{s['label']:>5}] {'trd':>5} {'ret%':>8} {'win%':>6}"
     print(yr_hdr)
-    print("  " + "-" * (W - 2))
+    print("  " + "-" * (width - 2))
 
     all_yearly = {s["label"]: {int(r["year"]): r
                                 for r in s["yearly"].iter_rows(named=True)}
                   for s in summaries}
-    years = sorted(set(yr for yd in all_yearly.values() for yr in yd))
+    years = sorted({yr for yd in all_yearly.values() for yr in yd})
     for yr in years:
         line = f"  {yr:<6}"
         for s in summaries:
@@ -183,26 +178,26 @@ def print_multi_comparison(summaries: list[dict]) -> None:
         print(f"  {'Date':<12} {'Symbol':<14} {'Entry':>8} {'Exit':>8} "
               f"{'PnL%':>8} {'R':>6} {'Days':>5}  Exit Reason")
         for r in s["worst"].iter_rows(named=True):
-            print(f"  {str(r['entry_date']):<12} {str(r['symbol']):<14} "
+            print(f"  {r['entry_date']!s:<12} {r['symbol']!s:<14} "
                   f"{r['entry_price']:>8.2f} {r['exit_price']:>8.2f} "
                   f"{r['pnl_pct']:>7.2f}% {r['pnl_r']:>5.2f}R {r['holding_days']:>5}"
                   f"  {r['exit_reason']}")
 
     # ── Exit reason comparison ─────────────────────────────────────────────
-    print(f"\n  EXIT REASON BREAKDOWN")
-    all_reasons = sorted(set(
+    print("\n  EXIT REASON BREAKDOWN")
+    all_reasons = sorted({
         r["exit_reason"]
         for s in summaries
         for r in s["exit_counts"].iter_rows(named=True)
-    ))
+    })
     hdr2 = f"  {'Reason':<26}"
     for s in summaries:
         hdr2 += f"  [{s['label']:>5}] {'n':>5} {'avg%':>7}"
     print(hdr2)
-    print("  " + "-" * (W - 2))
+    print("  " + "-" * (width - 2))
 
     for reason in all_reasons:
-        line = f"  {str(reason):<26}"
+        line = f"  {reason!s:<26}"
         for s in summaries:
             ec = {r["exit_reason"]: r for r in s["exit_counts"].iter_rows(named=True)}
             r = ec.get(reason, {})
@@ -211,7 +206,7 @@ def print_multi_comparison(summaries: list[dict]) -> None:
             line += f"  [{s['label']:>5}] {n:>5,}  {avg:>+6.2f}%"
         print(line)
 
-    print("\n" + "=" * W)
+    print("\n" + "=" * width)
     print("  RECOMMENDATION GUIDE")
     print("  • More trades = better compounding, but lower quality per trade")
     print("  • Higher win rate + profit factor = better strategy robustness")
@@ -226,7 +221,7 @@ def print_multi_comparison(summaries: list[dict]) -> None:
         print(f"  {label:<8} {calmar_r:>8.2f}  {ann:>+8.2f}%  {dd:>+7.2f}%  {tr:>8,}  {wr:>6.1f}%")
     best = calmar[0][0]
     print(f"\n  Best Calmar Ratio: [{best}]")
-    print("=" * W)
+    print("=" * width)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

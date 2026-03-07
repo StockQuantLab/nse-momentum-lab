@@ -1,7 +1,7 @@
 # Command Reference - nse-momentum-lab
 
-**Version**: Phase 1
-**Last Updated**: 2025-02-08
+**Version**: Multi-Strategy Platform (Phase 1–7 complete)
+**Last Updated**: 2026-03-07
 
 ---
 
@@ -198,14 +198,68 @@ doppler run -- uv run python -c "import asyncio; from datetime import date; from
 3. Summarizes failures
 4. Updates dashboard summary
 
-### Backtesting (Not Fully Tested)
+### Backtesting
 
-#### Run backtest
+#### Run production baseline (Indian2LYNCH, 4%, 60-min FEE)
 ```bash
-# Note: This service exists but hasn't been tested with real data yet
-doppler run -- uv run python -m nse_momentum_lab.services.backtest.worker ...
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --universe-size 2000 \
+  --start-year 2015 \
+  --end-year 2025
 ```
-**Status**: Framework exists, needs real data testing
+Expected: ~7,073 trades, 51.3% win rate, 193.9% annualized, 4.4% max DD, Calmar ~43.67
+Experiment ID: `429c79ac45b65086`
+
+#### Run 2LYNCHBreakout (configurable threshold, LONG)
+```bash
+# 4% — should match Indian2LYNCH baseline
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakout --breakout-threshold 0.04 \
+  --universe-size 2000 --start-year 2015 --end-year 2025
+
+# 2% breakout
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakout --breakout-threshold 0.02 \
+  --universe-size 2000 --start-year 2015 --end-year 2025
+```
+
+#### Run 2LYNCHBreakdown (configurable threshold, SHORT)
+```bash
+# 4% breakdown (short)
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakdown --breakout-threshold 0.04 \
+  --universe-size 2000 --start-year 2015 --end-year 2025
+
+# 2% breakdown (short)
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakdown --breakout-threshold 0.02 \
+  --universe-size 2000 --start-year 2015 --end-year 2025
+```
+
+#### List all strategies
+```bash
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest --list-strategies
+```
+
+#### Run single year (fast sanity check)
+```bash
+doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy 2lynchbreakout --start-year 2023 --end-year 2023 \
+  --universe-size 500
+```
+
+#### Rebuild feature table (feat_daily)
+```bash
+doppler run -- uv run python -c "
+from nse_momentum_lab.db.market_db import get_market_db
+db = get_market_db()
+db.build_feat_daily_table(force=True)
+"
+```
+
+**Important**: DuckDB is single-writer. Stop the dashboard before running a backtest.
+Backtest results are stored in DuckDB (`bt_experiment`, `bt_trade`, `bt_yearly_metric`) and
+PostgreSQL (`exp_run`, `exp_metric`), and artifacts in MinIO.
 
 ---
 
@@ -213,9 +267,9 @@ doppler run -- uv run python -m nse_momentum_lab.services.backtest.worker ...
 
 ### Run All Tests
 ```bash
-doppler run -- uv run pytest -q
+doppler run -- uv run pytest tests/unit/ -q
 ```
-**Expected**: ~149 passed (may vary by environment)
+**Expected**: 323 passed (as of 2026-03-07)
 
 ### Run Specific Test File
 ```bash
@@ -540,5 +594,5 @@ doppler run -- uv run nseml-dashboard
 
 ---
 
-**Last Updated**: 2025-02-13
-**For Issues**: Check `agents.md` runbook
+**Last Updated**: 2026-03-07
+**For Issues**: Check [dev/AGENTS.md](../dev/AGENTS.md) runbook

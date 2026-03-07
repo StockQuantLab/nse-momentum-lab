@@ -103,7 +103,7 @@ def rebuild_5min_parquet(
         seen_symbols.add(symbol)
         df = _normalize_5min_csv(path, symbol)
         stats.rows_in += int(pd.read_csv(path, usecols=["Date"]).shape[0])
-        stats.rows_out += int(len(df))
+        stats.rows_out += len(df)
 
         if not df.empty:
             symbol_dir = out_dir / symbol

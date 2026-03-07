@@ -1,6 +1,8 @@
 # ADR-007: Strategy Specification — 4% + 2LYNCH (Stockbee-style)
 
-Status: Accepted
+**Status**: Accepted
+**Date**: 2026-02-18
+**Updated**: 2026-03-06 (per production results exp 429c79ac45b65086)
 
 ## Context
 

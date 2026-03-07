@@ -24,6 +24,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from nse_momentum_lab.services.ingest.repository import IngestionRepository
+
 from nse_momentum_lab.db import get_sessionmaker
 from nse_momentum_lab.services.ingest.candle_csv import (
     aggregate_to_daily,
@@ -31,7 +33,6 @@ from nse_momentum_lab.services.ingest.candle_csv import (
     infer_symbol_from_filename,
     iter_candles_csv,
 )
-from nse_momentum_lab.services.ingest.repository import IngestionRepository
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

@@ -44,6 +44,7 @@ class TestSettings:
                 "MINIO_ACCESS_KEY": "minio",
                 "MINIO_SECRET_KEY": "minio123",
             },
+            clear=True,
         ):
             settings = Settings()
             assert settings.database_url is not None
@@ -126,6 +127,7 @@ class TestSettings:
                 "MINIO_ACCESS_KEY": "minio",
                 "MINIO_SECRET_KEY": "minio123",
             },
+            clear=True,
         ):
             settings = Settings()
             assert settings.database_url is not None

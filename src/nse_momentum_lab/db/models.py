@@ -378,26 +378,145 @@ class PaperPosition(Base):
 
 
 class JobRun(Base):
+    """Extended job run tracking with partition scope and incremental state."""
+
     __tablename__ = "job_run"
     __table_args__ = (
         Index("idx_job_run_name_date", "job_name", "asof_date"),
         Index("idx_job_run_status_date", "status", "asof_date"),
         Index("idx_job_run_idempotency", "idempotency_key", unique=True),
+        Index("idx_job_run_kind", "job_kind"),
         {"schema": "nseml"},
     )
 
     job_run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_name: Mapped[str] = mapped_column(Text, nullable=False)
-    asof_date: Mapped[date] = mapped_column(Date, nullable=False)
+    job_kind: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )  # raw_ingest_daily, silver_validate, etc.
+    asof_date: Mapped[date | None] = mapped_column(Date)  # Null for non-date-scoped jobs
     idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True)
     dataset_hash: Mapped[str | None] = mapped_column(Text)
+    inputs_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )  # URIs, partitions
+    outputs_json: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )  # URIs, partition_ids
+    partition_scope: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )  # Affected partitions
     status: Mapped[str] = mapped_column(Text, nullable=False)
-    started_at: Mapped[date] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     logs_uri: Mapped[str | None] = mapped_column(Text)
     metrics_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     error_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    code_hash: Mapped[str | None] = mapped_column(Text)
+
+
+class PartitionManifest(Base):
+    """Tracks individual partitions within a dataset for incremental rebuilds."""
+
+    __tablename__ = "partition_manifest"
+    __table_args__ = (
+        UniqueConstraint(
+            "dataset_id",
+            "partition_key",
+            name="uq_partition_manifest_dataset_partition",
+        ),
+        Index("idx_partition_manifest_dataset", "dataset_id"),
+        Index("idx_partition_manifest_status", "status"),
+        Index("idx_partition_manifest_layer_kind", "data_layer", "dataset_kind"),
+        {"schema": "nseml"},
+    )
+
+    partition_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dataset_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("nseml.dataset_manifest.dataset_id"), nullable=False
+    )
+    partition_key: Mapped[str] = mapped_column(Text, nullable=False)
+    data_layer: Mapped[str] = mapped_column(Text, nullable=False)  # bronze, silver, gold
+    dataset_kind: Mapped[str] = mapped_column(Text, nullable=False)  # daily, 5min, events, feat_*
+    partition_hash: Mapped[str] = mapped_column(Text, nullable=False)  # SHA256 of partition data
+    object_uri: Mapped[str] = mapped_column(Text, nullable=False)  # MinIO or local path
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    min_trading_date: Mapped[date | None] = mapped_column(Date)
+    max_trading_date: Mapped[date | None] = mapped_column(Date)
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="READY"
+    )  # READY, FAILED, STALE, SUPERSEDED
+    produced_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    code_hash: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+
+    dataset: Mapped[DatasetManifest] = relationship("DatasetManifest")
+
+
+class MaterializationJob(Base):
+    """Tracks feature materialization jobs with incremental refresh state."""
+
+    __tablename__ = "materialization_job"
+    __table_args__ = (
+        Index("idx_materialization_job_feature", "feature_set_name", "started_at"),
+        Index("idx_materialization_job_status", "status"),
+        UniqueConstraint("idempotency_key", name="uq_materialization_job_idempotency"),
+        {"schema": "nseml"},
+    )
+
+    job_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    feature_set_name: Mapped[str] = mapped_column(Text, nullable=False)
+    feature_set_version: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True)
+    input_dataset_ids: Mapped[list[int] | None] = mapped_column(JSONB)  # List[dataset_id]
+    partition_scope: Mapped[dict] = mapped_column(
+        JSONB, nullable=False
+    )  # {"symbols": [...], "years": [...]}
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )  # RUNNING, SUCCEEDED, FAILED, CANCELLED
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    partitions_created: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    partitions_updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    partitions_skipped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    metrics_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    code_hash: Mapped[str | None] = mapped_column(Text)
+
+
+class IncrementalRefreshState(Base):
+    """Tracks downstream dependencies and refresh requirements for datasets."""
+
+    __tablename__ = "incremental_refresh_state"
+    __table_args__ = (
+        UniqueConstraint(
+            "upstream_partition_id",
+            "downstream_feature_set",
+            name="uq_incremental_refresh_upstream_downstream",
+        ),
+        Index("idx_incremental_refresh_downstream", "downstream_feature_set"),
+        Index("idx_incremental_refresh_stale", "needs_refresh"),
+        {"schema": "nseml"},
+    )
+
+    state_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    upstream_partition_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("nseml.partition_manifest.partition_id"), nullable=False
+    )
+    downstream_feature_set: Mapped[str] = mapped_column(Text, nullable=False)
+    downstream_lookback_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    needs_refresh: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+
+    upstream_partition: Mapped[PartitionManifest] = relationship("PartitionManifest")
 
 
 class BtTrade(Base):

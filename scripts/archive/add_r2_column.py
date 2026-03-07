@@ -23,28 +23,28 @@ def add_r2_column_double():
 
     db = get_market_db()
 
-    print(f"\n[DROPPING OLD r2_65 COLUMN]")
+    print("\n[DROPPING OLD r2_65 COLUMN]")
     try:
         db.con.execute("ALTER TABLE feat_daily DROP COLUMN IF EXISTS r2_65")
         print("  Dropped old r2_65 column")
     except Exception as e:
         print(f"  Note: {e}")
 
-    print(f"\n[ADDING r2_65 AS DOUBLE]")
+    print("\n[ADDING r2_65 AS DOUBLE]")
     db.con.execute("ALTER TABLE feat_daily ADD COLUMN r2_65 DOUBLE")
     print("  Added r2_65 as DOUBLE")
 
-    print(f"\n[VERIFICATION]")
+    print("\n[VERIFICATION]")
     columns = db.con.execute("DESCRIBE feat_daily").fetchall()
     for col in columns:
         if col[0] == 'r2_65':
             print(f"  {col[0]}: {col[1]}")
             break
 
-    print(f"\n  [READY]")
-    print(f"  R² column is now DOUBLE type")
-    print(f"  Can accept values from -∞ to +∞")
-    print(f"  Ready for R² computation!")
+    print("\n  [READY]")
+    print("  R² column is now DOUBLE type")
+    print("  Can accept values from -∞ to +∞")
+    print("  Ready for R² computation!")
     print(f"\n{'=' * 80}\n")
 
 

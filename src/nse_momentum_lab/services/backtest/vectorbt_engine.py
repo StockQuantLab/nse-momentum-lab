@@ -12,7 +12,12 @@ import polars as pl
 import vectorbt as vbt
 
 from nse_momentum_lab.db.market_db import get_market_db
-from nse_momentum_lab.services.backtest.engine import ExitReason
+from nse_momentum_lab.services.backtest.engine import (
+    DefaultBreakoutExitPolicy,
+    ExitPolicy,
+    ExitReason,
+    PositionSide,
+)
 from nse_momentum_lab.services.backtest.signal_models import BacktestSignal
 
 logger = logging.getLogger(__name__)
@@ -60,6 +65,7 @@ class VectorBTConfig:
     - Example: Rs 10L portfolio, 1% risk = Rs 10k per trade
     """
 
+    direction: PositionSide = PositionSide.LONG
     initial_stop_atr_mult: float = 2.0
     trail_activation_pct: float = 0.08  # Stockbee: "trailing stop once up 8% plus"
     trail_stop_pct: float = 0.02
@@ -104,8 +110,13 @@ class VectorBTResult:
 
 
 class VectorBTEngine:
-    def __init__(self, config: VectorBTConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: VectorBTConfig | None = None,
+        exit_policy: ExitPolicy | None = None,
+    ) -> None:
         self.config = config or VectorBTConfig()
+        self._exit_policy: ExitPolicy = exit_policy or DefaultBreakoutExitPolicy()
 
     def load_market_data_from_duckdb(
         self,
@@ -301,19 +312,20 @@ class VectorBTEngine:
         """Build exit signals for breakout strategy.
 
         Optimized with pre-extracted NumPy arrays for 5-10x speedup.
+        Supports both LONG and SHORT positions.
 
         ENTRY: Signal metadata entry price (5-minute first-touch) when provided,
         else fallback to daily open.
         INITIAL STOP: Stop level provided in signal payload.
         DELISTING: Force exit if stock is delisted during holding period.
         """
-        # Pre-extract NumPy arrays to avoid DataFrame.loc overhead in inner loops
+        is_short = self.config.direction == PositionSide.SHORT
+
         open_arr = open_df.values
         high_arr = high_df.values
         low_arr = low_df.values
         close_arr = close_df.values
 
-        # Build column index mapping for O(1) symbol_id -> column lookup
         col_index = {col: i for i, col in enumerate(entries.columns)}
 
         exits = pd.DataFrame(False, index=entries.index, columns=entries.columns)
@@ -321,6 +333,10 @@ class VectorBTEngine:
 
         signal_map = {(sid, sdate): init_stop for sdate, sid, _sym, init_stop, _meta in signals}
         signal_meta_map = {(sid, sdate): meta for sdate, sid, _sym, _init_stop, meta in signals}
+        signal_direction_map = {
+            (sid, sdate): meta.get("direction", "LONG")
+            for sdate, sid, _sym, _init_stop, meta in signals
+        }
 
         exit_reason_map: dict[tuple[int, date], ExitReason] = {}
         initial_stop_map: dict[tuple[int, date], float] = {}
@@ -338,6 +354,9 @@ class VectorBTEngine:
                 initial_stop = signal_map.get((int(symbol_id), signal_date))
                 signal_meta = signal_meta_map.get((int(symbol_id), signal_date), {})
 
+                signal_dir = signal_direction_map.get((int(symbol_id), signal_date), "LONG")
+                position_is_short = signal_dir == "SHORT" or is_short
+
                 entry_date = entry_dt.date()
                 entry_price_override = signal_meta.get("entry_price") if signal_meta else None
                 if entry_price_override is not None:
@@ -349,7 +368,10 @@ class VectorBTEngine:
                     continue
 
                 if initial_stop is None:
-                    initial_stop = float(entry_price) * 0.96  # Fallback: ~4% below entry
+                    direction = PositionSide.SHORT if position_is_short else PositionSide.LONG
+                    initial_stop = self._exit_policy.compute_initial_stop(
+                        float(entry_price), None, direction
+                    )
 
                 order_price.iloc[entry_idx, col_idx] = entry_price
                 initial_stop_map[(int(symbol_id), entry_date)] = float(initial_stop)
@@ -360,13 +382,23 @@ class VectorBTEngine:
                     exit_reason_map[(int(symbol_id), entry_date)] = ExitReason.STOP_INITIAL
                     continue
 
-                if float(entry_price) < float(initial_stop):
-                    exits.iloc[entry_idx, col_idx] = True
-                    order_price.iloc[entry_idx, col_idx] = entry_price
-                    exit_reason_map[(int(symbol_id), entry_date)] = ExitReason.GAP_THROUGH_STOP
-                    continue
+                if position_is_short:
+                    if float(entry_price) > float(initial_stop):
+                        exits.iloc[entry_idx, col_idx] = True
+                        order_price.iloc[entry_idx, col_idx] = entry_price
+                        exit_reason_map[(int(symbol_id), entry_date)] = ExitReason.GAP_STOP
+                        continue
+                else:
+                    if float(entry_price) < float(initial_stop):
+                        exits.iloc[entry_idx, col_idx] = True
+                        order_price.iloc[entry_idx, col_idx] = entry_price
+                        exit_reason_map[(int(symbol_id), entry_date)] = ExitReason.GAP_STOP
+                        continue
 
-                max_high = float(entry_price)
+                if position_is_short:
+                    min_low = float(entry_price)
+                else:
+                    max_high = float(entry_price)
                 stop_level = float(initial_stop)
                 at_breakeven = False
                 trail_active = False
@@ -383,7 +415,6 @@ class VectorBTEngine:
                     current_dt = entries.index[current_idx]
                     current_date = current_dt.date()
 
-                    # Use NumPy array indexing instead of .loc
                     current_open = open_arr[current_idx, col_idx]
                     high = high_arr[current_idx, col_idx]
                     low = low_arr[current_idx, col_idx]
@@ -403,94 +434,161 @@ class VectorBTEngine:
                             break
                         continue
 
-                    # Stockbee guideline: if stock gaps up far above entry, lock profits.
-                    if not pd.isna(current_open) and float(current_open) >= float(entry_price) * (
-                        1 + self.config.abnormal_gap_exit_pct
-                    ):
-                        exit_date = current_dt
-                        exit_price = float(current_open)
-                        exit_reason = ExitReason.ABNORMAL_GAP_EXIT
-                        break
+                    if position_is_short:
+                        if not pd.isna(current_open) and float(current_open) <= float(
+                            entry_price
+                        ) * (1 - self.config.abnormal_gap_exit_pct):
+                            exit_date = current_dt
+                            exit_price = float(current_open)
+                            exit_reason = ExitReason.ABNORMAL_GAP_EXIT
+                            break
 
-                    # Gap-down through stop: stock opens below stop level.
-                    # In reality there is no fill at stop price — exit at the open.
-                    # This is the realistic outcome of overnight gap-down through stop.
-                    if not pd.isna(current_open) and float(current_open) < stop_level:
-                        exit_date = current_dt
-                        exit_price = float(current_open)
-                        exit_reason = ExitReason.GAP_THROUGH_STOP
-                        break
+                        if not pd.isna(current_open) and float(current_open) > stop_level:
+                            exit_date = current_dt
+                            exit_price = float(current_open)
+                            exit_reason = ExitReason.GAP_STOP
+                            break
 
-                    max_high = max(max_high, float(high))
+                        min_low = min(min_low, float(low))
 
-                    # Check stop hit (intraday low touches stop)
-                    if float(low) <= stop_level:
-                        exit_date = current_dt
-                        exit_price = stop_level
-                        if trail_active and stop_level > float(entry_price):
-                            exit_reason = ExitReason.STOP_TRAIL
-                        elif post_day3_stop_active and day_offset >= self.config.min_hold_days:
-                            exit_reason = ExitReason.STOP_POST_DAY3
-                        elif not at_breakeven:
-                            exit_reason = ExitReason.STOP_INITIAL
-                        elif stop_level == float(entry_price):
-                            exit_reason = ExitReason.STOP_BREAKEVEN
-                        else:
-                            exit_reason = ExitReason.STOP_TRAIL
-                        break
+                        if float(high) >= stop_level:
+                            exit_date = current_dt
+                            exit_price = stop_level
+                            if trail_active and stop_level < float(entry_price):
+                                exit_reason = ExitReason.STOP_TRAIL
+                            elif post_day3_stop_active and day_offset >= self.config.min_hold_days:
+                                exit_reason = ExitReason.STOP_POST_DAY3
+                            elif not at_breakeven:
+                                exit_reason = ExitReason.STOP_INITIAL
+                            elif stop_level == float(entry_price):
+                                exit_reason = ExitReason.STOP_BREAKEVEN
+                            else:
+                                exit_reason = ExitReason.STOP_TRAIL
+                            break
 
-                    # Move to breakeven once close > entry
-                    if not at_breakeven and float(close) > float(entry_price):
-                        stop_level = max(stop_level, float(entry_price))
-                        at_breakeven = True
+                        if not at_breakeven and float(close) < float(entry_price):
+                            stop_level = min(stop_level, float(entry_price))
+                            at_breakeven = True
 
-                    # Activate trailing stop once up 8%+
-                    if max_high >= float(entry_price) * (1 + self.config.trail_activation_pct):
-                        trailing_stop = max(
-                            float(entry_price),
-                            max_high * (1 - self.config.trail_stop_pct),
-                        )
-                        stop_level = max(stop_level, trailing_stop)
-                        trail_active = True
+                        if min_low <= float(entry_price) * (1 - self.config.trail_activation_pct):
+                            trailing_stop = min(
+                                float(entry_price),
+                                min_low * (1 + self.config.trail_stop_pct),
+                            )
+                            stop_level = min(stop_level, trailing_stop)
+                            trail_active = True
 
-                    # Exit on abnormal +10% one-day move
-                    if day_offset <= 2 and float(high) >= float(entry_price) * (
-                        1 + self.config.abnormal_profit_pct
-                    ):
-                        exit_date = current_dt
-                        exit_price = float(close)
-                        exit_reason = ExitReason.ABNORMAL_PROFIT
-                        break
+                        if day_offset <= 2 and float(low) <= float(entry_price) * (
+                            1 - self.config.abnormal_profit_pct
+                        ):
+                            exit_date = current_dt
+                            exit_price = float(close)
+                            exit_reason = ExitReason.ABNORMAL_PROFIT
+                            break
 
-                    # After day 3, tighten stop to daily low progression
-                    if day_offset >= self.config.min_hold_days:
-                        tightened = max(stop_level, float(low))
-                        post_day3_stop_active = post_day3_stop_active or (tightened > stop_level)
-                        stop_level = tightened
+                        # After day 3, tighten stop to daily high progression (shorts: stop above entry)
+                        if day_offset >= self.config.min_hold_days:
+                            tightened = min(stop_level, float(high))
+                            post_day3_stop_active = post_day3_stop_active or (
+                                tightened < stop_level
+                            )
+                            stop_level = tightened
 
-                    # Check close against stop (end of day)
-                    if float(close) <= stop_level:
-                        exit_date = current_dt
-                        exit_price = stop_level
-                        if trail_active and stop_level > float(entry_price):
-                            exit_reason = ExitReason.STOP_TRAIL
-                        elif post_day3_stop_active and day_offset >= self.config.min_hold_days:
-                            exit_reason = ExitReason.STOP_POST_DAY3
-                        elif not at_breakeven:
-                            exit_reason = ExitReason.STOP_INITIAL
-                        elif stop_level > float(entry_price):
-                            exit_reason = ExitReason.STOP_TRAIL
-                        else:
-                            exit_reason = ExitReason.STOP_BREAKEVEN
-                        break
+                        if float(close) >= stop_level:
+                            exit_date = current_dt
+                            exit_price = stop_level
+                            if trail_active and stop_level < float(entry_price):
+                                exit_reason = ExitReason.STOP_TRAIL
+                            elif post_day3_stop_active and day_offset >= self.config.min_hold_days:
+                                exit_reason = ExitReason.STOP_POST_DAY3
+                            elif not at_breakeven:
+                                exit_reason = ExitReason.STOP_INITIAL
+                            elif stop_level < float(entry_price):
+                                exit_reason = ExitReason.STOP_TRAIL
+                            else:
+                                exit_reason = ExitReason.STOP_BREAKEVEN
+                            break
+                    else:
+                        if not pd.isna(current_open) and float(current_open) >= float(
+                            entry_price
+                        ) * (1 + self.config.abnormal_gap_exit_pct):
+                            exit_date = current_dt
+                            exit_price = float(current_open)
+                            exit_reason = ExitReason.ABNORMAL_GAP_EXIT
+                            break
+
+                        if not pd.isna(current_open) and float(current_open) < stop_level:
+                            exit_date = current_dt
+                            exit_price = float(current_open)
+                            exit_reason = ExitReason.GAP_STOP
+                            break
+
+                        max_high = max(max_high, float(high))
+
+                        if float(low) <= stop_level:
+                            exit_date = current_dt
+                            exit_price = stop_level
+                            if trail_active and stop_level > float(entry_price):
+                                exit_reason = ExitReason.STOP_TRAIL
+                            elif post_day3_stop_active and day_offset >= self.config.min_hold_days:
+                                exit_reason = ExitReason.STOP_POST_DAY3
+                            elif not at_breakeven:
+                                exit_reason = ExitReason.STOP_INITIAL
+                            elif stop_level == float(entry_price):
+                                exit_reason = ExitReason.STOP_BREAKEVEN
+                            else:
+                                exit_reason = ExitReason.STOP_TRAIL
+                            break
+
+                        if not at_breakeven and float(close) > float(entry_price):
+                            stop_level = max(stop_level, float(entry_price))
+                            at_breakeven = True
+
+                        if max_high >= float(entry_price) * (1 + self.config.trail_activation_pct):
+                            trailing_stop = max(
+                                float(entry_price),
+                                max_high * (1 - self.config.trail_stop_pct),
+                            )
+                            stop_level = max(stop_level, trailing_stop)
+                            trail_active = True
+
+                        if day_offset <= 2 and float(high) >= float(entry_price) * (
+                            1 + self.config.abnormal_profit_pct
+                        ):
+                            exit_date = current_dt
+                            exit_price = float(close)
+                            exit_reason = ExitReason.ABNORMAL_PROFIT
+                            break
+
+                        # After day 3, tighten stop to daily low progression
+                        if day_offset >= self.config.min_hold_days:
+                            tightened = max(stop_level, float(low))
+                            post_day3_stop_active = post_day3_stop_active or (
+                                tightened > stop_level
+                            )
+                            stop_level = tightened
+
+                        if float(close) <= stop_level:
+                            exit_date = current_dt
+                            exit_price = stop_level
+                            if trail_active and stop_level > float(entry_price):
+                                exit_reason = ExitReason.STOP_TRAIL
+                            elif post_day3_stop_active and day_offset >= self.config.min_hold_days:
+                                exit_reason = ExitReason.STOP_POST_DAY3
+                            elif not at_breakeven:
+                                exit_reason = ExitReason.STOP_INITIAL
+                            elif stop_level > float(entry_price):
+                                exit_reason = ExitReason.STOP_TRAIL
+                            else:
+                                exit_reason = ExitReason.STOP_BREAKEVEN
+                            break
 
                 if exit_date is None:
                     last_idx = min(entry_idx + self.config.time_stop_days, num_rows - 1)
                     exit_date = entries.index[last_idx]
                     exit_price = float(close_arr[last_idx, col_idx])
-                    exit_reason = ExitReason.TIME_STOP
+                    exit_reason = ExitReason.TIME_EXIT
 
-                # Get index for exit_date to use iloc
                 exit_idx = entries.index.get_loc(exit_date)
                 exits.iloc[exit_idx, col_idx] = True
                 order_price.iloc[exit_idx, col_idx] = exit_price
@@ -634,13 +732,15 @@ class VectorBTEngine:
                 # Position sizing: allocate fixed value per position
                 # With Rs 10L portfolio and max 10 positions = Rs 1L per trade
                 position_value = self.config.default_portfolio_value / self.config.max_positions
+                is_short = self.config.direction == PositionSide.SHORT
                 pf = vbt.Portfolio.from_signals(
                     close=close,
-                    entries=entries,
-                    exits=exits,
+                    entries=None if is_short else entries,
+                    exits=None if is_short else exits,
+                    short_entries=entries if is_short else None,
+                    short_exits=exits if is_short else None,
                     open=open_prices,
                     price=order_price,
-                    direction="longonly",
                     fees=self.config.fees_per_trade,
                     slippage=slippage,
                     init_cash=self.config.default_portfolio_value,

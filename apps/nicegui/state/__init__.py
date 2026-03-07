@@ -27,8 +27,10 @@ if TYPE_CHECKING:
 
 from nse_momentum_lab.db.market_db import get_market_db, MarketDataDB
 
-# Singleton DB connection - created once at server startup
-db: MarketDataDB = get_market_db()
+# Singleton DB connection - created once at server startup.
+# Read-only so the dashboard can coexist with a running backtest writer
+# (DuckDB allows unlimited concurrent readers alongside one writer).
+db: MarketDataDB = get_market_db(read_only=True)
 
 # Thread pool for running blocking DB calls off the async event loop
 # (DuckDB is not async-native; running it directly on the event loop stalls NiceGUI)
@@ -136,14 +138,32 @@ def get_experiment_yearly_metrics(exp_id: str) -> pd.DataFrame:
     return df.to_pandas() if not df.is_empty() else pd.DataFrame()
 
 
+def _strategy_display_name(row: pd.Series) -> str:
+    """Derive display name that includes breakout threshold when applicable."""
+    import json as _json
+
+    name = str(row.get("strategy_name", "?"))
+    params: dict = {}
+    if "params_json" in row.index and pd.notna(row.get("params_json")):
+        try:
+            params = _json.loads(row["params_json"])
+        except ValueError, TypeError:
+            pass
+    threshold = params.get("breakout_threshold")
+    if threshold is not None and name not in ("Indian2LYNCH",):
+        pct = round(float(threshold) * 100)
+        return f"{name} {pct}%"
+    return name
+
+
 def build_experiment_options(experiments_df: pd.DataFrame) -> dict[str, str]:
     """Build {label: exp_id} dict with human-readable labels, latest first.
 
-    Label format: "indian_2lynch | 2015-2025 | 7,073 trades | Ret 193.9% | Mar 01"
+    Label format: "2LYNCHBreakout 4% | 2015-2025 | 7,073 trades | Ret 193.9% | Mar 01"
     """
     options: dict[str, str] = {}
     for _, row in experiments_df.iterrows():
-        strategy = row.get("strategy_name", "?")
+        strategy = _strategy_display_name(row)
         start = row.get("start_year", "?")
         end = row.get("end_year", "?")
         trades = int(row.get("total_trades", 0) or 0)

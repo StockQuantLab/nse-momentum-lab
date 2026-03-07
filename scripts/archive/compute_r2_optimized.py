@@ -13,7 +13,7 @@ TIME ESTIMATE:
 
 import sys
 from pathlib import Path
-from datetime import date
+
 import numpy as np
 
 # Add src to path
@@ -31,7 +31,7 @@ def compute_r2_optimized():
     db = get_market_db()
 
     # Check current state
-    print(f"\n[CHECKING CURRENT STATE]")
+    print("\n[CHECKING CURRENT STATE]")
     total_rows = db.con.execute("SELECT COUNT(*) FROM feat_daily").fetchone()[0]
     r2_zero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL").fetchone()[0]
 
@@ -42,24 +42,24 @@ def compute_r2_optimized():
         print(f"\n  R² already computed! {r2_zero_count} rows with R²=0")
         return
 
-    print(f"\n[OPTIMIZATION STRATEGY]")
-    print(f"  We're using DuckDB + NumPy which is already 10-100x faster than PostgreSQL")
-    print(f"  Processing: 1,832 symbols × ~2,000 rows = ~3.7M R² values")
-    print(f"  Optimization: Vectorized NumPy operations (not Python loops)")
+    print("\n[OPTIMIZATION STRATEGY]")
+    print("  We're using DuckDB + NumPy which is already 10-100x faster than PostgreSQL")
+    print("  Processing: 1,832 symbols × ~2,000 rows = ~3.7M R² values")
+    print("  Optimization: Vectorized NumPy operations (not Python loops)")
 
     # Add progress tracking column
     try:
         db.con.execute("ALTER TABLE feat_daily ADD COLUMN r2_computed BOOLEAN DEFAULT FALSE")
-    except:
+    except Exception:
         pass
 
     # Get symbols
     symbols_result = db.con.execute("SELECT DISTINCT symbol FROM v_daily ORDER BY symbol LIMIT 100").fetchall()
     symbols = [row[0] for row in symbols_result]
 
-    print(f"\n[TEST RUN - First 100 symbols]")
+    print("\n[TEST RUN - First 100 symbols]")
     print(f"  Processing {len(symbols)} symbols to validate approach...")
-    print(f"  This will take ~1-2 minutes", flush=True)
+    print("  This will take ~1-2 minutes", flush=True)
 
     # Process first 100 symbols as a test
     completed = 0
@@ -124,7 +124,7 @@ def compute_r2_optimized():
     print(f"  Failed: {failed}")
 
     # Show sample results
-    print(f"\n[SAMPLE R² VALUES]")
+    print("\n[SAMPLE R² VALUES]")
     sample = db.con.execute("""
         SELECT symbol, trading_date, r2_65
         FROM feat_daily
@@ -136,8 +136,8 @@ def compute_r2_optimized():
     for row in sample:
         print(f"    {row[0]} @ {row[1]}: R² = {row[2]:.4f}")
 
-    print(f"\n  This is a test run with 100 symbols.")
-    print(f"  Once validated, we'll process all 1,832 symbols.")
+    print("\n  This is a test run with 100 symbols.")
+    print("  Once validated, we'll process all 1,832 symbols.")
 
 
 def _compute_r2_fast(closes: np.ndarray, period: int = 65) -> np.ndarray:

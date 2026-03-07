@@ -92,7 +92,7 @@ def rebuild_daily_parquet(
         symbol = _infer_symbol(path)
         df = _normalize_daily_csv(path, symbol)
         stats.rows_in += int(pd.read_csv(path, usecols=["Date"]).shape[0])
-        stats.rows_out += int(len(df))
+        stats.rows_out += len(df)
         stats.symbols += 1
 
         symbol_dir = out_dir / symbol

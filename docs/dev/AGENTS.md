@@ -153,7 +153,6 @@ The dashboard runs on port 8501 by default.
 - `/Trade_Analytics` - Trade Analytics
 
 **Known issues (non-critical):**
-- Streamlit returns 404 for `/_stcore/health` and `/_stcore/host-config` on subpages - these are internal endpoints and harmless
 - Theme warnings about empty color values in sidebar config - cosmetic only
 
 ## phidata usage

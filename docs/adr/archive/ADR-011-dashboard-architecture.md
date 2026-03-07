@@ -1,6 +1,8 @@
 # ADR-011: Dashboard Architecture
 
-Status: Accepted (revised 2026-03-01)
+**Status**: Accepted
+**Date**: 2026-02-25
+**Revised**: 2026-03-01 (NiceGUI migration)
 
 ## Context
 

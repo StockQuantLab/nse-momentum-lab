@@ -15,6 +15,7 @@ from nse_momentum_lab.db.models import (
     ScanResult,
     ScanRun,
 )
+from nse_momentum_lab.services.backtest.strategy_registry import resolve_strategy
 from nse_momentum_lab.services.dataset import (
     DatasetManifestRepository,
     build_code_hash,
@@ -43,10 +44,14 @@ class ScanWorker:
         scan_def_id: int | None = None,
         config: ScanConfig | None = None,
         symbols: list[str] | None = None,
+        strategy_name: str = "Indian2LYNCH",
     ) -> None:
         self.scan_def_id = scan_def_id
         self.config = config or ScanConfig()
         self.symbols = [s.strip().upper() for s in symbols] if symbols else None
+        # Registry-aware: currently only Indian2LYNCH is supported for live scanning.
+        # Multi-strategy live scanning is tracked in Phase 1 of the platform plan.
+        self.strategy_name = strategy_name
         self._feature_engine = FeatureEngine()
         self._rule_engine = ScanRuleEngine(self.config)
 
@@ -209,10 +214,22 @@ class ScanWorker:
             "lookback_c": self.config.lookback_c,
         }
 
+        strategy_def = resolve_strategy(self.strategy_name)
+        scan_def_name = strategy_def.name
+        scan_def_version = strategy_def.version
+
+        if strategy_def.family not in ("indian_2lynch",):
+            logger.warning(
+                "ScanWorker: strategy '%s' uses FeatureEngine/ScanRuleEngine (Indian2LYNCH path). "
+                "DuckDB-based routing for '%s' is a Phase 1 enhancement.",
+                self.strategy_name,
+                strategy_def.family,
+            )
+
         result = await session.execute(
             select(ScanDefinition).where(
-                ScanDefinition.name == "4P_2LYNCH",
-                ScanDefinition.version == "v1",
+                ScanDefinition.name == scan_def_name,
+                ScanDefinition.version == scan_def_version,
             )
         )
         existing = result.scalar_one_or_none()
@@ -221,8 +238,8 @@ class ScanWorker:
             return existing.scan_def_id
 
         scan_def = ScanDefinition(
-            name="4P_2LYNCH",
-            version="v1",
+            name=scan_def_name,
+            version=scan_def_version,
             config_json=config_json,
         )
         session.add(scan_def)

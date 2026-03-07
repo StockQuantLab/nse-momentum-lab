@@ -46,6 +46,7 @@ class BufferedProgressWriter:
         message: str,
         *,
         exp_id: str,
+        strategy_name: str,
         strategy_hash: str,
         dataset_hash: str,
         params_json: str,
@@ -89,6 +90,7 @@ class BufferedProgressWriter:
             # Store latest update
             self._pending_update = {
                 "exp_id": exp_id,
+                "strategy_name": strategy_name,
                 "strategy_hash": strategy_hash,
                 "dataset_hash": dataset_hash,
                 "params_json": params_json,
@@ -138,7 +140,7 @@ class BufferedProgressWriter:
         try:
             postgres_upsert_fn(
                 exp_hash=self._pending_update["exp_id"],
-                strategy_name="Indian2LYNCH",
+                strategy_name=self._pending_update["strategy_name"],
                 strategy_hash=self._pending_update["strategy_hash"],
                 dataset_hash=self._pending_update["dataset_hash"],
                 params_json=self._pending_update["params_json"],

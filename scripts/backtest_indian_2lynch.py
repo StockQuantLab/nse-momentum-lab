@@ -13,8 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from nse_momentum_lab.db.market_db import get_market_db
 from nse_momentum_lab.services.backtest.vectorbt_engine import (
-    VectorBTEngine,
     VectorBTConfig,
+    VectorBTEngine,
 )
 
 
@@ -127,7 +127,7 @@ def run_backtest_direct():
             df = db.con.execute(query).fetchdf()
 
             if df.is_empty():
-                print(f"  No signals found")
+                print("  No signals found")
                 continue
 
             # Apply filters
@@ -155,11 +155,11 @@ def run_backtest_direct():
             print(f"  After {min_filters}/6 filters: {len(df_filtered)}")
 
             if df_filtered.is_empty():
-                print(f"  No signals after filters - skipping")
+                print("  No signals after filters - skipping")
                 continue
 
             # Show filter pass rates
-            print(f"\n  Filter Pass Rates:")
+            print("\n  Filter Pass Rates:")
             for col in ["filter_h", "filter_n", "filter_y", "filter_c", "filter_l"]:
                 pct = df_filtered[col].sum() / len(df_filtered) * 100
                 print(f"    {col}: {pct:.1f}%")
@@ -218,7 +218,7 @@ def run_backtest_direct():
                 ))
 
             if not vbt_signals:
-                print(f"  No valid signals after conversion")
+                print("  No valid signals after conversion")
                 continue
 
             # Run backtest
@@ -255,7 +255,7 @@ def run_backtest_direct():
                 "avg_r": result.avg_r,
             })
 
-            print(f"\n  Backtest Results:")
+            print("\n  Backtest Results:")
             print(f"    Trades: {len(result.trades)}")
             print(f"    Return: {result.total_return * 100:+.2f}%")
             print(f"    Win Rate: {result.win_rate * 100:.1f}%")
@@ -269,14 +269,14 @@ def run_backtest_direct():
                     reason = t.exit_reason.value
                     exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
 
-            print(f"\n  Exit Reasons:")
+            print("\n  Exit Reasons:")
             for reason, count in sorted(exit_reasons.items(), key=lambda x: -x[1]):
                 pct = count / len(result.trades) * 100 if result.trades else 0
                 print(f"    {reason}: {count} ({pct:.1f}%)")
 
     # Summary comparison
     print(f"\n{'=' * 80}")
-    print(f"SUMMARY COMPARISON")
+    print("SUMMARY COMPARISON")
     print(f"{'=' * 80}")
 
     print(f"\n{'Config':<30} {'Signals':>10} {'Trades':>10} {'Return %':>12} {'Win %':>10} {'Sharpe':>8} {'R':>8}")
@@ -288,7 +288,7 @@ def run_backtest_direct():
               f"{r['sharpe']:>7.2f} {r['avg_r']:>7.2f}")
 
     print(f"\n{'=' * 80}")
-    print(f"TEST COMPLETE")
+    print("TEST COMPLETE")
     print(f"{'=' * 80}\n")
 
     return results

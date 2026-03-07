@@ -39,16 +39,16 @@ def rebuild_features():
         has_2lynch = all(col in col_names for col in ['r2_65', 'atr_compress_ratio', 'range_percentile', 'vol_dryup_ratio', 'prior_breakouts_90d'])
 
         if has_2lynch:
-            print(f"  Status: 2LYNCH features already exist")
+            print("  Status: 2LYNCH features already exist")
             response = input("\n  Rebuild anyway? (y/N): ").strip().lower()
             if response != 'y':
                 print("  Aborted.")
                 return
         else:
-            print(f"  Status: Missing 2LYNCH features")
+            print("  Status: Missing 2LYNCH features")
             print(f"  Current columns: {', '.join(col_names)}")
     else:
-        print(f"  Status: feat_daily table does not exist")
+        print("  Status: feat_daily table does not exist")
 
     # Rebuild with force=True
     print("\n[REBUILDING]")
@@ -64,12 +64,12 @@ def rebuild_features():
         col_names = [c[0] for c in columns]
         has_2lynch = all(col in col_names for col in ['r2_65', 'atr_compress_ratio', 'range_percentile', 'vol_dryup_ratio', 'prior_breakouts_90d'])
 
-        print(f"\n[VERIFICATION]")
+        print("\n[VERIFICATION]")
         print(f"  Total columns: {len(col_names)}")
         print(f"  2LYNCH features present: {has_2lynch}")
 
         if has_2lynch:
-            print(f"\n  [2LYNCH FEATURES]")
+            print("\n  [2LYNCH FEATURES]")
             for col in ['r2_65', 'atr_compress_ratio', 'range_percentile', 'vol_dryup_ratio', 'prior_breakouts_90d']:
                 if col in col_names:
                     # Check sample data
@@ -77,7 +77,7 @@ def rebuild_features():
                     print(f"    {col}: OK (sample: {sample[0] if sample else 'NULL'})")
 
         # Sample data
-        print(f"\n[SAMPLE DATA]")
+        print("\n[SAMPLE DATA]")
         sample_rows = db.con.execute("""
             SELECT symbol, trading_date, r2_65, atr_compress_ratio, range_percentile,
                    vol_dryup_ratio, prior_breakouts_90d
@@ -93,7 +93,7 @@ def rebuild_features():
             print(f"     Vol Ratio: {row[5]:.2f} | Prior Breakouts: {row[6]}")
 
         print(f"\n{'=' * 80}")
-        print(f"2LYNCH FEATURES SUCCESSFULLY ADDED")
+        print("2LYNCH FEATURES SUCCESSFULLY ADDED")
         print(f"{'=' * 80}\n")
 
     except Exception as e:
@@ -101,7 +101,7 @@ def rebuild_features():
         import traceback
         traceback.print_exc()
         print(f"\n{'=' * 80}")
-        print(f"REBUILD FAILED")
+        print("REBUILD FAILED")
         print(f"{'=' * 80}\n")
 
 

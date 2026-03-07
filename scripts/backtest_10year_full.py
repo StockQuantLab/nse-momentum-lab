@@ -8,10 +8,9 @@ Tests the optimal configuration (Rs.10+, 4/6 filters) on:
 """
 
 import sys
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Any
 
 import polars as pl
 
@@ -19,9 +18,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from nse_momentum_lab.db.market_db import get_market_db
 from nse_momentum_lab.services.backtest.vectorbt_engine import (
-    VectorBTEngine,
     VectorBTConfig,
-    Trade,
+    VectorBTEngine,
 )
 
 
@@ -160,7 +158,7 @@ def run_yearly_backtest(
         df = db.con.execute(query).fetchdf()
 
         if df.empty:
-            print(f"  No gap-ups found")
+            print("  No gap-ups found")
             yearly_results[year] = YearlyStats(year=year)
             continue
 
@@ -189,7 +187,7 @@ def run_yearly_backtest(
         print(f"  After {min_filters}/6 filters: {len(df_filtered)}")
 
         if df_filtered.height == 0:
-            print(f"  No signals after filters")
+            print("  No signals after filters")
             yearly_results[year] = YearlyStats(year=year, total_signals=len(df))
             continue
 
@@ -253,7 +251,7 @@ def run_yearly_backtest(
             ))
 
         if not vbt_signals:
-            print(f"  No valid signals")
+            print("  No valid signals")
             yearly_results[year] = YearlyStats(
                 year=year,
                 total_signals=len(df),
@@ -380,7 +378,7 @@ def run_10year_backtest():
 
     # Print summary table
     print(f"\n{'=' * 80}")
-    print(f"YEARLY BREAKDOWN - Rs.10+, 4/6 Filters")
+    print("YEARLY BREAKDOWN - Rs.10+, 4/6 Filters")
     print(f"{'=' * 80}")
 
     print(f"\n{'Year':<6} {'Signals':>8} {'Trades':>7} {'Win%':>6} {'Return%':>9} {'AvgR':>6} {'DD%':>6} {'WeakFT%':>7}")
@@ -423,7 +421,7 @@ def run_10year_backtest():
 
     # Trade analysis
     print(f"\n{'=' * 80}")
-    print(f"TRADE ANALYSIS")
+    print("TRADE ANALYSIS")
     print(f"{'=' * 80}")
 
     if all_trades:
@@ -433,18 +431,18 @@ def run_10year_backtest():
 
         # Best trades
         best_trades = trades_df.sort("pnl_pct", descending=True).head(10)
-        print(f"\nTop 10 Winners:")
+        print("\nTop 10 Winners:")
         print(f"{'Date':<12} {'Symbol':<10} {'Entry':>8} {'Exit':>8} {'PnL%':>7} {'R':>5} {'Days':>5}")
         for t in best_trades.iter_rows(named=True):
-            print(f"{str(t['entry_date']):<12} {t['symbol']:<10} {t['entry_price']:>8.2f} "
+            print(f"{t['entry_date']!s:<12} {t['symbol']:<10} {t['entry_price']:>8.2f} "
                   f"{t['exit_price']:>8.2f} {t['pnl_pct']:>6.2f}% {t['r_multiple']:>4.1f}R {t['holding_days']:>5}")
 
         # Worst trades
         worst_trades = trades_df.sort("pnl_pct").head(10)
-        print(f"\nTop 10 Losers:")
+        print("\nTop 10 Losers:")
         print(f"{'Date':<12} {'Symbol':<10} {'Entry':>8} {'Exit':>8} {'PnL%':>7} {'R':>5} {'Days':>5}")
         for t in worst_trades.iter_rows(named=True):
-            print(f"{str(t['entry_date']):<12} {t['symbol']:<10} {t['entry_price']:>8.2f} "
+            print(f"{t['entry_date']!s:<12} {t['symbol']:<10} {t['entry_price']:>8.2f} "
                   f"{t['exit_price']:>8.2f} {t['pnl_pct']:>6.2f}% {t['r_multiple']:>4.1f}R {t['holding_days']:>5}")
 
         # Exit reason analysis
@@ -453,14 +451,14 @@ def run_10year_backtest():
             pl.col("pnl_pct").mean().alias("avg_pnl")
         ).sort("count", descending=True)
 
-        print(f"\nExit Reason Analysis:")
+        print("\nExit Reason Analysis:")
         print(f"{'Reason':<30} {'Count':>7} {'Avg PnL%':>10}")
         for row in exit_counts.iter_rows(named=True):
             print(f"{row['exit_reason']:<30} {row['count']:>7} {row['avg_pnl']:>9.2f}%")
 
     # Market cycle analysis
     print(f"\n{'=' * 80}")
-    print(f"MARKET CYCLE ANALYSIS")
+    print("MARKET CYCLE ANALYSIS")
     print(f"{'=' * 80}")
 
     # Bull market periods (approximate for Nifty)
@@ -490,7 +488,7 @@ def run_10year_backtest():
         print(f"{label:<30} {len(period_trades):>7} {period_return:>8.2f}% {period_win_rate:>5.1f}%")
 
     print(f"\n{'=' * 80}")
-    print(f"BACKTEST COMPLETE")
+    print("BACKTEST COMPLETE")
     print(f"{'=' * 80}\n")
 
     return yearly_results, all_trades

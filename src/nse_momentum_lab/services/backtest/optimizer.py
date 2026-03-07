@@ -1,22 +1,38 @@
 """Parameter optimization worker for strategy parameter tuning.
 
-This module provides automated parameter optimization for the 4% breakout + 2LYNCH strategy.
+This module provides automated parameter optimization for any registered strategy
+using the unified research protocol framework.
 
 Usage:
     # Run grid search optimization
     doppler run -- uv run python -m nse_momentum_lab.services.backtest.optimizer \
-        --start-date 2024-01-01 --end-date 2024-12-31 --mode grid
+        --start-date 2024-01-01 --end-date 2024-12-31 --mode grid --strategy indian2lynch
 
     # Run walk-forward optimization
     doppler run -- uv run python -m nse_momentum_lab.services.backtest.optimizer \
-        --start-date 2024-01-01 --end-date 2024-12-31 --mode walkforward
+        --start-date 2024-01-01 --end-date 2024-12-31 --mode walkforward --strategy indian2lynch
+
+    # Run anchored walk-forward
+    doppler run -- uv run python -m nse_momentum_lab.services.backtest.optimizer \
+        --start-date 2020-01-01 --end-date 2024-12-31 --mode walkforward-anchored --strategy thresholdbreakout
+
+    # Run rolling walk-forward
+    doppler run -- uv run python -m nse_momentum_lab.services.backtest.optimizer \
+        --start-date 2020-01-01 --end-date 2024-12-31 --mode walkforward-rolling --strategy thresholdbreakout
+
+    # Run random search
+    doppler run -- uv run python -m nse_momentum_lab.services.backtest.optimizer \
+        --start-date 2024-01-01 --end-date 2024-12-31 --mode random --strategy indian2lynch
+
+    # Run sensitivity analysis
+    doppler run -- uv run python -m nse_momentum_lab.services.backtest.optimizer \
+        --start-date 2024-01-01 --end-date 2024-12-31 --mode sensitivity --strategy indian2lynch
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import itertools
 import json
 import logging
 import sys
@@ -36,6 +52,13 @@ from nse_momentum_lab.db.models import (
     MdOhlcvAdj,
     RefSymbol,
 )
+from nse_momentum_lab.services.backtest.protocols import (
+    ProtocolConfig,
+    ProtocolResult,
+    ProtocolType,
+    create_protocol,
+)
+from nse_momentum_lab.services.backtest.strategy_registry import resolve_strategy
 from nse_momentum_lab.services.scan.features import FeatureEngine, PriceData
 from nse_momentum_lab.services.scan.rules import ScanConfig, ScanRuleEngine
 
@@ -69,6 +92,8 @@ class ParameterGrid:
         )
 
     def generate_combinations(self) -> list[dict[str, Any]]:
+        import itertools
+
         keys = [k for k in self.__dataclass_fields__.keys() if getattr(self, k)]
         values = [getattr(self, k) for k in keys]
         combinations = list(itertools.product(*values))
@@ -84,17 +109,23 @@ class OptimizationResult:
 
 
 class ParameterOptimizer:
+    """Strategy-agnostic parameter optimizer using the unified protocol framework."""
+
     def __init__(
         self,
         start_date: date,
         end_date: date,
         objective: str = "sharpe_ratio",
+        strategy_name: str = "indian2lynch",
     ) -> None:
         self.start_date = start_date
         self.end_date = end_date
         self.objective = objective
+        self.strategy_name = strategy_name
+        self._strategy = resolve_strategy(strategy_name)
         self._sessionmaker = get_sessionmaker()
         self._feature_engine = FeatureEngine()
+        logger.info(f"Initialized optimizer for strategy: {strategy_name}")
 
     async def run_grid_search(
         self,
@@ -211,6 +242,68 @@ class ParameterOptimizer:
             fold += 1
 
         return walk_forward_results
+
+    async def run_protocol(
+        self,
+        protocol_type: ProtocolType,
+        param_grid: dict[str, list[Any]] | None = None,
+        param_space: dict[str, tuple[Any, Any]] | None = None,
+        param_ranges: dict[str, list[Any]] | None = None,
+        train_days: int = 252,
+        test_days: int = 63,
+        roll_interval_days: int = 63,
+        max_combinations: int = 100,
+    ) -> ProtocolResult:
+        """Run a research protocol using the unified framework.
+
+        Args:
+            protocol_type: Type of protocol to run
+            param_grid: Parameter grid for grid search
+            param_space: Parameter space for random search
+            param_ranges: Parameter ranges for sensitivity analysis
+            train_days: Training window days for walk-forward
+            test_days: Test window days for walk-forward
+            roll_interval_days: Roll interval for walk-forward
+            max_combinations: Maximum combinations to test
+
+        Returns:
+            ProtocolResult with all fold results
+        """
+        config = ProtocolConfig(
+            strategy_name=self.strategy_name,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            objective_metric=self.objective,
+            max_combinations=max_combinations,
+        )
+
+        protocol_kwargs: dict[str, Any] = {}
+
+        if protocol_type == ProtocolType.GRID_SEARCH:
+            protocol_kwargs["param_grid"] = param_grid
+        elif protocol_type == ProtocolType.RANDOM_SEARCH:
+            protocol_kwargs["param_space"] = param_space
+        elif protocol_type == ProtocolType.SENSITIVITY_OAT:
+            protocol_kwargs["param_ranges"] = param_ranges
+        elif protocol_type in (
+            ProtocolType.WALK_FORWARD_ANCHORED,
+            ProtocolType.WALK_FORWARD_ROLLING,
+        ):
+            protocol_kwargs["train_days"] = train_days
+            protocol_kwargs["test_days"] = test_days
+            protocol_kwargs["roll_interval_days"] = roll_interval_days
+            protocol_kwargs["param_grid"] = param_grid
+
+        protocol = create_protocol(protocol_type, config, **protocol_kwargs)
+
+        async def backtest_fn(
+            params: dict[str, Any],
+            start_date: date,
+            end_date: date,
+        ) -> dict[str, Any]:
+            return await self._evaluate_params(params, start_date, end_date)
+
+        return await protocol.run(backtest_fn)
 
     async def _evaluate_params(
         self,
@@ -377,15 +470,16 @@ class ParameterOptimizer:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             exp_run = ExpRun(
-                exp_hash=f"opt_{mode}_{self.start_date}_{self.end_date}",
-                strategy_name=f"PARAM_OPT_{mode.upper()}",
-                strategy_hash="",
+                exp_hash=f"opt_{mode}_{self.strategy_name}_{self.start_date}_{self.end_date}",
+                strategy_name=f"{self.strategy_name.upper()}_OPT_{mode.upper()}",
+                strategy_hash=self._strategy.version,
                 dataset_hash=f"{self.start_date}:{self.end_date}",
                 params_json={
                     "optimization_mode": mode,
                     "objective": self.objective,
                     "start_date": self.start_date.isoformat(),
                     "end_date": self.end_date.isoformat(),
+                    "strategy": self.strategy_name,
                 },
                 code_sha="",
                 status="SUCCEEDED",
@@ -416,6 +510,59 @@ class ParameterOptimizer:
             await session.commit()
             return exp_run.exp_run_id
 
+    async def store_protocol_result(
+        self,
+        result: ProtocolResult,
+    ) -> int:
+        """Store protocol result to database."""
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            exp_run = ExpRun(
+                exp_hash=result.protocol_hash,
+                strategy_name=f"{result.strategy_name.upper()}_{result.protocol_type.value.upper()}",
+                strategy_hash=result.strategy_version,
+                dataset_hash=f"{result.start_date}:{result.end_date}",
+                params_json={
+                    "protocol_type": result.protocol_type.value,
+                    "objective": result.objective_metric,
+                    "start_date": result.start_date.isoformat(),
+                    "end_date": result.end_date.isoformat(),
+                    "strategy": result.strategy_name,
+                    "total_runs": result.total_runs,
+                    "successful_runs": result.successful_runs,
+                    "failed_runs": result.failed_runs,
+                    "best_params": result.best_params,
+                },
+                code_sha="",
+                status=result.status,
+            )
+            session.add(exp_run)
+            await session.flush()
+
+            for metric_name, metric_value in result.best_metrics.items():
+                if isinstance(metric_value, (int, float)):
+                    session.add(
+                        ExpMetric(
+                            exp_run_id=exp_run.exp_run_id,
+                            metric_name=f"best_{metric_name}",
+                            metric_value=metric_value,
+                        )
+                    )
+
+            for fold in result.folds:
+                for metric_name, metric_value in fold.test_metrics.items():
+                    if isinstance(metric_value, (int, float)):
+                        session.add(
+                            ExpMetric(
+                                exp_run_id=exp_run.exp_run_id,
+                                metric_name=f"fold{fold.fold_index}_{metric_name}",
+                                metric_value=metric_value,
+                            )
+                        )
+
+            await session.commit()
+            return exp_run.exp_run_id
+
 
 def print_results(results: list[OptimizationResult]) -> None:
     print(f"\n{'=' * 80}")
@@ -441,6 +588,29 @@ def print_results(results: list[OptimizationResult]) -> None:
     print("=" * 80)
 
 
+def print_protocol_result(result: ProtocolResult) -> None:
+    """Print protocol result in a readable format."""
+    print(f"\n{'=' * 80}")
+    print(f"PROTOCOL RESULTS: {result.protocol_type.value}")
+    print(f"{'=' * 80}")
+    print(f"Strategy: {result.strategy_name} (v{result.strategy_version})")
+    print(f"Period: {result.start_date} to {result.end_date}")
+    print(f"Objective: {result.objective_metric}")
+    print(f"Status: {result.status}")
+    print(f"Total runs: {result.total_runs}")
+    print(f"Successful: {result.successful_runs}")
+    print(f"Failed: {result.failed_runs}")
+    print(f"\nBest parameters: {json.dumps(result.best_params, indent=2)}")
+    print(f"Best metrics: {json.dumps(result.best_metrics, indent=2)}")
+    print(f"\nFolds: {len(result.folds)}")
+    for fold in result.folds:
+        print(
+            f"  Fold {fold.fold_index}: {fold.test_start} to {fold.test_end}, "
+            f"trades={fold.trade_count}, status={fold.status}"
+        )
+    print("=" * 80)
+
+
 async def main_async(args):
     start_date = date.fromisoformat(args.start_date)
     end_date = date.fromisoformat(args.end_date)
@@ -449,6 +619,7 @@ async def main_async(args):
         start_date=start_date,
         end_date=end_date,
         objective=args.objective,
+        strategy_name=args.strategy,
     )
 
     if args.mode == "grid":
@@ -456,6 +627,7 @@ async def main_async(args):
         if results:
             print_results(results)
             await optimizer.store_results(results, mode="grid")
+
     elif args.mode == "walkforward":
         results = await optimizer.run_walk_forward(
             train_days=args.train_days,
@@ -464,6 +636,42 @@ async def main_async(args):
         print(f"\nWalk-Forward Results: {len(results)} folds completed")
         for r in results:
             print(f"  Fold {r['fold']}: {r['best_metrics']}")
+
+    elif args.mode == "walkforward-anchored":
+        result = await optimizer.run_protocol(
+            ProtocolType.WALK_FORWARD_ANCHORED,
+            train_days=args.train_days,
+            test_days=args.test_days,
+            roll_interval_days=args.roll_interval,
+        )
+        print_protocol_result(result)
+        await optimizer.store_protocol_result(result)
+
+    elif args.mode == "walkforward-rolling":
+        result = await optimizer.run_protocol(
+            ProtocolType.WALK_FORWARD_ROLLING,
+            train_days=args.train_days,
+            test_days=args.test_days,
+            roll_interval_days=args.roll_interval,
+        )
+        print_protocol_result(result)
+        await optimizer.store_protocol_result(result)
+
+    elif args.mode == "random":
+        result = await optimizer.run_protocol(
+            ProtocolType.RANDOM_SEARCH,
+            max_combinations=args.max_combinations,
+        )
+        print_protocol_result(result)
+        await optimizer.store_protocol_result(result)
+
+    elif args.mode == "sensitivity":
+        result = await optimizer.run_protocol(
+            ProtocolType.SENSITIVITY_OAT,
+        )
+        print_protocol_result(result)
+        await optimizer.store_protocol_result(result)
+
     else:
         print(f"Unknown mode: {args.mode}")
         sys.exit(1)
@@ -484,10 +692,23 @@ def main():
         help="End date (YYYY-MM-DD)",
     )
     parser.add_argument(
+        "--strategy",
+        type=str,
+        default="indian2lynch",
+        help="Strategy name to optimize",
+    )
+    parser.add_argument(
         "--mode",
         type=str,
         default="grid",
-        choices=["grid", "walkforward"],
+        choices=[
+            "grid",
+            "walkforward",
+            "walkforward-anchored",
+            "walkforward-rolling",
+            "random",
+            "sensitivity",
+        ],
         help="Optimization mode",
     )
     parser.add_argument(
@@ -507,6 +728,18 @@ def main():
         type=int,
         default=63,
         help="Walk-forward test period in days",
+    )
+    parser.add_argument(
+        "--roll-interval",
+        type=int,
+        default=63,
+        help="Walk-forward roll interval in days",
+    )
+    parser.add_argument(
+        "--max-combinations",
+        type=int,
+        default=100,
+        help="Maximum combinations for grid/random search",
     )
     args = parser.parse_args()
 

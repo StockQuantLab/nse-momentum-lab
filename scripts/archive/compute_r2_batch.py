@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import numpy as np
 from tqdm import tqdm
+
 from nse_momentum_lab.db.market_db import get_market_db
 
 
@@ -91,7 +92,7 @@ def main():
 
     # Process in batches
     batch_updates = []
-    WINDOW_SIZE = 65
+    window_size = 65
 
     for symbol in tqdm(symbols, desc="Computing R²"):
         try:
@@ -110,10 +111,10 @@ def main():
             closes = np.array([float(r[1]) if r[1] else np.nan for r in result])
 
             # Compute R²
-            r2_values = compute_r2_vectorized(closes, WINDOW_SIZE)
+            r2_values = compute_r2_vectorized(closes, window_size)
 
             # Collect updates
-            for date, r2_val in zip(dates, r2_values):
+            for date, r2_val in zip(dates, r2_values, strict=False):
                 batch_updates.append((float(r2_val), symbol, date))
 
             # Batch update every 1000 rows

@@ -11,7 +11,6 @@ This helps identify redundant or weak filters that can be removed or modified.
 """
 
 import sys
-from datetime import date, datetime
 from pathlib import Path
 
 import polars as pl
@@ -19,10 +18,6 @@ import polars as pl
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from nse_momentum_lab.db.market_db import get_market_db
-from nse_momentum_lab.services.backtest.vectorbt_engine import (
-    VectorBTEngine,
-    VectorBTConfig,
-)
 
 
 def get_top_n_liquid_symbols(db: get_market_db, n: int = 100) -> list[str]:
@@ -192,7 +187,7 @@ def run_filter_analysis():
 
     # Filter pass rates
     print(f"\n{'=' * 80}")
-    print(f"FILTER PASS RATES (on all gap-ups)")
+    print("FILTER PASS RATES (on all gap-ups)")
     print(f"{'=' * 80}")
 
     filters = ["filter_h", "filter_n", "filter_y", "filter_c", "filter_l"]
@@ -211,7 +206,7 @@ def run_filter_analysis():
         print(f"  {filter_names[f]:<40} {passed:>6} / {total:<6} ({pct:>5.1f}%)")
 
     # Filter L breakdown
-    print(f"\nFilter L Breakdown:")
+    print("\nFilter L Breakdown:")
     for col, name in [("l_above_ma20", "Above MA20"), ("l_positive_mom", "Positive 5d momentum"), ("l_r2_high", "R² >= 70%")]:
         passed = df[col].fill_null(False).sum()
         total = len(df)
@@ -220,7 +215,7 @@ def run_filter_analysis():
 
     # Correlation analysis
     print(f"\n{'=' * 80}")
-    print(f"FILTER CORRELATION ANALYSIS")
+    print("FILTER CORRELATION ANALYSIS")
     print(f"{'=' * 80}")
 
     # Calculate filter correlations
@@ -238,7 +233,7 @@ def run_filter_analysis():
                 overlap_pct = (both / f1_count * 100) if f1_count > 0 else 0
                 corr_matrix[f1][f2] = overlap_pct
 
-    print(f"\nFilter Overlap (when row filter passes, % of time column filter also passes):")
+    print("\nFilter Overlap (when row filter passes, % of time column filter also passes):")
     print(f"{'':<10}", end="")
     for f in filter_cols:
         print(f"{f:>8}", end="")
@@ -252,7 +247,7 @@ def run_filter_analysis():
 
     # Performance by filter count
     print(f"\n{'=' * 80}")
-    print(f"PERFORMANCE BY FILTER COUNT")
+    print("PERFORMANCE BY FILTER COUNT")
     print(f"{'=' * 80}")
 
     for n in range(6):
@@ -265,7 +260,7 @@ def run_filter_analysis():
 
     # Filter combination analysis
     print(f"\n{'=' * 80}")
-    print(f"TOP FILTER COMBINATIONS")
+    print("TOP FILTER COMBINATIONS")
     print(f"{'=' * 80}")
 
     # Count unique filter combinations
@@ -283,7 +278,7 @@ def run_filter_analysis():
         pl.len().alias("count")
     ).sort("count", descending=True).head(20)
 
-    print(f"\nTop 20 Filter Combinations:")
+    print("\nTop 20 Filter Combinations:")
     print(f"{'Combination (H N Y C L)':<25} {'Count':>8} {'%':>6}")
     for row in combo_counts.iter_rows(named=True):
         pct = row["count"] / len(df) * 100
@@ -291,10 +286,10 @@ def run_filter_analysis():
 
     # Individual filter effectiveness
     print(f"\n{'=' * 80}")
-    print(f"INDIVIDUAL FILTER EFFECTIVENESS")
+    print("INDIVIDUAL FILTER EFFECTIVENESS")
     print(f"{'=' * 80}")
 
-    print(f"\nFor each filter, what happens when it PASSES vs FAILS?")
+    print("\nFor each filter, what happens when it PASSES vs FAILS?")
 
     for f in filter_cols:
         passed = df.filter(pl.col(f))
@@ -319,10 +314,10 @@ def run_filter_analysis():
 
     # Filter redundancy analysis
     print(f"\n{'=' * 80}")
-    print(f"FILTER REDUNDANCY ANALYSIS")
+    print("FILTER REDUNDANCY ANALYSIS")
     print(f"{'=' * 80}")
 
-    print(f"\nFilters with HIGH overlap (>80%) may be redundant:")
+    print("\nFilters with HIGH overlap (>80%) may be redundant:")
     redundant_pairs = []
     for f1 in filter_cols:
         for f2 in filter_cols:
@@ -336,15 +331,15 @@ def run_filter_analysis():
                 redundant_pairs.append((f1, f2, overlap_1to2, overlap_2to1))
 
     if redundant_pairs:
-        print(f"\n  Potentially Redundant Filter Pairs:")
+        print("\n  Potentially Redundant Filter Pairs:")
         for f1, f2, o1, o2 in redundant_pairs:
             print(f"    {f1} <-> {f2}: {o1:.1f}% / {o2:.1f}% overlap")
     else:
-        print(f"\n  No highly redundant filter pairs found (>80% overlap)")
+        print("\n  No highly redundant filter pairs found (>80% overlap)")
 
     # Recommendations
     print(f"\n{'=' * 80}")
-    print(f"RECOMMENDATIONS")
+    print("RECOMMENDATIONS")
     print(f"{'=' * 80}")
 
     # Find most selective filter (lowest pass rate)
@@ -355,13 +350,13 @@ def run_filter_analysis():
     print(f"\n  Most Selective Filter: {filter_names[most_selective]} ({pass_rates[most_selective]:.1f}% pass rate)")
     print(f"  Least Selective Filter: {filter_names[least_selective]} ({pass_rates[least_selective]:.1f}% pass rate)")
 
-    print(f"\n  Considerations:")
-    print(f"    - Low pass rate filters are 'gatekeepers' - they define signal quality")
-    print(f"    - High pass rate filters may need tightening or removal")
-    print(f"    - Filter combinations matter more than individual filters")
+    print("\n  Considerations:")
+    print("    - Low pass rate filters are 'gatekeepers' - they define signal quality")
+    print("    - High pass rate filters may need tightening or removal")
+    print("    - Filter combinations matter more than individual filters")
 
     print(f"\n{'=' * 80}")
-    print(f"FILTER ANALYSIS COMPLETE")
+    print("FILTER ANALYSIS COMPLETE")
     print(f"{'=' * 80}\n")
 
 

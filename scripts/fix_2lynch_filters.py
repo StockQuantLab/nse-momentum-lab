@@ -10,16 +10,13 @@ This script fixes critical gaps in our 2LYNCH implementation:
 
 import sys
 from pathlib import Path
-from datetime import date, timedelta
+
 import numpy as np
-import polars as pl
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from nse_momentum_lab.db.market_db import get_market_db
-from nse_momentum_lab.services.scan.features import FeatureEngine, PriceData
-from nse_momentum_lab.services.scan.duckdb_signal_generator import DuckDBSignalGenerator
 from nse_momentum_lab.services.scan.rules import ScanConfig
 
 
@@ -86,11 +83,11 @@ def rebuild_features_with_r2():
 
                 # Convert to numpy arrays
                 dates = [row[0] for row in df]
-                opens = np.array([row[1] for row in df], dtype=np.float64)
-                highs = np.array([row[2] for row in df], dtype=np.float64)
-                lows = np.array([row[3] for row in df], dtype=np.float64)
+                np.array([row[1] for row in df], dtype=np.float64)
+                np.array([row[2] for row in df], dtype=np.float64)
+                np.array([row[3] for row in df], dtype=np.float64)
                 closes = np.array([row[4] for row in df], dtype=np.float64)
-                volumes = np.array([row[5] for row in df], dtype=np.float64)
+                np.array([row[5] for row in df], dtype=np.float64)
 
                 n = len(closes)
                 if n < 65:
@@ -111,7 +108,7 @@ def rebuild_features_with_r2():
                         sum_y = np.sum(window)
                         sum_xy = np.sum(x * window)
                         sum_x2 = np.sum(x ** 2)
-                        sum_y2 = np.sum(window ** 2)
+                        np.sum(window ** 2)
 
                         denominator = (n_points * sum_x2 - sum_x ** 2)
                         if denominator == 0:
@@ -129,7 +126,7 @@ def rebuild_features_with_r2():
                             r2_65[j] = 0.0
                         else:
                             r2_65[j] = float(1 - (ss_res / ss_tot))
-                    except:
+                    except Exception:
                         r2_65[j] = 0.0
 
                 # Update feat_daily table
@@ -163,11 +160,11 @@ def rebuild_features_with_r2():
         LIMIT 10
     """).fetchall()
 
-    print(f"\n  Sample R² values (highest):")
+    print("\n  Sample R² values (highest):")
     for row in sample:
         print(f"    {row[0]} @ {row[1]}: R² = {row[2]:.3f}")
 
-    print(f"\n  [STEP 1 COMPLETE] R² values computed")
+    print("\n  [STEP 1 COMPLETE] R² values computed")
 
 
 def add_missing_filters():
@@ -179,7 +176,7 @@ def add_missing_filters():
     # Read the current signal generator
     sg_file = Path("src/nse_momentum_lab/services/scan/duckdb_signal_generator.py")
 
-    with open(sg_file, 'r') as f:
+    with open(sg_file) as f:
         content = f.read()
 
     # Check if filters are already present
@@ -195,7 +192,7 @@ def add_missing_filters():
     print("  - Volume > 100,000 filter")
     print("  - Price > ₹3 filter")
 
-    print(f"\n  [STEP 2 COMPLETE] Missing filters added")
+    print("\n  [STEP 2 COMPLETE] Missing filters added")
 
 
 def create_fixed_signal_generator():
@@ -416,7 +413,7 @@ class FixedDuckDBSignalGenerator:
         f.write(fixed_code)
 
     print(f"  Created: {sg_file}")
-    print(f"\n  [STEP 3 COMPLETE] Fixed signal generator created")
+    print("\n  [STEP 3 COMPLETE] Fixed signal generator created")
 
 
 def test_fixed_implementation():
@@ -425,18 +422,17 @@ def test_fixed_implementation():
     print("STEP 4: TESTING FIXED IMPLEMENTATION")
     print("=" * 80)
 
-    print(f"\n  Testing with top 100 stocks, 2020-2024...")
-    print(f"  This will take a few minutes...", flush=True)
+    print("\n  Testing with top 100 stocks, 2020-2024...")
+    print("  This will take a few minutes...", flush=True)
 
     # Import the fixed generator
-    from importlib import import_module
     import sys
     sys.path.insert(0, str(Path(__file__).parent / "src"))
 
     # For now, we'll test with existing generator but with proper config
     # Update the config to match ADR-007
 
-    config = ScanConfig(
+    ScanConfig(
         breakout_threshold=0.04,
         close_pos_threshold=0.70,  # ADR-007: (c-l)/(h-l) >= 0.70
         min_filters_pass=4,  # Require 4/6 filters
@@ -447,7 +443,7 @@ def test_fixed_implementation():
     # We'll update the existing generator to add the missing filters
     # This is temporary - in production we'd use the fixed version
 
-    print(f"\n  [STEP 4 COMPLETE] Test configuration ready")
+    print("\n  [STEP 4 COMPLETE] Test configuration ready")
 
 
 if __name__ == "__main__":
@@ -476,9 +472,9 @@ if __name__ == "__main__":
     print(f"\n{'=' * 80}")
     print("FIX PREPARATION COMPLETE")
     print(f"{'=' * 80}")
-    print(f"\nNEXT STEPS:")
-    print(f"1. Update src/nse_momentum_lab/services/scan/duckdb_signal_generator.py")
-    print(f"   with filters from duckdb_signal_generator_fixed.py")
-    print(f"2. Run backtest: uv run python tests/integration/test_fast_backtest.py")
-    print(f"3. Compare results to baseline")
+    print("\nNEXT STEPS:")
+    print("1. Update src/nse_momentum_lab/services/scan/duckdb_signal_generator.py")
+    print("   with filters from duckdb_signal_generator_fixed.py")
+    print("2. Run backtest: uv run python tests/integration/test_fast_backtest.py")
+    print("3. Compare results to baseline")
     print(f"\n{'=' * 80}\n")

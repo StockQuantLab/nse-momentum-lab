@@ -10,7 +10,6 @@ Deep dive into winning and losing trade patterns to understand:
 import sys
 from datetime import date, datetime
 from pathlib import Path
-import numpy as np
 
 import polars as pl
 
@@ -18,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from nse_momentum_lab.db.market_db import get_market_db
 from nse_momentum_lab.services.backtest.vectorbt_engine import (
-    VectorBTEngine,
     VectorBTConfig,
+    VectorBTEngine,
 )
 
 
@@ -277,7 +276,7 @@ def run_trade_analysis():
     trades_df = pl.DataFrame(trades)
 
     print(f"\n{'=' * 80}")
-    print(f"OVERALL STATISTICS")
+    print("OVERALL STATISTICS")
     print(f"{'=' * 80}")
 
     total = len(trades_df)
@@ -295,7 +294,7 @@ def run_trade_analysis():
 
     # Gap size analysis
     print(f"\n{'=' * 80}")
-    print(f"GAP SIZE ANALYSIS")
+    print("GAP SIZE ANALYSIS")
     print(f"{'=' * 80}")
 
     trades_df = trades_df.with_columns([
@@ -314,11 +313,11 @@ def run_trade_analysis():
     print(f"\n{'Gap Size':<12} {'Count':>6} {'Avg PnL%':>10} {'Avg R':>7} {'Win%':>6}")
     for row in gap_analysis.iter_rows(named=True):
         win_pct = (row['wins'] / row['count'] * 100) if row['count'] > 0 else 0
-        print(f"{str(row['gap_pct_display']):<12} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%")
+        print(f"{row['gap_pct_display']!s:<12} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%")
 
     # Close position analysis
     print(f"\n{'=' * 80}")
-    print(f"CLOSE POSITION IN RANGE ANALYSIS")
+    print("CLOSE POSITION IN RANGE ANALYSIS")
     print(f"{'=' * 80}")
 
     pos_analysis = trades_df.group_by(
@@ -333,11 +332,11 @@ def run_trade_analysis():
     print(f"\n{'Close Position':<12} {'Count':>6} {'Avg PnL%':>10} {'Avg R':>7} {'Win%':>6}")
     for row in pos_analysis.iter_rows(named=True):
         win_pct = (row['wins'] / row['count'] * 100) if row['count'] > 0 else 0
-        print(f"{str(row['close_pos_in_range']):<12} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%")
+        print(f"{row['close_pos_in_range']!s:<12} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%")
 
     # Day of week analysis
     print(f"\n{'=' * 80}")
-    print(f"DAY OF WEEK ANALYSIS")
+    print("DAY OF WEEK ANALYSIS")
     print(f"{'=' * 80}")
 
     trades_df = trades_df.with_columns([
@@ -360,7 +359,7 @@ def run_trade_analysis():
 
     # Month analysis
     print(f"\n{'=' * 80}")
-    print(f"MONTH ANALYSIS")
+    print("MONTH ANALYSIS")
     print(f"{'=' * 80}")
 
     trades_df = trades_df.with_columns([
@@ -384,7 +383,7 @@ def run_trade_analysis():
 
     # Exit reason detailed analysis
     print(f"\n{'=' * 80}")
-    print(f"EXIT REASON DETAILED ANALYSIS")
+    print("EXIT REASON DETAILED ANALYSIS")
     print(f"{'=' * 80}")
 
     exit_analysis = trades_df.group_by("exit_reason").agg(
@@ -405,7 +404,7 @@ def run_trade_analysis():
 
     # Winner vs Loser profiles
     print(f"\n{'=' * 80}")
-    print(f"WINNER VS LOSER PROFILES")
+    print("WINNER VS LOSER PROFILES")
     print(f"{'=' * 80}")
 
     print(f"\n{'Attribute':<20} {'Winners':>12} {'Losers':>12}")
@@ -430,7 +429,7 @@ def run_trade_analysis():
 
     # Filter pass analysis
     print(f"\n{'=' * 80}")
-    print(f"FILTER IMPACT ON TRADES")
+    print("FILTER IMPACT ON TRADES")
     print(f"{'=' * 80}")
 
     for filter_name, display_name in [
@@ -439,8 +438,8 @@ def run_trade_analysis():
         ("filter_c", "Volume Dryup < 1.3"),
         ("filter_l", "Long-term Setup"),
     ]:
-        filter_pass = trades_df.filter(pl.col(filter_name) == True)
-        filter_fail = trades_df.filter(pl.col(filter_name) == False)
+        filter_pass = trades_df.filter(pl.col(filter_name))
+        filter_fail = trades_df.filter(not pl.col(filter_name))
 
         if len(filter_pass) > 0 and len(filter_fail) > 0:
             win_pass = filter_pass.filter(pl.col("pnl_pct") > 0).height / len(filter_pass) * 100
@@ -454,25 +453,25 @@ def run_trade_analysis():
 
     # Key insights
     print(f"\n{'=' * 80}")
-    print(f"KEY INSIGHTS")
+    print("KEY INSIGHTS")
     print(f"{'=' * 80}")
 
     best_gap = gap_analysis.sort("avg_pnl", descending=True).row(0, named=True)
     worst_gap = gap_analysis.sort("avg_pnl").row(0, named=True)
 
-    print(f"\nGap Size:")
+    print("\nGap Size:")
     print(f"  Best: {best_gap['gap_pct_display']} with avg {best_gap['avg_pnl']:.2f}% return")
     print(f"  Worst: {worst_gap['gap_pct_display']} with avg {worst_gap['avg_pnl']:.2f}% return")
 
     best_exit = exit_analysis.sort("avg_pnl", descending=True).row(0, named=True)
     worst_exit = exit_analysis.sort("avg_pnl").row(0, named=True)
 
-    print(f"\nExit Reasons:")
+    print("\nExit Reasons:")
     print(f"  Best: {best_exit['exit_reason']} with avg {best_exit['avg_pnl']:.2f}% return")
     print(f"  Worst: {worst_exit['exit_reason']} with avg {worst_exit['avg_pnl']:.2f}% return")
 
     print(f"\n{'=' * 80}")
-    print(f"TRADE ANALYSIS COMPLETE")
+    print("TRADE ANALYSIS COMPLETE")
     print(f"{'=' * 80}\n")
 
 
