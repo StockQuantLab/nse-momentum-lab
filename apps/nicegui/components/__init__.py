@@ -7,6 +7,11 @@ Provides:
 - nav_card — home-page navigation tiles
 - apply_chart_theme — unified Plotly light/professional theme
 - divider / info_box / export_button — utility widgets
+
+Theme System:
+- Uses CSS variables for dynamic theme switching
+- Terminal mode: Dark, brutalist trading terminal aesthetic
+- Clean mode: Light, modern SaaS dashboard aesthetic
 """
 
 from __future__ import annotations
@@ -31,29 +36,58 @@ if str(_project_root / "src") not in sys.path:
 from nicegui import ui
 
 # ---------------------------------------------------------------------------
-# Theme tokens
+# Theme definitions — Terminal (Dark) and Clean (Light)
 # ---------------------------------------------------------------------------
-THEME = {
-    "page_bg": "#f8fafc",  # slate-50   — page background
-    "surface": "#ffffff",  # white      — card / drawer
-    "surface_border": "#e2e8f0",  # slate-200  — card borders
-    "surface_hover": "#f1f5f9",  # slate-100  — card hover
-    "text_primary": "#0f172a",  # slate-900
-    "text_secondary": "#475569",  # slate-600
-    "text_muted": "#64748b",  # slate-500
-    "primary": "#0f52ba",  # Sapphire Blue
-    "primary_dark": "#1e40af",  # blue-800
-    "divider": "#e2e8f0",  # slate-200
+
+# Terminal theme — Dark, brutalist trading terminal with neon green
+THEME_TERMINAL = {
+    "page_bg": "#0d1117",
+    "surface": "#161b22",
+    "surface_border": "#30363d",
+    "surface_hover": "#21262d",
+    "text_primary": "#f0f6fc",
+    "text_secondary": "#8b949e",
+    "text_muted": "#6e7681",
+    "primary": "#00ff88",  # Classic terminal phosphor green
+    "primary_dark": "#00cc6a",
+    "divider": "#30363d",
 }
 
-COLORS = {
+COLORS_TERMINAL = {
+    "success": "#00ff88",  # Neon green
+    "error": "#ff6b6b",
+    "warning": "#ffd93d",
+    "info": "#6bcfff",
+    "primary": "#00ff88",
+    "gray": "#6e7681",
+}
+
+# Clean theme — Light, modern SaaS dashboard with indigo primary
+THEME_CLEAN = {
+    "page_bg": "#f8fafc",
+    "surface": "#ffffff",
+    "surface_border": "#e2e8f0",
+    "surface_hover": "#f1f5f9",
+    "text_primary": "#0f172a",
+    "text_secondary": "#475569",
+    "text_muted": "#64748b",
+    "primary": "#6366f1",  # Indigo - more distinctive than standard blue
+    "primary_dark": "#4f46e5",
+    "divider": "#e2e8f0",
+}
+
+COLORS_CLEAN = {
     "success": "#22c55e",
     "error": "#ef4444",
     "warning": "#f59e0b",
-    "info": "#3b82f6",
-    "primary": "#3b82f6",
+    "info": "#6366f1",  # Match primary
+    "primary": "#6366f1",
     "gray": "#64748b",
 }
+
+# Current active theme (starts with Terminal)
+THEME = THEME_TERMINAL.copy()
+COLORS = COLORS_TERMINAL.copy()
 
 # ---------------------------------------------------------------------------
 # Navigation definition (single source of truth)
@@ -72,171 +106,291 @@ NAV_ITEMS = [
 ]
 
 # ---------------------------------------------------------------------------
-# CSS injected once per page
+# CSS with theme variables — supports both Terminal and Clean modes
 # ---------------------------------------------------------------------------
-# Non-blocking font preload injected per-page via ui.add_head_html() in page_layout().
-# We do NOT use @import here — CSS @import is render-blocking and causes slow first paint.
-_FONT_HEAD_HTML = """
+
+# Terminal fonts — IBM Plex Sans + Fira Code for that terminal aesthetic
+_FONT_HEAD_TERMINAL = """
 <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" media="print" onload="this.media='all'">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Fira+Code:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
 """
 
-_PAGE_CSS = """
-/* Typography — Inter with instant system-font fallback */
+# Clean theme fonts — DM Sans (distinctive, not generic Inter) + JetBrains Mono
+_FONT_HEAD_CLEAN = """
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
+"""
+
+
+# Get current font based on theme mode
+def _get_font_html() -> str:
+    return _FONT_HEAD_TERMINAL if _theme_mode["terminal"] else _FONT_HEAD_CLEAN
+
+
+# Base CSS using CSS variables — works for both themes
+_PAGE_CSS_BASE = """
+/* Typography — Terminal: Fira Code, Clean: DM Sans */
 body, .q-app {
-    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont,
-                 'Segoe UI', Roboto, Oxygen, sans-serif !important;
+    font-family: var(--font-body, 'DM Sans', system-ui, -apple-system, sans-serif) !important;
 }
 
-/* Subtle grid background for data pages */
-.data-grid-bg {
-    background-image:
-        linear-gradient(%(surface_border)s22 1px, transparent 1px),
-        linear-gradient(90deg, %(surface_border)s22 1px, transparent 1px);
-    background-size: 40px 40px;
-    background-position: -1px -1px;
+/* Mono font for data and code — Fira Code for Terminal, JetBrains for Clean */
+.mono-font, .kpi-card, .q-table, .q-input, .q-select, .q-btn {
+    font-family: var(--font-mono, 'JetBrains Mono', 'Courier New', monospace) !important;
+}
+.q-table, .q-input, .q-select {
+    letter-spacing: 0.02em;
 }
 
-/* KPI cards */
+/* Type scale — consistent heading sizes */
+h1, .text-h1, .text-4xl { font-size: 2.25rem; font-weight: 700; letter-spacing: -0.02em; }
+h2, .text-h2, .text-3xl { font-size: 1.75rem; font-weight: 600; letter-spacing: -0.01em; }
+h3, .text-h3, .text-2xl { font-size: 1.5rem; font-weight: 600; letter-spacing: -0.01em; }
+h4, .text-h4, .text-xl { font-size: 1.25rem; font-weight: 600; }
+.text-lg { font-size: 1.1rem; font-weight: 500; }
+.text-sm { font-size: 0.875rem; font-weight: 400; }
+.text-xs { font-size: 0.75rem; font-weight: 400; }
+
+/* Terminal scanline effect — only in terminal mode */
+body.terminal-mode::after {
+    content: "";
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(255, 255, 255, 0.015) 2px,
+        rgba(255, 255, 255, 0.015) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0.3;
+}
+
+/* KPI cards — uses theme variables, generous padding for breathing room */
 .kpi-card {
-    background: %(surface)s;
-    border: 1px solid %(surface_border)s;
-    border-radius: 12px;
-    padding: 20px;
-    transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    background: var(--theme-surface);
+    border: 1px solid var(--theme-surface-border);
+    border-radius: var(--card-radius, 4px);
+    padding: 20px 24px;
+    transition: all 0.15s ease;
+    box-shadow: var(--card-shadow, 0 2px 8px rgba(0,0,0,0.4));
+    position: relative;
+}
+.kpi-card::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 2px;
+    height: 100%;
+    background: var(--theme-primary);
+    opacity: 0;
+    transition: opacity 0.15s;
 }
 .kpi-card:hover {
-    border-color: %(primary)s;
-    box-shadow: 0 0 0 1px %(primary)s33, 0 4px 12px rgba(37,99,235,0.08);
-    transform: translateY(-1px);
+    border-color: var(--theme-primary);
+    box-shadow: var(--card-hover-shadow, 0 0 20px rgba(74, 222, 128, 0.15));
+    transform: translateX(2px);
+}
+.kpi-card:hover::before {
+    opacity: 1;
+}
+
+/* Page content spacing */
+.page-content {
+    padding-top: 24px;
+}
+.page-header {
+    margin-top: 24px;
+    margin-bottom: 16px;
+}
+
+/* Terminal-style pulse animation */
+@keyframes terminal-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
 }
 
 /* Staggered fade-in animation */
-@keyframes fade-in-up {
-    from { opacity: 0; transform: translateY(8px); }
+@keyframes fade-in-terminal {
+    from { opacity: 0; transform: translateY(4px); }
     to { opacity: 1; transform: translateY(0); }
 }
-.kpi-card { animation: fade-in-up 0.3s ease-out backwards; }
-.kpi-card:nth-child(1) { animation-delay: 0.05s; }
-.kpi-card:nth-child(2) { animation-delay: 0.1s; }
-.kpi-card:nth-child(3) { animation-delay: 0.15s; }
-.kpi-card:nth-child(4) { animation-delay: 0.2s; }
-.kpi-card:nth-child(5) { animation-delay: 0.25s; }
-.kpi-card:nth-child(6) { animation-delay: 0.3s; }
-.kpi-card:nth-child(7) { animation-delay: 0.35s; }
-.kpi-card:nth-child(8) { animation-delay: 0.4s; }
+.kpi-card { animation: fade-in-terminal 0.2s ease-out backwards; }
+.kpi-card:nth-child(1) { animation-delay: 0.02s; }
+.kpi-card:nth-child(2) { animation-delay: 0.04s; }
+.kpi-card:nth-child(3) { animation-delay: 0.06s; }
+.kpi-card:nth-child(4) { animation-delay: 0.08s; }
+.kpi-card:nth-child(5) { animation-delay: 0.1s; }
+.kpi-card:nth-child(6) { animation-delay: 0.12s; }
+.kpi-card:nth-child(7) { animation-delay: 0.14s; }
+.kpi-card:nth-child(8) { animation-delay: 0.16s; }
 
-/* Nav cards (home page) */
+/* Nav tiles — uses theme variables */
 .nav-tile {
-    background: %(surface)s;
-    border: 1px solid %(surface_border)s;
-    border-radius: 12px;
-    padding: 24px;
+    background: var(--theme-surface);
+    border: 1px solid var(--theme-surface-border);
+    border-radius: var(--tile-radius, 2px);
+    padding: 20px;
     cursor: pointer;
-    transition: border-color 0.2s, transform 0.15s, box-shadow 0.2s;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    transition: all 0.1s;
+    box-shadow: var(--tile-shadow, 0 2px 4px rgba(0,0,0,0.3));
+    position: relative;
+}
+.nav-tile::after {
+    content: ">>";
+    position: absolute;
+    right: 16px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--theme-primary);
+    opacity: 0;
+    transition: opacity 0.15s;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
 }
 .nav-tile:hover {
-    border-color: %(primary)s;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.08); /* light theme lower opacity shadow */
+    border-color: var(--theme-primary);
+    transform: translateX(4px);
+    box-shadow: 0 0 16px var(--theme-primary-alpha);
+}
+.nav-tile:hover::after {
+    opacity: 1;
 }
 
-/* Sidebar nav items */
+/* Sidebar nav items — uses theme variables */
 .nav-item {
-    border-radius: 8px;
-    padding: 8px 12px;
-    margin: 2px 8px;
-    transition: background 0.15s;
+    border-radius: var(--nav-radius, 0);
+    padding: 8px 16px;
+    margin: 0;
+    transition: all 0.1s;
     cursor: pointer;
-    color: %(text_secondary)s;
+    color: var(--theme-text-secondary);
+    position: relative;
+}
+.nav-item::before {
+    content: ">";
+    position: absolute;
+    left: 4px;
+    opacity: 0;
+    color: var(--theme-primary);
+    font-family: 'JetBrains Mono', monospace;
+    transition: opacity 0.1s;
 }
 .nav-item:hover {
-    background: %(surface_hover)s;
-    color: %(text_primary)s;
+    background: var(--theme-surface-hover);
+    color: var(--theme-text-primary);
+    padding-left: 20px;
+}
+.nav-item:hover::before {
+    opacity: 1;
 }
 .nav-item-active {
-    background: %(primary)s14;
-    color: %(primary)s !important;
-    font-weight: 600;
+    background: var(--theme-primary-alpha);
+    color: var(--theme-primary) !important;
+    font-weight: 500;
+}
+.nav-item-active::before {
+    content: ">";
+    opacity: 1;
 }
 
-/* Quasar table overrides */
+/* Quasar table overrides — uses theme variables, more vertical padding */
 .q-table {
-    background: %(surface)s !important;
-    color: %(text_primary)s !important;
+    background: var(--theme-surface) !important;
+    color: var(--theme-text-primary) !important;
+    border: 1px solid var(--theme-surface-border);
 }
 .q-table thead th {
-    color: %(text_secondary)s !important;
+    color: var(--theme-primary) !important;
     font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    border-bottom: 2px solid var(--theme-surface-border) !important;
+    font-family: var(--font-mono);
+    padding: 14px 16px !important;
+}
+.q-table tbody td {
+    border-bottom: 1px solid var(--theme-divider) !important;
+    color: var(--theme-text-primary) !important;
+    font-family: var(--font-mono);
+    padding: 12px 16px !important;
+}
+.q-table tbody tr:hover td {
+    background: var(--theme-surface-hover) !important;
+}
+
+/* Quasar tabs — uses theme variables */
+.q-tab {
+    color: var(--theme-text-secondary) !important;
+    font-family: 'JetBrains Mono', monospace;
     text-transform: uppercase;
     font-size: 0.75rem;
     letter-spacing: 0.05em;
-    border-bottom: 1px solid %(surface_border)s !important;
-}
-.q-table tbody td {
-    border-bottom: 1px solid %(divider)s !important;
-    color: %(text_primary)s !important;
-}
-.q-table tbody tr:hover td {
-    background: %(surface_hover)s !important;
-}
-
-/* Quasar tabs */
-.q-tab {
-    color: %(text_secondary)s !important;
 }
 .q-tab--active {
-    color: %(primary)s !important;
+    color: var(--theme-primary) !important;
     font-weight: 600;
 }
-.q-tabs__content { border-bottom: 2px solid %(surface_border)s; }
+.q-tabs__content { border-bottom: 1px solid var(--theme-surface-border); }
 
-/* Quasar expansion */
+/* Quasar expansion — uses theme variables */
 .q-expansion-item {
-    background: %(surface)s !important;
-    border: 1px solid %(surface_border)s;
-    border-radius: 10px !important;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    background: var(--theme-surface) !important;
+    border: 1px solid var(--theme-surface-border);
+    border-radius: 2px !important;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
 }
-.q-expansion-item__header { border-radius: 10px !important; }
+.q-expansion-item__header { border-radius: 2px !important; }
 
-/* Quasar select / inputs */
+/* Quasar select / inputs — uses theme variables */
 .q-field__native, .q-field__input {
-    color: %(text_primary)s !important;
+    color: var(--theme-text-primary) !important;
+    font-family: 'JetBrains Mono', monospace;
 }
-.q-field__label { color: %(text_secondary)s !important; }
+.q-field__label { color: var(--theme-text-secondary) !important; }
 .q-field--outlined .q-field__control:before {
-    border-color: %(surface_border)s !important;
+    border-color: var(--theme-surface-border) !important;
 }
 .q-field--outlined.q-field--focused .q-field__control:before {
-    border-color: %(primary)s !important;
+    border-color: var(--theme-primary) !important;
+    box-shadow: 0 0 8px var(--theme-primary-alpha);
 }
 
-/* Info box */
+/* Info box — uses theme variables */
 .info-box {
-    background: %(primary)s0d;
-    border: 1px solid %(primary)s33;
-    border-radius: 8px;
-    padding: 14px 18px;
+    background: var(--info-box-bg);
+    border: 1px solid var(--theme-primary);
+    border-radius: 2px;
+    padding: 12px 16px;
+}
+.info-box::before {
+    content: "[INFO] ";
+    color: var(--theme-primary);
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
 }
 
-/* Code / terminal blocks */
+/* Code / terminal blocks — uses theme variables */
 .code-block {
-    background: %(surface_hover)s;
-    border: 1px solid %(surface_border)s;
-    border-radius: 6px;
+    background: var(--code-bg, #000);
+    border: 1px solid var(--theme-surface-border);
+    border-radius: 2px;
     font-family: 'JetBrains Mono', 'Fira Code', monospace;
     font-size: 0.8rem;
+    color: var(--theme-primary);
 }
 
-/* ── Sidebar mini-mode (Quasar adds .q-drawer--mini when mini prop is set) ── */
-/* Hide logo block + separator in mini mode */
+/* Sidebar mini-mode */
 .q-drawer--mini .sidebar-logo { display: none !important; }
-
-/* Center icon and hide label in collapsed nav rows */
 .q-drawer--mini .nav-row {
     justify-content: center !important;
     padding: 10px 0 !important;
@@ -245,14 +399,175 @@ body, .q-app {
 }
 .q-drawer--mini .nav-label { display: none !important; }
 .q-drawer--mini .nav-icon  { font-size: 1.3rem !important; }
-
-/* Smooth width transition on the drawer itself */
 .q-drawer { transition: width 0.2s ease !important; }
-""" % {**THEME}
+
+/* Scrollbar — uses theme variables */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+::-webkit-scrollbar-track {
+    background: var(--theme-page-bg);
+}
+::-webkit-scrollbar-thumb {
+    background: var(--theme-surface-border);
+    border-radius: 0;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: var(--theme-text-muted);
+}
+
+/* Pagination controls — styled to match theme */
+.q-table .q-pagination {
+    color: var(--theme-text-secondary) !important;
+}
+.q-table .q-pagination .q-btn {
+    color: var(--theme-text-secondary) !important;
+    background: var(--theme-surface) !important;
+    border: 1px solid var(--theme-surface-border) !important;
+}
+.q-table .q-pagination .q-btn:hover {
+    background: var(--theme-surface-hover) !important;
+    border-color: var(--theme-primary) !important;
+    color: var(--theme-primary) !important;
+}
+.q-table .q-pagination .q-btn.q-btn--active {
+    background: var(--theme-primary) !important;
+    color: var(--theme-page-bg) !important;
+    border-color: var(--theme-primary) !important;
+}
+.q-table .q-pagination__select {
+    background: var(--theme-surface) !important;
+    border: 1px solid var(--theme-surface-border) !important;
+    color: var(--theme-text-primary) !important;
+}
+
+/* Negative value highlighting — auto-detect and color red */
+.value-negative {
+    color: var(--theme-color-error) !important;
+    font-weight: 600;
+}
+.value-positive {
+    color: var(--theme-color-success) !important;
+}
+.value-neutral {
+    color: var(--theme-text-muted) !important;
+}
+
+/* Table row numbers column */
+.row-number {
+    color: var(--theme-text-muted) !important;
+    font-size: 0.75rem !important;
+    text-align: center !important;
+    user-select: none;
+}
+
+/* Scrollable table container */
+.scrollable-table {
+    max-height: 450px;
+    overflow-y: auto;
+    overflow-x: auto;
+    width: 100%;
+    display: block;
+}
+.scrollable-table > div {
+    overflow-x: auto !important;
+}
+.scrollable-table .q-table {
+    width: max-content !important;
+    min-width: 100%;
+}
+.scrollable-table .q-table__card {
+    background: transparent !important;
+    box-shadow: none !important;
+    overflow-x: visible !important;
+}
+
+/* Force horizontal scroll on ALL tables */
+.q-table__card {
+    overflow-x: auto !important;
+}
+.q-table__container {
+    overflow-x: visible !important;
+}
+.q-table {
+    width: 100%;
+}
+"""
+
+
+def _get_themed_css() -> str:
+    """Generate complete CSS with variables for current theme."""
+    theme = get_current_theme()
+    colors = get_current_colors()
+
+    # Build CSS variables
+    css_vars = f"""
+:root {{
+    --theme-page-bg: {theme["page_bg"]};
+    --theme-surface: {theme["surface"]};
+    --theme-surface-border: {theme["surface_border"]};
+    --theme-surface-hover: {theme["surface_hover"]};
+    --theme-text-primary: {theme["text_primary"]};
+    --theme-text-secondary: {theme["text_secondary"]};
+    --theme-text-muted: {theme["text_muted"]};
+    --theme-primary: {theme["primary"]};
+    --theme-primary-dark: {theme["primary_dark"]};
+    --theme-divider: {theme["divider"]};
+    --theme-color-success: {colors["success"]};
+    --theme-color-error: {colors["error"]};
+    --theme-color-warning: {colors["warning"]};
+    --theme-color-info: {colors["info"]};
+    --theme-color-gray: {colors["gray"]};
+"""
+
+    if _theme_mode["terminal"]:
+        # Terminal mode specific variables — Fira Code for that authentic terminal feel
+        css_vars += """
+    --font-body: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'Fira Code', 'Courier New', monospace;
+    --card-radius: 4px;
+    --card-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    --card-hover-shadow: 0 0 20px rgba(0, 255, 136, 0.2), 0 2px 12px rgba(0,0,0,0.5);
+    --tile-radius: 2px;
+    --tile-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    --nav-radius: 0;
+    --theme-primary-alpha: rgba(0, 255, 136, 0.15);
+    --info-box-bg: rgba(0, 255, 136, 0.05);
+    --code-bg: #000;
+}}
+/* Add terminal-mode class to body for terminal-specific effects */
+body {{
+    --font-body: 'IBM Plex Sans', system-ui, -apple-system, sans-serif !important;
+    --font-mono: 'Fira Code', 'Courier New', monospace !important;
+}}
+"""
+    else:
+        # Clean mode specific variables — DM Sans for modern, professional look
+        css_vars += """
+    --font-body: 'DM Sans', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', 'SF Mono', 'Monaco', 'Courier New', monospace;
+    --card-radius: 8px;
+    --card-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    --card-hover-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    --tile-radius: 8px;
+    --tile-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    --nav-radius: 6px;
+    --theme-primary-alpha: rgba(99, 102, 241, 0.1);
+    --info-box-bg: rgba(99, 102, 241, 0.05);
+    --code-bg: #1e293b;
+}}
+/* Remove scanline effect in clean mode */
+body::after {{
+    display: none;
+}}
+"""
+
+    return css_vars + _PAGE_CSS_BASE
 
 
 # ---------------------------------------------------------------------------
-# page_layout — wraps every page
+# page_layout — wraps every page (theme-aware)
 # ---------------------------------------------------------------------------
 @contextmanager
 def page_layout(title: str, icon: str = "bar_chart"):
@@ -264,13 +579,21 @@ def page_layout(title: str, icon: str = "bar_chart"):
             with page_layout("Backtest Results", "bar_chart"):
                 ui.label("Hello")
     """
+    # Get current theme settings
+    is_terminal = _theme_mode["terminal"]
+
     # -- mode + palette -----------------------------------------------
-    ui.dark_mode(False)
+    ui.dark_mode(is_terminal)
     ui.colors(primary=THEME["primary"])
     ui.query("body").style(f"background-color: {THEME['page_bg']}; color: {THEME['text_primary']};")
-    # Inject font as non-blocking <link> tags (avoids render-blocking @import)
-    ui.add_head_html(_FONT_HEAD_HTML)
-    ui.add_css(_PAGE_CSS)
+
+    # Inject font for current theme
+    ui.add_head_html(_get_font_html())
+
+    # Inject themed CSS with variables
+    ui.add_css(_get_themed_css())
+
+    # Inject keyboard shortcuts
     ui.add_head_html(_KEYBINDINGS_HTML)
 
     # -- sidebar state: cycles expanded → mini → hidden → expanded
@@ -291,42 +614,61 @@ def page_layout(title: str, icon: str = "bar_chart"):
     # -- header bar ---------------------------------------------------------
     with (
         ui.header()
-        .classes("items-center px-4 py-0 shadow-sm")
+        .classes("items-center px-4 py-0")
         .style(
             f"background: {THEME['surface']}; "
             f"border-bottom: 1px solid {THEME['surface_border']}; "
-            "height: 52px;"
+            "height: 48px;"
         )
     ):
         # Hamburger — cycles sidebar through expanded / mini / hidden
-        ui.button(icon="menu", on_click=_cycle_sidebar).props("flat round dense").classes(
-            "text-slate-600"
-        ).style(f"color: {THEME['text_secondary']};")
-
-        ui.label("NSE Momentum Lab").classes("text-lg font-semibold ml-2").style(
-            f"color: {THEME['text_primary']};"
+        ui.button(icon="menu", on_click=_cycle_sidebar).props("flat round dense").style(
+            f"color: {THEME['text_secondary']};"
         )
 
+        # Terminal-style title with status indicator
+        with ui.row().classes("items-center gap-2 ml-2"):
+            # Blinking green status dot
+            ui.icon("circle").classes("text-xs").style(
+                f"color: {THEME['primary']}; animation: terminal-pulse 2s infinite;"
+            )
+            ui.label("NSE_MOMENTUM_LAB").classes("text-sm font-semibold mono-font").style(
+                f"color: {THEME['text_primary']}; letter-spacing: 0.1em;"
+            )
+            # Terminal-style version
+            ui.label("v0.1.0").classes("text-xs").style(
+                f"color: {THEME['text_muted']}; font-family: 'JetBrains Mono', monospace;"
+            )
+
         # breadcrumb
-        ui.label(f"  /  {title}").classes("text-sm ml-1").style(
-            f"color: {THEME['text_secondary']};"
+        ui.label(f"// {title.upper()}").classes("text-sm ml-4 mono-font").style(
+            f"color: {THEME['text_secondary']}; letter-spacing: 0.05em;"
         )
 
         ui.space()
 
-        # Dark mode toggle
-        ui.button(icon="dark_mode", on_click=toggle_dark_mode).props("flat round dense").style(
-            f"color: {THEME['text_secondary']};"
+        # Theme toggle (shows "TERMINAL" in Clean mode, "CLEAN" in Terminal mode)
+        toggle_label = "TERMINAL" if not is_terminal else "CLEAN"
+        ui.button(toggle_label, on_click=toggle_theme_mode).props("flat dense").classes(
+            "text-xs mono-font px-3"
+        ).style(
+            f"color: {THEME['text_secondary']}; "
+            f"border: 1px solid {THEME['surface_border']}; "
+            "border-radius: 2px; padding: 4px 12px;"
         )
 
         # Shortcuts help
         _shortcuts_dialog_instance = shortcuts_dialog()
-        ui.button(icon="keyboard", on_click=_shortcuts_dialog_instance.open).props(
-            "flat round dense"
-        ).style(f"color: {THEME['text_secondary']};")
+        ui.button("?", on_click=_shortcuts_dialog_instance.open).props("flat dense").classes(
+            "mono-font text-xs px-2"
+        ).style(
+            f"color: {THEME['primary']}; "
+            f"border: 1px solid {THEME['surface_border']}; "
+            "border-radius: 2px;"
+        )
 
         # Right-side icon
-        ui.icon(icon).classes("text-xl").style(f"color: {THEME['primary']};")
+        ui.icon(icon).classes("text-lg").style(f"color: {THEME['primary']};")
 
     # -- sidebar drawer -----------------------------------------------------
     with (
@@ -341,12 +683,20 @@ def page_layout(title: str, icon: str = "bar_chart"):
             "transition: width 0.2s ease;"
         ) as drawer
     ):
-        # Logo area — hidden in mini mode via q-drawer__mini CSS class
-        with ui.column().classes("px-4 py-4 gap-0 sidebar-logo"):
-            ui.label("Momentum Lab").classes("text-base font-bold").style(
-                f"color: {THEME['text_primary']};"
-            )
-            ui.label("v0.1.0").classes("text-xs").style(f"color: {THEME['text_muted']};")
+        # Logo area — terminal style, hidden in mini mode
+        with ui.column().classes("px-4 py-3 gap-1 sidebar-logo"):
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("terminal").classes("text-sm").style(f"color: {THEME['primary']};")
+                ui.label("NSEQ_LAB").classes("text-sm font-bold mono-font").style(
+                    f"color: {THEME['text_primary']}; letter-spacing: 0.1em;"
+                )
+            with ui.row().classes("items-center gap-2"):
+                ui.label("SYSTEM").classes("text-xs mono-font").style(
+                    f"color: {THEME['text_muted']};"
+                )
+                ui.icon("circle").classes("text-xs").style(
+                    f"color: {THEME['primary']}; animation: terminal-pulse 2s infinite;"
+                )
 
         ui.separator().classes("sidebar-logo").style(f"background: {THEME['surface_border']};")
 
@@ -365,7 +715,7 @@ def page_layout(title: str, icon: str = "bar_chart"):
                     ui.label(item["label"]).classes("text-sm nav-label")
 
     # -- main content area --------------------------------------------------
-    with ui.column().classes("w-full max-w-7xl mx-auto px-8 py-6"):
+    with ui.column().classes("w-full px-6 py-6"):
         yield
 
 
@@ -428,35 +778,100 @@ def nav_card(
 
 
 # ---------------------------------------------------------------------------
-# Plotly chart theme
+# Plotly chart theme (theme-aware)
 # ---------------------------------------------------------------------------
 def apply_chart_theme(fig) -> None:
-    """Apply consistent bright theme to a Plotly figure (mutates in place)."""
+    """Apply theme to a Plotly figure (mutates in place).
+
+    Adds entrance animation and applies theme-specific styling.
+    """
+    is_terminal = _theme_mode["terminal"]
+    theme = get_current_theme()
+
+    # Use theme-specific fonts
+    mono_font = "Fira Code, monospace" if is_terminal else "JetBrains Mono, monospace"
+    body_font = "IBM Plex Sans, sans-serif" if is_terminal else "DM Sans, sans-serif"
+
+    if is_terminal:
+        # Terminal mode - dark theme with neon accents
+        fig.update_layout(
+            paper_bgcolor=theme["surface"],
+            plot_bgcolor=theme["page_bg"],
+            font_color=theme["text_primary"],
+            font_family=mono_font,
+            title_font=dict(color=theme["text_primary"], size=14, family=body_font),
+            margin=dict(l=40, r=20, t=40, b=40),
+            xaxis=dict(
+                gridcolor=theme["surface_border"],
+                zerolinecolor=theme["surface_border"],
+                linecolor=theme["surface_border"],
+                tickfont=dict(color=theme["text_secondary"], family=mono_font, size=10),
+            ),
+            yaxis=dict(
+                gridcolor=theme["surface_border"],
+                zerolinecolor=theme["surface_border"],
+                linecolor=theme["surface_border"],
+                tickfont=dict(color=theme["text_secondary"], family=mono_font, size=10),
+            ),
+            legend=dict(
+                bgcolor="rgba(13, 17, 23, 0.9)",
+                font_color=theme["text_secondary"],
+                bordercolor=theme["surface_border"],
+                borderwidth=1,
+            ),
+            hoverlabel=dict(
+                bgcolor=theme["surface_border"],
+                font_color=theme["text_primary"],
+                font_size=11,
+            ),
+        )
+    else:
+        # Clean mode - light theme with indigo accents
+        fig.update_layout(
+            paper_bgcolor=theme["surface"],
+            plot_bgcolor=theme["page_bg"],
+            font_color=theme["text_primary"],
+            font_family=body_font,
+            title_font=dict(color=theme["text_primary"], size=14, family=body_font),
+            margin=dict(l=40, r=20, t=40, b=40),
+            xaxis=dict(
+                gridcolor=theme["surface_border"],
+                zerolinecolor=theme["surface_border"],
+                linecolor=theme["surface_border"],
+                tickfont=dict(color=theme["text_secondary"], family=mono_font, size=10),
+            ),
+            yaxis=dict(
+                gridcolor=theme["surface_border"],
+                zerolinecolor=theme["surface_border"],
+                linecolor=theme["surface_border"],
+                tickfont=dict(color=theme["text_secondary"], family=mono_font, size=10),
+            ),
+            legend=dict(
+                bgcolor="rgba(255, 255, 255, 0.95)",
+                font_color=theme["text_secondary"],
+                bordercolor=theme["surface_border"],
+                borderwidth=1,
+            ),
+            hoverlabel=dict(
+                bgcolor=theme["surface_border"],
+                font_color=theme["text_primary"],
+                font_size=11,
+            ),
+        )
+
+    # Add entrance animation for all traces
+    for trace in fig.data:
+        if hasattr(trace, "marker"):
+            # Bar/scatter charts - fade in
+            trace.opacity = 0.95
+        elif hasattr(trace, "line"):
+            # Line charts - animate drawing
+            pass
+
+    # Configure animation settings
     fig.update_layout(
-        paper_bgcolor=THEME["surface"],
-        plot_bgcolor=THEME["page_bg"],
-        font_color=THEME["text_primary"],
-        font_family="Inter, sans-serif",
-        title_font=dict(color=THEME["text_primary"], size=15, family="Inter, sans-serif"),
-        margin=dict(l=40, r=20, t=48, b=40),
-        xaxis=dict(
-            gridcolor=THEME["surface_border"],
-            zerolinecolor=THEME["surface_border"],
-            linecolor=THEME["surface_border"],
-            tickfont=dict(color=THEME["text_secondary"]),
-        ),
-        yaxis=dict(
-            gridcolor=THEME["surface_border"],
-            zerolinecolor=THEME["surface_border"],
-            linecolor=THEME["surface_border"],
-            tickfont=dict(color=THEME["text_secondary"]),
-        ),
-        legend=dict(
-            bgcolor="rgba(255,255,255,0.8)",
-            font_color=THEME["text_secondary"],
-            bordercolor=THEME["surface_border"],
-            borderwidth=1,
-        ),
+        hovermode="x unified",
+        transition_duration=400,
     )
 
 
@@ -466,6 +881,33 @@ def apply_chart_theme(fig) -> None:
 def divider() -> None:
     """Render a styled divider."""
     ui.separator().classes("my-6").style(f"background: {THEME['surface_border']};")
+
+
+def format_value(value: float, fmt: str = "{:.2f}") -> str:
+    """Format a numeric value with color class for negative/positive.
+
+    Returns a string with CSS class for coloring:
+    - Negative values: 'value-negative' (red)
+    - Positive values: 'value-positive' (green)
+    - Zero: 'value-neutral' (muted)
+
+    Usage in table cells:
+        value_str, value_class = format_value(-5.2)
+        ui.label(value_str).classes(value_class)
+    """
+    try:
+        num_val = float(value)
+    except ValueError, TypeError:
+        return str(value), "value-neutral"
+
+    formatted = fmt.format(num_val)
+
+    if num_val < 0:
+        return formatted, "value-negative"
+    elif num_val > 0:
+        return formatted, "value-positive"
+    else:
+        return formatted, "value-neutral"
 
 
 def info_box(text: str, color: str = "blue") -> None:
@@ -526,7 +968,7 @@ def loading_spinner():
 def paginated_table(
     rows: list,
     columns: list,
-    page_size: int = 50,
+    page_size: int = 20,
     row_key: Any = None,
 ) -> None:
     """Paginated table that only renders current page."""
@@ -542,12 +984,13 @@ def paginated_table(
         end = start + page_size
 
         with ui.column().classes("w-full"):
-            ui.table(
-                columns=columns,
-                rows=rows[start:end],
-                pagination=page_size,
-                row_key="id" if rows and "id" in rows[0] else None,
-            ).classes("w-full")
+            with ui.element("div").style("width: 100%; overflow-x: auto;"):
+                ui.table(
+                    columns=columns,
+                    rows=rows[start:end],
+                    pagination={"rowsPerPage": page_size, "rowsPerPage_options": [10, 20, 50, 100]},
+                    row_key="id" if rows and "id" in rows[0] else None,
+                ).style("min-width: max-content;")
 
             with ui.row().classes("justify-between items-center mt-4 w-full"):
                 ui.label(f"Showing {start + 1}-{min(end, len(rows))} of {len(rows)}").classes(
@@ -734,37 +1177,104 @@ def trade_table_with_filters(
 
 
 # ---------------------------------------------------------------------------
-# Dark mode theme
+# Theme state management
 # ---------------------------------------------------------------------------
-THEME_DARK = {
-    "page_bg": "#0f172a",
-    "surface": "#1e293b",
-    "surface_border": "#334155",
-    "surface_hover": "#334155",
-    "text_primary": "#f1f5f9",
-    "text_secondary": "#94a3b8",
-    "text_muted": "#64748b",
-    "primary": "#3b82f6",
-    "primary_dark": "#2563eb",
-    "divider": "#334155",
-}
+_theme_mode = {"terminal": True}  # True = terminal, False = clean
 
-_dark_mode_state = {"enabled": False}
+
+def get_current_theme() -> dict:
+    """Return the current active theme dictionary."""
+    return THEME_TERMINAL if _theme_mode["terminal"] else THEME_CLEAN
+
+
+def get_current_colors() -> dict:
+    """Return the current active colors dictionary."""
+    return COLORS_TERMINAL if _theme_mode["terminal"] else COLORS_CLEAN
+
+
+def _get_css_variables() -> str:
+    """Generate CSS variables for the current theme."""
+    theme = get_current_theme()
+    colors = get_current_colors()
+    return f"""
+:root {{
+    --theme-page-bg: {theme["page_bg"]};
+    --theme-surface: {theme["surface"]};
+    --theme-surface-border: {theme["surface_border"]};
+    --theme-surface-hover: {theme["surface_hover"]};
+    --theme-text-primary: {theme["text_primary"]};
+    --theme-text-secondary: {theme["text_secondary"]};
+    --theme-text-muted: {theme["text_muted"]};
+    --theme-primary: {theme["primary"]};
+    --theme-primary-dark: {theme["primary_dark"]};
+    --theme-divider: {theme["divider"]};
+    --theme-color-success: {colors["success"]};
+    --theme-color-error: {colors["error"]};
+    --theme-color-warning: {colors["warning"]};
+    --theme-color-info: {colors["info"]};
+    --theme-color-gray: {colors["gray"]};
+}}
+"""
+
+
+def toggle_theme_mode() -> None:
+    """Toggle between Terminal (brutalist) and Clean (SaaS) themes."""
+    global THEME, COLORS
+
+    _theme_mode["terminal"] = not _theme_mode["terminal"]
+    is_terminal = _theme_mode["terminal"]
+
+    # Update global dictionaries
+    THEME.clear()
+    THEME.update(THEME_TERMINAL if is_terminal else THEME_CLEAN)
+    COLORS.clear()
+    COLORS.update(COLORS_TERMINAL if is_terminal else COLORS_CLEAN)
+
+    # Update Quasar dark mode
+    ui.dark_mode(is_terminal)
+    ui.colors(primary=THEME["primary"])
+
+    # Update CSS variables on the root element
+    css_vars = _get_css_variables()
+    ui.run_javascript(f"""
+        const style = document.getElementById('theme-vars');
+        if (style) {{
+            style.remove();
+        }}
+        const newStyle = document.createElement('style');
+        newStyle.id = 'theme-vars';
+        newStyle.textContent = {css_vars!r};
+        document.head.appendChild(newStyle);
+    """)
+
+    # Update body styles
+    ui.query("body").style(f"background-color: {THEME['page_bg']}; color: {THEME['text_primary']};")
+
+    # Update font
+    if is_terminal:
+        font_css = """
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+"""
+    else:
+        font_css = """
+<link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+"""
+    ui.add_head_html(font_css)
+
+    # Force page reload to ensure all components re-render with new theme
+    # Note: Experiment selection is preserved via sessionStorage (set on change in backtest_results.py)
+    ui.run_javascript("window.location.reload();")
 
 
 def toggle_dark_mode() -> None:
-    """Toggle between light and dark theme."""
-    _dark_mode_state["enabled"] = not _dark_mode_state["enabled"]
-    current_theme = THEME_DARK if _dark_mode_state["enabled"] else THEME
-    ui.dark_mode(_dark_mode_state["enabled"])
-    ui.query("body").style(
-        f"background-color: {current_theme['page_bg']}; color: {current_theme['text_primary']};"
-    )
+    """Toggle between light and dark theme (legacy, kept for compatibility)."""
+    toggle_theme_mode()
 
 
-# ---------------------------------------------------------------------------
-# Keyboard shortcuts
-# ---------------------------------------------------------------------------
 _KEYBINDINGS_HTML = """
 <script>
 document.addEventListener('keydown', (e) => {
@@ -800,31 +1310,56 @@ document.addEventListener('keydown', (e) => {
 def shortcuts_dialog():
     """Show keyboard shortcuts dialog and return the dialog instance."""
     with ui.dialog() as dialog:
-        with ui.card().classes("w-96"):
-            ui.label("Keyboard Shortcuts").classes("text-xl font-bold mb-4").style(
-                f"color: {THEME['text_primary']};"
-            )
+        with (
+            ui.card()
+            .classes("w-[420px] mono-font")
+            .style(f"background: {THEME['surface']}; border: 1px solid {THEME['surface_border']};")
+        ):
+            # Terminal-style header
+            with (
+                ui.row()
+                .classes("justify-between items-center mb-4 pb-3")
+                .style(f"border-bottom: 1px solid {THEME['surface_border']};")
+            ):
+                ui.label("[KEYBOARD_SHORTCUTS]").classes("text-sm font-semibold").style(
+                    f"color: {THEME['primary']}; letter-spacing: 0.05em;"
+                )
+                ui.button("×", on_click=dialog.close).props("flat dense").style(
+                    f"color: {THEME['text_secondary']}; font-size: 1.2rem;"
+                )
+
             shortcuts = [
-                ("Alt+G", "Go to Home"),
-                ("Alt+B", "Backtest Results"),
-                ("Alt+T", "Trade Analytics"),
-                ("Alt+C", "Compare"),
-                ("Alt+S", "Strategy"),
-                ("Alt+R", "Scans"),
-                ("Alt+D", "Data Quality"),
-                ("Alt+P", "Pipeline"),
-                ("Alt+L", "Paper Ledger"),
-                ("Alt+Y", "Daily Summary"),
-                ("?", "Show shortcuts"),
+                ("Alt+G", "HOME"),
+                ("Alt+B", "BACKTEST"),
+                ("Alt+T", "TRADE ANALYTICS"),
+                ("Alt+C", "COMPARE"),
+                ("Alt+S", "STRATEGY"),
+                ("Alt+R", "SCANS"),
+                ("Alt+D", "DATA QUALITY"),
+                ("Alt+P", "PIPELINE"),
+                ("Alt+L", "PAPER LEDGER"),
+                ("Alt+Y", "DAILY SUMMARY"),
+                ("?", "HELP"),
             ]
             for key, action in shortcuts:
-                with ui.row().classes("justify-between w-full py-1"):
-                    ui.label(key).classes("font-mono text-sm px-2 py-1 rounded").style(
-                        f"background: {THEME['surface_hover']}; color: {THEME['text_primary']};"
+                with (
+                    ui.row()
+                    .classes("justify-between w-full py-1 items-center")
+                    .style(
+                        f"border-bottom: 1px dashed {THEME['surface_border']}; margin-bottom: 4px; padding-bottom: 4px;"
                     )
-                    ui.label(action).classes("text-sm").style(f"color: {THEME['text_secondary']};")
+                ):
+                    ui.label(key).classes("text-xs").style(
+                        f"background: {THEME['surface_hover']}; color: {THEME['primary']}; "
+                        "padding: 2px 8px; font-family: 'JetBrains Mono', monospace;"
+                    )
+                    ui.label(action).classes("text-xs").style(f"color: {THEME['text_secondary']};")
 
-            ui.button("Close", on_click=dialog.close).props("flat").classes("mt-4 w-full")
+            ui.button("[CLOSE]", on_click=dialog.close).props("flat").classes(
+                "mt-4 mono-font text-xs"
+            ).style(
+                f"color: {THEME['text_secondary']}; border: 1px solid {THEME['surface_border']};"
+            )
 
     return dialog
 

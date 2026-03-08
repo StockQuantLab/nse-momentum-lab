@@ -11,14 +11,14 @@ repos:
 
   - repo: local
     hooks:
-      # Fast checks for pre-commit (lint + format check only)
+      # Pre-commit: auto-format and stage (frictionless)
       - id: quality-gates-pre-commit
         name: quality-gates-pre-commit
-        entry: uv run python scripts/quality_gate.py --with-format-check
+        entry: uv run python scripts/quality_gate.py --with-format-check --auto-format
         language: system
         pass_filenames: false
         stages: [pre-commit]
-      # Pre-push checks: lint, typecheck, unit tests (no integration - those run in CI)
+      # Pre-push: check-only (fails fast if formatting needed)
       - id: quality-gates-pre-push
         name: quality-gates-pre-push
         entry: uv run python scripts/quality_gate.py --with-format-check

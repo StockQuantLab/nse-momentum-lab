@@ -42,7 +42,7 @@ from apps.nicegui.components import (
 )
 
 
-def backtest_page() -> None:
+async def backtest_page() -> None:
     """Render the backtest results page."""
     with page_layout("Backtest Results", "bar_chart"):
         experiments_df = get_experiments()
@@ -61,6 +61,16 @@ def backtest_page() -> None:
         exp_options = build_experiment_options(experiments_df)
         labels = list(exp_options.keys())
         first_label = labels[0]
+
+        # Create reverse lookup (exp_id -> label) for restoration
+        id_to_label = {v: k for k, v in exp_options.items()}
+
+        # Restore selection after theme toggle — read sessionStorage before building the select
+        # so the initial value is set server-side (no fragile DOM querying needed)
+        saved_id = await ui.run_javascript(
+            "sessionStorage.getItem('nseml_restore_exp_id') || ''", timeout=2.0
+        )
+        initial_label = id_to_label.get(saved_id, first_label) if saved_id else first_label
 
         @ui.refreshable
         def render_experiment(exp_id: str) -> None:
@@ -118,7 +128,7 @@ def backtest_page() -> None:
                     ),
                     dict(
                         title="Max Drawdown",
-                        value=f"{float(exp.get('max_drawdown_pct', 0)):.1f}%",
+                        value=f"{float(exp.get('max_drawdown_pct', 0)):.1f}",
                         icon="trending_down",
                         color=COLORS["error"],
                     ),
@@ -174,7 +184,7 @@ def backtest_page() -> None:
                             {col: format_for_display(row[col], col) for col in display_df.columns}
                             for _, row in display_df.iterrows()
                         ],
-                        page_size=10,
+                        page_size=20,
                     )
 
                 if "return_pct" in yearly_df.columns and "year" in yearly_df.columns:
@@ -326,7 +336,7 @@ def backtest_page() -> None:
                                         },
                                     ],
                                     rows=exit_rows,
-                                    page_size=10,
+                                    page_size=20,
                                 )
 
                 with ui.tab_panel(tab_r):
@@ -410,7 +420,7 @@ def backtest_page() -> None:
                                     {"name": "Value", "label": "R-Multiple", "field": "Value"},
                                 ],
                                 rows=pct_data,
-                                page_size=10,
+                                page_size=20,
                             )
 
                 with ui.tab_panel(tab_wl):
@@ -457,23 +467,35 @@ def backtest_page() -> None:
                                 ui.label("Top Winners").classes("text-lg font-semibold mb-2").style(
                                     f"color: {COLORS['success']};"
                                 )
-                                top_winners = trades_df.nlargest(min(10, len(trades_df)), "pnl_pct")
-                                ui.table(
-                                    columns=table_columns,
-                                    rows=_trade_rows(top_winners),
-                                    pagination=5,
-                                ).classes("w-full")
+                                top_winners = trades_df.nlargest(min(20, len(trades_df)), "pnl_pct")
+                                with ui.element("div").style(
+                                    "width: 100%; max-height: 450px; overflow-x: auto;"
+                                ):
+                                    ui.table(
+                                        columns=table_columns,
+                                        rows=_trade_rows(top_winners),
+                                        pagination={
+                                            "rowsPerPage": 20,
+                                            "rowsPerPage_options": [10, 20, 50, 100],
+                                        },
+                                    ).style("min-width: max-content;")
 
                             with ui.column().classes("flex-1"):
                                 ui.label("Top Losers").classes("text-lg font-semibold mb-2").style(
                                     f"color: {COLORS['error']};"
                                 )
-                                top_losers = trades_df.nsmallest(min(10, len(trades_df)), "pnl_pct")
-                                ui.table(
-                                    columns=table_columns,
-                                    rows=_trade_rows(top_losers),
-                                    pagination=5,
-                                ).classes("w-full")
+                                top_losers = trades_df.nsmallest(min(20, len(trades_df)), "pnl_pct")
+                                with ui.element("div").style(
+                                    "width: 100%; max-height: 450px; overflow-x: auto;"
+                                ):
+                                    ui.table(
+                                        columns=table_columns,
+                                        rows=_trade_rows(top_losers),
+                                        pagination={
+                                            "rowsPerPage": 20,
+                                            "rowsPerPage_options": [10, 20, 50, 100],
+                                        },
+                                    ).style("min-width: max-content;")
 
                 with ui.tab_panel(tab_stock):
                     if "symbol" in trades_df.columns and "pnl_pct" in trades_df.columns:
@@ -518,7 +540,7 @@ def backtest_page() -> None:
                                 {"name": "worst", "label": "Worst", "field": "worst_fmt"},
                             ],
                             rows=stock_rows,
-                            page_size=15,
+                            page_size=20,
                         )
 
                 with ui.tab_panel(tab_monthly):
@@ -598,12 +620,16 @@ def backtest_page() -> None:
                 selected_label = e.value
                 selected_id = exp_options.get(selected_label)
                 if selected_id:
+                    # Save current selection for theme toggle preservation
+                    ui.run_javascript(
+                        f"sessionStorage.setItem('nseml_restore_exp_id', '{selected_id}');"
+                    )
                     render_experiment.refresh(selected_id)
 
             ui.select(
                 labels,
-                value=first_label,
+                value=initial_label,
                 on_change=on_select,
-            ).classes("flex-grow")
+            ).classes("flex-grow").props("outlined")
 
-        render_experiment(exp_options[first_label])
+        render_experiment(exp_options[initial_label])

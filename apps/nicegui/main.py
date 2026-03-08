@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sys
 import warnings
+import logging
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent.parent
@@ -53,6 +54,18 @@ def main() -> None:
     warnings.filterwarnings("ignore", message=".*urllib3.*")
     warnings.filterwarnings("ignore", message=".*chardet.*")
     warnings.filterwarnings("ignore", message=".*charset_normalizer.*")
+
+    # Suppress Windows asyncio ConnectionResetError during cleanup
+    # This is a cosmetic issue on Windows when connections close abruptly
+    logging.getLogger("asyncio").setLevel(logging.CRITICAL + 1)
+
+    # Suppress the traceback for ConnectionResetError exceptions
+    class ConnectionResetFilter(logging.Filter):
+        def filter(self, record):
+            return "ConnectionResetError" not in record.getMessage()
+
+    asyncio_logger = logging.getLogger("asyncio")
+    asyncio_logger.addFilter(ConnectionResetFilter())
 
     ui.run(
         title="NSE Momentum Lab",

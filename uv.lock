@@ -1193,6 +1193,7 @@ source = { editable = "." }
 dependencies = [
     { name = "anyio" },
     { name = "apscheduler" },
+    { name = "charset-normalizer" },
     { name = "click" },
     { name = "duckdb" },
     { name = "fastapi" },
@@ -1213,6 +1214,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "rich" },
     { name = "sqlalchemy" },
+    { name = "urllib3" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "vectorbt" },
 ]
@@ -1232,6 +1234,7 @@ dev = [
 requires-dist = [
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "apscheduler", specifier = ">=3.10.0" },
+    { name = "charset-normalizer", specifier = ">=3.0.0,<4.0.0" },
     { name = "click", specifier = ">=8.1.0" },
     { name = "duckdb", specifier = ">=1.1.0" },
     { name = "fastapi", specifier = ">=0.115.0" },
@@ -1252,6 +1255,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.7.0" },
     { name = "rich", specifier = ">=13.9.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
+    { name = "urllib3", specifier = ">=2.0.0,<3.0.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.32.0" },
     { name = "vectorbt", specifier = ">=0.26.0" },
 ]

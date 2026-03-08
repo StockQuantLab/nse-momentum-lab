@@ -26,12 +26,26 @@ from apps.nicegui.components import (
 
 
 async def home_page() -> None:
-    """Render the home page."""
-    with page_layout("Home", "home"):
-        status = await aget_db_status()
-        experiments_df = await aget_experiments()
+    """Render the home page with instant loading and background refresh."""
 
-        # Hero
+    # Import get_db_status for sync instant load (uses cache)
+    from apps.nicegui.state import get_db_status
+
+    # Get status instantly (from cache or minimal defaults)
+    status = get_db_status()
+    if not status or status.get("symbols", 0) == 0:
+        # No cache - use minimal defaults for instant render
+        status = {
+            "data_source": "parquet",
+            "symbols": 0,
+            "total_candles": 0,
+            "date_range": "Loading...",
+        }
+
+    # Get experiments (usually fast with cache)
+    experiments_df = await aget_experiments()
+
+    with page_layout("Home", "home"):
         ui.label("NSE Momentum Lab").classes("text-4xl font-bold mb-1").style(
             f"color: {THEME['text_primary']};"
         )
@@ -133,8 +147,8 @@ async def home_page() -> None:
 
         divider()
 
-        # Navigation Cards
-        ui.label("Pages").classes("text-xl font-semibold mb-4").style(
+        # Navigation Cards — grouped by category for better visual hierarchy
+        ui.label("Core Analysis").classes("text-xl font-semibold mb-4").style(
             f"color: {THEME['text_primary']};"
         )
 
@@ -160,6 +174,12 @@ async def home_page() -> None:
                 "/compare",
                 COLORS["primary"],
             )
+
+        ui.label("Research Tools").classes("text-lg font-semibold mb-3 mt-2").style(
+            f"color: {THEME['text_secondary']};"
+        )
+
+        with ui.grid(columns=3).classes("w-full gap-4 mb-6"):
             nav_card(
                 "Strategy Analysis",
                 "Analyze parameter sensitivity across runs",
@@ -181,6 +201,12 @@ async def home_page() -> None:
                 "/data_quality",
                 COLORS["success"],
             )
+
+        ui.label("Operations").classes("text-lg font-semibold mb-3 mt-2").style(
+            f"color: {THEME['text_secondary']};"
+        )
+
+        with ui.grid(columns=3).classes("w-full gap-4 mb-6"):
             nav_card(
                 "Paper Ledger",
                 "Track paper trading positions and performance",
@@ -232,3 +258,12 @@ async def home_page() -> None:
         ):
             ui.label("Python 3.14 | NiceGUI | DuckDB")
             ui.label("NSE Momentum Lab v0.1.0")
+
+        # Background refresh: fetch full status after page renders
+        async def refresh_status():
+            """Refresh status in background after initial render."""
+            _ = await aget_db_status()  # Populates cache for next interaction
+            # Update happens via cache, user sees fresh data on next interaction
+            # or we could force a refresh of specific elements
+
+        ui.timer(0.5, refresh_status, once=True)

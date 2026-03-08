@@ -10,6 +10,7 @@ from dataclasses import dataclass
 class GateStep:
     name: str
     cmd: list[str]
+    auto_stage: bool = False  # If True, stage changed files after command
 
 
 def _run_step(step: GateStep) -> None:
@@ -20,19 +21,50 @@ def _run_step(step: GateStep) -> None:
     if result.returncode != 0:
         raise SystemExit(result.returncode)
 
+    # Auto-stage formatted files if requested
+    if step.auto_stage:
+        # Stage any files that were formatted
+        subprocess.run(
+            ["git", "add", "-u"],  # Stage all modified tracked files
+            check=False,
+        )
+        print("[QUALITY] >>> Formatted files staged automatically")
 
-def build_steps(with_integration: bool, with_full: bool, with_format_check: bool) -> list[GateStep]:
+
+def build_steps(
+    with_integration: bool,
+    with_full: bool,
+    with_format_check: bool,
+    auto_format: bool = False,
+) -> list[GateStep]:
     steps = [
         GateStep("Ruff Lint", ["uv", "run", "ruff", "check", "src", "apps"]),
         GateStep("Mypy", ["uv", "run", "mypy", "src", "tests"]),
     ]
+
+    # For pre-commit: auto-format and stage (frictionless)
+    # For pre-push/manual: check-only (fails fast, no silent changes)
     if with_format_check:
-        steps.insert(
-            1,
-            GateStep(
-                "Ruff Format Check", ["uv", "run", "ruff", "format", "--check", "src", "apps"]
-            ),
-        )
+        if auto_format:
+            # Auto-format and stage changed files
+            steps.insert(
+                1,
+                GateStep(
+                    "Ruff Format",
+                    ["uv", "run", "ruff", "format", "src", "apps"],
+                    auto_stage=True,
+                ),
+            )
+        else:
+            # Check-only mode (fails if formatting needed)
+            steps.insert(
+                1,
+                GateStep(
+                    "Ruff Format Check",
+                    ["uv", "run", "ruff", "format", "--check", "src", "apps"],
+                ),
+            )
+
     if with_full:
         # Full suite already includes unit + integration tests.
         steps.append(GateStep("Full Test Suite", ["uv", "run", "pytest", "-q"]))
@@ -61,7 +93,12 @@ def main() -> None:
     parser.add_argument(
         "--with-format-check",
         action="store_true",
-        help="Include global ruff format check.",
+        help="Include ruff format check.",
+    )
+    parser.add_argument(
+        "--auto-format",
+        action="store_true",
+        help="Auto-format and stage changes (for pre-commit hooks).",
     )
     args = parser.parse_args()
 
@@ -70,8 +107,12 @@ def main() -> None:
         print(
             "[QUALITY] Note: --with-integration ignored because --with-full already includes integration."
         )
-    for step in build_steps(args.with_integration, args.with_full, args.with_format_check):
+
+    for step in build_steps(
+        args.with_integration, args.with_full, args.with_format_check, args.auto_format
+    ):
         _run_step(step)
+
     print("\n[QUALITY] All selected gates passed.")
 
 

@@ -43,12 +43,16 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-worker")
 _experiments_cache: pd.DataFrame | None = None
 _experiments_cache_time: float = 0
 
-# Global status cache
+# Global status cache - persist to disk for fast restarts
 _status_cache: dict | None = None
 _status_cache_time: float = 0
+_STATUS_CACHE_FILE = Path.home() / ".cache" / "nseml_dashboard_status.json"
 
 EXPERIMENT_CACHE_TTL = 60  # seconds
-STATUS_CACHE_TTL = 120  # seconds  (heavier query — COUNT DISTINCT over full parquet)
+STATUS_CACHE_TTL = 300  # seconds  (5 minutes - heavier query, cache longer)
+
+# Optional: use a fast "lite" status for initial page load
+_USE_LITE_STATUS_ON_FIRST_LOAD = True
 
 
 def get_db() -> MarketDataDB:
@@ -98,6 +102,52 @@ async def aget_experiments(force_refresh: bool = False) -> pd.DataFrame:
     return await loop.run_in_executor(_executor, lambda: _fetch_experiments_sync(force_refresh))
 
 
+def _load_status_from_disk() -> dict | None:
+    """Load cached status from disk for instant first-page load."""
+    try:
+        if _STATUS_CACHE_FILE.exists():
+            import json
+
+            with open(_STATUS_CACHE_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def _save_status_to_disk(status: dict) -> None:
+    """Save status to disk for fast subsequent loads."""
+    try:
+        _STATUS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        import json
+
+        with open(_STATUS_CACHE_FILE, "w") as f:
+            json.dump(status, f)
+    except Exception:
+        pass
+
+
+def get_status_lite() -> dict:
+    """Fast status check - only returns cached or lightweight data.
+
+    Used for initial page load. Full status loads async in background.
+    """
+    # Try disk cache first (fastest - instant)
+    cached = _load_status_from_disk()
+    if cached:
+        return cached
+
+    # Fall back to minimal status if no cache
+    return {
+        "data_source": getattr(db, "_data_source", "unknown"),
+        "symbols": 0,
+        "total_candles": 0,
+        "date_range": "Loading...",
+        "dataset_hash": None,
+        "tables": {},
+    }
+
+
 def _fetch_status_sync() -> dict:
     """Synchronous implementation — always call via get_db_status() or aget_db_status()."""
     global _status_cache, _status_cache_time
@@ -106,17 +156,44 @@ def _fetch_status_sync() -> dict:
     if _status_cache is None or (now - _status_cache_time) > STATUS_CACHE_TTL:
         _status_cache = db.get_status()
         _status_cache_time = now
+        # Persist to disk for fast restarts
+        _save_status_to_disk(_status_cache)
 
     return _status_cache
 
 
 def get_db_status() -> dict:
-    """Get current database status (synchronous, TTL-cached)."""
+    """Get current database status (synchronous, TTL-cached).
+
+    Returns disk cache instantly if available, otherwise fetches fresh data.
+    """
+    global _status_cache, _status_cache_time
+
+    # Check in-memory cache first
+    if _status_cache is not None:
+        return _status_cache
+
+    # Try disk cache for instant load (no queries)
+    disk_cache = _load_status_from_disk()
+    if disk_cache:
+        _status_cache = disk_cache
+        _status_cache_time = time.time()
+        return disk_cache
+
+    # No cache available - fetch fresh (will be slow on first run)
     return _fetch_status_sync()
 
 
-async def aget_db_status() -> dict:
-    """Async wrapper — runs the blocking Parquet COUNT query in a thread pool."""
+async def aget_db_status(lite: bool = False) -> dict:
+    """Async wrapper — runs the blocking Parquet COUNT query in a thread pool.
+
+    Args:
+        lite: If True, returns cached/minimal data instantly without blocking.
+              Use for initial page load, then refresh with full data.
+    """
+    if lite:
+        return get_status_lite()
+
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(_executor, _fetch_status_sync)
 

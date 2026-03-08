@@ -29,7 +29,7 @@ from apps.nicegui.components import (
 )
 
 
-def compare_page() -> None:
+async def compare_page() -> None:
     """Render the compare experiments page."""
     with page_layout("Compare", "compare_arrows"):
         experiments_df = get_experiments()
@@ -53,7 +53,32 @@ def compare_page() -> None:
         exp_options = build_experiment_options(experiments_df)
         labels = list(exp_options.keys())
 
-        selected = {"exp1": labels[0], "exp2": labels[1] if len(labels) > 1 else labels[0]}
+        # Create reverse lookup (exp_id -> label) for restoration
+        id_to_label = {v: k for k, v in exp_options.items()}
+
+        # Restore selections after theme toggle — read sessionStorage before building selects
+        saved_exp1_id = await ui.run_javascript(
+            "sessionStorage.getItem('nseml_compare_exp1') || ''", timeout=2.0
+        )
+        saved_exp2_id = await ui.run_javascript(
+            "sessionStorage.getItem('nseml_compare_exp2') || ''", timeout=2.0
+        )
+
+        # Determine initial values (None if no saved state)
+        initial_exp1 = (
+            id_to_label.get(saved_exp1_id, None)
+            if saved_exp1_id and saved_exp1_id in id_to_label
+            else None
+        )
+        initial_exp2 = (
+            id_to_label.get(saved_exp2_id, None)
+            if saved_exp2_id and saved_exp2_id in id_to_label
+            else None
+        )
+
+        # Track current selections in mutable dict (accessible in closure)
+        selected = {"exp1": initial_exp1, "exp2": initial_exp2}
+        has_selected = {"value": bool(initial_exp1 or initial_exp2)}
 
         page_header(
             "Compare Experiments",
@@ -65,26 +90,53 @@ def compare_page() -> None:
                 ui.label("Experiment A").classes("text-sm font-medium mb-2").style(
                     f"color: {THEME['text_secondary']};"
                 )
+
+                def on_exp1_change(e):
+                    selected["exp1"] = e.value
+                    has_selected["value"] = True
+                    exp_id = exp_options.get(e.value, "")
+                    ui.run_javascript(f"sessionStorage.setItem('nseml_compare_exp1', '{exp_id}');")
+                    render_comparison.refresh()
+
                 ui.select(
                     labels,
-                    value=selected["exp1"],
-                    on_change=lambda e: selected.update(exp1=e.value) or render_comparison(),
+                    value=initial_exp1,
+                    on_change=on_exp1_change,
                 ).classes("w-full")
 
             with ui.column().classes("flex-1"):
                 ui.label("Experiment B").classes("text-sm font-medium mb-2").style(
                     f"color: {THEME['text_secondary']};"
                 )
+
+                def on_exp2_change(e):
+                    selected["exp2"] = e.value
+                    has_selected["value"] = True
+                    exp_id = exp_options.get(e.value, "")
+                    ui.run_javascript(f"sessionStorage.setItem('nseml_compare_exp2', '{exp_id}');")
+                    render_comparison.refresh()
+
                 ui.select(
                     labels,
-                    value=selected["exp2"],
-                    on_change=lambda e: selected.update(exp2=e.value) or render_comparison(),
+                    value=initial_exp2,
+                    on_change=on_exp2_change,
                 ).classes("w-full")
 
         @ui.refreshable
         def render_comparison():
-            exp1_id = exp_options.get(selected["exp1"])
-            exp2_id = exp_options.get(selected["exp2"])
+            # Get current selections from mutable dict
+            exp1_label = selected.get("exp1")
+            exp2_label = selected.get("exp2")
+
+            # Only show comparison if both selections exist
+            if not exp1_label or not exp2_label:
+                ui.label("Select two experiments above to compare them.").classes(
+                    "text-center py-8"
+                ).style(f"color: {THEME['text_muted']};")
+                return
+
+            exp1_id = exp_options.get(exp1_label)
+            exp2_id = exp_options.get(exp2_label)
 
             if exp1_id == exp2_id:
                 ui.label("Please select different experiments to compare.").classes(
@@ -166,4 +218,5 @@ def compare_page() -> None:
             apply_chart_theme(fig)
             ui.plotly(fig).classes("w-full h-80")
 
+        # Initial state - show prompt to select experiments
         render_comparison()
