@@ -33,7 +33,7 @@ import psycopg
 from tqdm.auto import tqdm
 
 from nse_momentum_lab.config import get_settings
-from nse_momentum_lab.db.market_db import MarketDataDB, get_market_db
+from nse_momentum_lab.db.market_db import MarketDataDB, get_backtest_db, get_market_db
 from nse_momentum_lab.services.backtest.engine import ExitReason, PositionSide
 from nse_momentum_lab.services.backtest.intraday_execution import (
     IntradayExecutionResult,
@@ -232,8 +232,13 @@ class DuckDBBacktestRunner:
     DATASET_KIND = "duckdb_market_daily"
     RUN_LOGIC_VERSION = "duckdb_backtest_runner_v2026_03_12_breakout_ranking_budget"
 
-    def __init__(self, db: MarketDataDB | None = None) -> None:
-        self.db = db or get_market_db()
+    def __init__(
+        self,
+        db: MarketDataDB | None = None,
+        results_db: MarketDataDB | None = None,
+    ) -> None:
+        self.db = db or get_market_db(read_only=True)
+        self.results_db = results_db or get_backtest_db()
         self._active_strategy: StrategyDefinition | None = None
         self._progress_writer: BufferedProgressWriter | None = None
 
@@ -540,10 +545,14 @@ class DuckDBBacktestRunner:
         params_json = json.dumps(asdict(params), sort_keys=True)
 
         if progress_file is None:
-            progress_dir = self.db.db_path.parent / "progress"
+            progress_dir = self.results_db.db_path.parent / "progress"
             progress_file = progress_dir / f"{exp_id}.ndjson"
 
-        existing_exp = self.db.get_experiment(exp_id) if self.db.experiment_exists(exp_id) else None
+        existing_exp = (
+            self.results_db.get_experiment(exp_id)
+            if self.results_db.experiment_exists(exp_id)
+            else None
+        )
         if not force and existing_exp is not None:
             existing_status = str(existing_exp.get("status") or "").lower().strip()
             if existing_status == "completed":
@@ -552,11 +561,11 @@ class DuckDBBacktestRunner:
             logger.info(
                 "[CLEANUP] Removing stale experiment %s with status='%s'.", exp_id, existing_status
             )
-            self.db.delete_experiment(exp_id)
+            self.results_db.delete_experiment(exp_id)
 
         # Delete stale data if forcing a re-run
-        if force and self.db.experiment_exists(exp_id):
-            self.db.delete_experiment(exp_id)
+        if force and self.results_db.experiment_exists(exp_id):
+            self.results_db.delete_experiment(exp_id)
 
         logger.info("[START] Experiment %s", exp_id)
         logger.info("  Params hash  : %s", params_hash)
@@ -575,7 +584,6 @@ class DuckDBBacktestRunner:
             started_at=started_at,
             progress_file=progress_file,
         )
-        self.db.register_dataset_snapshot(dataset_snapshot)
         manifest_payload = build_manifest_payload_from_snapshot(
             dataset_kind=self.DATASET_KIND,
             snapshot=dataset_snapshot,
@@ -592,7 +600,7 @@ class DuckDBBacktestRunner:
         )
 
         try:
-            self.db.save_experiment(
+            self.results_db.save_experiment(
                 exp_id=exp_id,
                 strategy_name=strategy_name,
                 params_json=params_json,
@@ -612,8 +620,8 @@ class DuckDBBacktestRunner:
                 message="Building/validating feat_daily",
             )
 
-            # Ensure features are built
-            self.db.build_feat_daily_table()
+            # Ensure features are available in the market catalog.
+            self._ensure_feat_daily_available()
 
             # Get universe
             symbols = self._get_liquid_symbols(params)
@@ -734,8 +742,8 @@ class DuckDBBacktestRunner:
                 force_write=True,
                 finished_at=finished_at,
             )
-            if self.db.experiment_exists(exp_id):
-                self.db.delete_experiment(exp_id)
+            if self.results_db.experiment_exists(exp_id):
+                self.results_db.delete_experiment(exp_id)
             raise
 
         return exp_id
@@ -752,6 +760,17 @@ class DuckDBBacktestRunner:
             return date.fromisoformat(value)
         except ValueError as exc:
             raise ValueError(f"{field_name} must be in YYYY-MM-DD format") from exc
+
+    def _ensure_feat_daily_available(self) -> None:
+        try:
+            self.db.con.execute("SELECT 1 FROM feat_daily LIMIT 1").fetchone()
+        except Exception as exc:
+            if getattr(self.db, "_read_only", False):
+                raise RuntimeError(
+                    "feat_daily is not available in market.duckdb. "
+                    "Run `doppler run -- uv run nseml-build-features` once before backtesting."
+                ) from exc
+            self.db.build_feat_daily_table()
 
     def _emit_progress(
         self,
@@ -2096,12 +2115,12 @@ class DuckDBBacktestRunner:
     ) -> None:
         """Write results to DuckDB tables."""
         # Save trades
-        self.db.save_trades(exp_id, all_trades)
-        self.db.save_execution_diagnostics(exp_id, all_execution_diagnostics)
+        self.results_db.save_trades(exp_id, all_trades)
+        self.results_db.save_execution_diagnostics(exp_id, all_execution_diagnostics)
 
         # Save yearly metrics
         for _year, stats in yearly_results.items():
-            self.db.save_yearly_metric(exp_id, stats)
+            self.results_db.save_yearly_metric(exp_id, stats)
 
         # Compute aggregates
         total_return = sum(s["return_pct"] for s in yearly_results.values())
@@ -2117,7 +2136,7 @@ class DuckDBBacktestRunner:
         total_losses = sum(abs(t["pnl_pct"]) for t in all_trades if t["pnl_pct"] < 0)
         pf = total_gains / total_losses if total_losses else 0
 
-        self.db.update_experiment_metrics(
+        self.results_db.update_experiment_metrics(
             exp_id=exp_id,
             total_return_pct=total_return,
             annualized_return_pct=ann_return,
@@ -2126,7 +2145,7 @@ class DuckDBBacktestRunner:
             max_drawdown_pct=max_dd,
             profit_factor=pf,
         )
-        self.db.refresh_backtest_read_snapshot()
+        self.results_db.refresh_backtest_read_snapshot()
 
     @staticmethod
     def _to_trades_df(all_trades: list[dict]) -> pd.DataFrame:
@@ -2215,7 +2234,7 @@ class DuckDBBacktestRunner:
         finished_at: datetime,
         snapshot: bool,
     ) -> None:
-        exp = self.db.get_experiment(exp_id) or {}
+        exp = self.results_db.get_experiment(exp_id) or {}
         metrics = {
             "total_return_pct": float(exp.get("total_return_pct") or 0.0),
             "annualized_return_pct": float(exp.get("annualized_return_pct") or 0.0),
@@ -2317,19 +2336,19 @@ class DuckDBBacktestRunner:
             ) from exc
 
     def _create_snapshot_copy(self, *, dataset_hash: str, exp_id: str) -> Path:
-        snapshot_dir = self.db.db_path.parent / "snapshots"
+        snapshot_dir = self.results_db.db_path.parent / "snapshots"
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         snapshot_path = snapshot_dir / f"{exp_id}_{dataset_hash}_{uuid4().hex[:8]}.duckdb"
 
-        db_list = self.db.con.execute("PRAGMA database_list").fetchall()
+        db_list = self.results_db.con.execute("PRAGMA database_list").fetchall()
         source_catalog = db_list[0][1]
         escaped_path = str(snapshot_path).replace("\\", "/").replace("'", "''")
 
-        self.db.con.execute(f"ATTACH '{escaped_path}' AS snapshot_db")
+        self.results_db.con.execute(f"ATTACH '{escaped_path}' AS snapshot_db")
         try:
-            self.db.con.execute(f"COPY FROM DATABASE {source_catalog} TO snapshot_db")
+            self.results_db.con.execute(f"COPY FROM DATABASE {source_catalog} TO snapshot_db")
         finally:
-            self.db.con.execute("DETACH snapshot_db")
+            self.results_db.con.execute("DETACH snapshot_db")
 
         return snapshot_path
 

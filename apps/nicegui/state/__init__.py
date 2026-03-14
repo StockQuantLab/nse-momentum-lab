@@ -25,12 +25,13 @@ import time
 if TYPE_CHECKING:
     from nicegui import ui  # noqa: F401  # Imported for type hints only
 
-from nse_momentum_lab.db.market_db import get_market_db, MarketDataDB
+from nse_momentum_lab.db.market_db import get_backtest_db, get_market_db, MarketDataDB
 
 # Singleton DB connection - created once at server startup.
 # Read-only so the dashboard can coexist with a running backtest writer
 # (DuckDB allows unlimited concurrent readers alongside one writer).
 db: MarketDataDB = get_market_db(read_only=True)
+backtest_db: MarketDataDB = get_backtest_db(read_only=True)
 
 # Thread pool for running blocking DB calls off the async event loop
 # (DuckDB is not async-native; running it directly on the event loop stalls NiceGUI)
@@ -70,7 +71,7 @@ def _fetch_experiments_sync(force_refresh: bool = False) -> pd.DataFrame:
         or force_refresh
         or (now - _experiments_cache_time) > EXPERIMENT_CACHE_TTL
     ):
-        exps = db.list_experiments()
+        exps = backtest_db.list_experiments()
         if not exps.is_empty():
             _experiments_cache = exps.to_pandas()
             _experiments_cache["status"] = _experiments_cache["status"].astype(str).str.lower()
@@ -200,7 +201,7 @@ async def aget_db_status(lite: bool = False) -> dict:
 
 def get_experiment(exp_id: str) -> dict | None:
     """Get experiment details by ID."""
-    return db.get_experiment(exp_id)
+    return backtest_db.get_experiment(exp_id)
 
 
 async def aget_experiment(exp_id: str) -> dict | None:
@@ -211,7 +212,7 @@ async def aget_experiment(exp_id: str) -> dict | None:
 
 def get_experiment_trades(exp_id: str) -> pd.DataFrame:
     """Get all trades for an experiment."""
-    df = db.get_experiment_trades(exp_id)
+    df = backtest_db.get_experiment_trades(exp_id)
     return df.to_pandas() if not df.is_empty() else pd.DataFrame()
 
 
@@ -223,7 +224,7 @@ async def aget_experiment_trades(exp_id: str) -> pd.DataFrame:
 
 def get_experiment_yearly_metrics(exp_id: str) -> pd.DataFrame:
     """Get yearly metrics for an experiment."""
-    df = db.get_experiment_yearly_metrics(exp_id)
+    df = backtest_db.get_experiment_yearly_metrics(exp_id)
     return df.to_pandas() if not df.is_empty() else pd.DataFrame()
 
 

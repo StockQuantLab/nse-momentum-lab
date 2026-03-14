@@ -29,6 +29,8 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 PARQUET_DIR = DATA_DIR / "parquet"
 DUCKDB_FILE = DATA_DIR / "market.duckdb"
+BACKTEST_DUCKDB_FILE = DATA_DIR / "backtest.duckdb"
+BACKTEST_DASHBOARD_DUCKDB_FILE = DATA_DIR / "backtest_dashboard.duckdb"
 
 # Bump when feat_daily SQL logic changes.
 FEAT_DAILY_QUERY_VERSION = "feat_daily_v2lynch_ti65_2026_03_01"
@@ -346,6 +348,39 @@ class MarketDataDB:
             CREATE INDEX IF NOT EXISTS idx_bt_experiment_params_dataset
             ON bt_experiment(params_hash, dataset_hash)
         """)
+
+    def refresh_backtest_read_snapshot(self) -> None:
+        """Refresh read-only dashboard copy of backtest tables."""
+        if self._read_only:
+            return
+
+        target_path = Path(
+            os.getenv("BACKTEST_DASHBOARD_DUCKDB_PATH", str(BACKTEST_DASHBOARD_DUCKDB_FILE))
+        )
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            if target_path.resolve() == self.db_path.resolve():
+                return
+        except OSError:
+            pass
+
+        escaped_path = str(target_path).replace("\\", "/").replace("'", "''")
+        self.con.execute(f"ATTACH '{escaped_path}' AS bt_read")
+        try:
+            self.con.execute(
+                "CREATE OR REPLACE TABLE bt_read.bt_experiment AS SELECT * FROM bt_experiment"
+            )
+            self.con.execute(
+                "CREATE OR REPLACE TABLE bt_read.bt_yearly_metric AS SELECT * FROM bt_yearly_metric"
+            )
+            self.con.execute("CREATE OR REPLACE TABLE bt_read.bt_trade AS SELECT * FROM bt_trade")
+            self.con.execute(
+                "CREATE OR REPLACE TABLE bt_read.bt_execution_diagnostic "
+                "AS SELECT * FROM bt_execution_diagnostic"
+            )
+        finally:
+            self.con.execute("DETACH bt_read")
 
     def _view_snapshot(self, view: str) -> dict[str, int | str | None]:
         if (view == "v_daily" and not self._has_daily) or (view == "v_5min" and not self._has_5min):
@@ -1271,7 +1306,8 @@ class MarketDataDB:
         self.close()
 
 
-_db: MarketDataDB | None = None
+_market_db: MarketDataDB | None = None
+_backtest_db: MarketDataDB | None = None
 
 
 def get_market_db(read_only: bool = False) -> MarketDataDB:
@@ -1280,14 +1316,37 @@ def get_market_db(read_only: bool = False) -> MarketDataDB:
     Pass read_only=True for read-only consumers (e.g. dashboard) so they can
     coexist with a running backtest writer without hitting the DuckDB lock.
     """
-    global _db
-    if _db is None:
-        _db = MarketDataDB(read_only=read_only)
-    return _db
+    global _market_db
+    if _market_db is None:
+        market_path = Path(os.getenv("DUCKDB_PATH", str(DUCKDB_FILE)))
+        _market_db = MarketDataDB(db_path=market_path, read_only=read_only)
+    return _market_db
+
+
+def get_backtest_db(read_only: bool = False) -> MarketDataDB:
+    """Return the global Backtest DuckDB instance.
+
+    Backtest results are persisted to a dedicated catalog to avoid contention
+    with dashboard reads of the market catalog.
+    """
+    global _backtest_db
+    if _backtest_db is None:
+        env_name = "BACKTEST_DASHBOARD_DUCKDB_PATH" if read_only else "BACKTEST_DUCKDB_PATH"
+        default_path = BACKTEST_DASHBOARD_DUCKDB_FILE if read_only else BACKTEST_DUCKDB_FILE
+        backtest_path = Path(os.getenv(env_name, str(default_path)))
+        _backtest_db = MarketDataDB(db_path=backtest_path, read_only=read_only)
+    return _backtest_db
 
 
 def close_market_db() -> None:
-    global _db
-    if _db is not None:
-        _db.close()
-        _db = None
+    global _market_db
+    if _market_db is not None:
+        _market_db.close()
+        _market_db = None
+
+
+def close_backtest_db() -> None:
+    global _backtest_db
+    if _backtest_db is not None:
+        _backtest_db.close()
+        _backtest_db = None
