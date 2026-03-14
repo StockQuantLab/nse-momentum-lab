@@ -177,11 +177,13 @@ _STRATEGY_REGISTRY: dict[str, StrategyDefinition] = {
     ),
     "2lynchbreakdown": StrategyDefinition(
         name="2LYNCHBreakdown",
-        version="1.1.0",
+        version="1.2.0",
         description=(
             "2LYNCH breakdown with configurable threshold (short). "
             "SHORT mirror of the 2LYNCH filter stack: close near low, T-1 narrow/bullish, "
-            "downtrend quality, not-down-2-days (avoids shorting cascading stocks)."
+            "downtrend quality, not-down-2-days (avoids shorting cascading stocks). "
+            "v1.2.0: filter_y now requires rs_252 < 0 (genuine annual underperformer) "
+            "in addition to <=2 prior 30d breakouts, acting as a per-stock regime gate."
         ),
         family="threshold_breakdown",
         direction=PositionSide.SHORT,
@@ -198,7 +200,7 @@ _STRATEGY_REGISTRY: dict[str, StrategyDefinition] = {
     # Backward-compat alias
     "thresholdbreakdown": StrategyDefinition(
         name="2LYNCHBreakdown",
-        version="1.1.0",
+        version="1.2.0",
         description="Alias for 2LYNCHBreakdown.",
         family="threshold_breakdown",
         direction=PositionSide.SHORT,

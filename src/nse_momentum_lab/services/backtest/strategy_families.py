@@ -129,8 +129,15 @@ def _build_threshold_breakdown_candidate_query(
 
     Mirror of the 2LYNCH breakout with SHORT-side filter inversions:
     - filter_h: close near the LOW (selling pressure, close in bottom 30%)
-    - filter_n: T-1 day narrow OR bullish (consolidation/up day before breakdown)
-    - filter_l: 2 of 3 must confirm downtrend (below MA20, neg 5d ret, orderly R2)
+    - filter_n: T-1 day narrow OR bullish (consolidation/up day before breakdown mirrors
+      the long-side "narrow OR red day before breakout")
+    - filter_y: not over-broken-out (<=2 prior 30-day breakouts) AND stock has negative
+      52-week relative return (rs_252 < 0).  The rs_252 gate is the per-stock regime
+      proxy: a stock that is still positive for the year is likely a bull-market dip, not
+      a genuine reversal candidate.  Only stocks that are **genuinely underperforming**
+      for the year produce reliable short continuation.
+    - filter_c: prior-day volume dry-up (same as long — quiet day before the move)
+    - filter_l: 2 of 3 must confirm downtrend (below MA20, neg 5d ret, orderly R2 >= 0.70)
     - filter_2 (SHORT mirror of 'Not Up 2 Days'): at least one of last 2 days was UP
       (stock hasn't already been in free-fall; avoids shorting at the bottom of a cascade)
     """
@@ -179,7 +186,7 @@ def _build_threshold_breakdown_candidate_query(
                 f.close_pos_in_range, f.ma_20, f.ret_5d, f.atr_20,
                 f.vol_dryup_ratio, f.atr_compress_ratio, f.range_percentile,
                 f.prior_breakouts_30d, f.prior_breakouts_90d, f.r2_65,
-                f.ma_7, f.ma_65_sma
+                f.ma_7, f.ma_65_sma, f.rs_252
             FROM breakdown_days g
             LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.trading_date
         )
@@ -189,10 +196,10 @@ def _build_threshold_breakdown_candidate_query(
             (close < ma_20) AS below_ma20,
             (ret_5d < 0) AS negative_momentum,
             atr_20, vol_dryup_ratio, atr_compress_ratio, range_percentile,
-            prior_breakouts_90d,
+            prior_breakouts_90d, rs_252,
             (close_pos_in_range <= 0.30) AS filter_h,
             ((prev_high - prev_low) < (atr_20 * 0.5) OR prev_close > prev_open) AS filter_n,
-            (COALESCE(prior_breakouts_30d, 0) <= 2) AS filter_y,
+            (COALESCE(prior_breakouts_30d, 0) <= 2 AND COALESCE(rs_252, 1.0) < 0) AS filter_y,
             (vol_dryup_ratio < 1.3) AS filter_c,
             (CAST(close < ma_20 AS INTEGER) + CAST(ret_5d < 0 AS INTEGER)
              + CAST(COALESCE(NULLIF(r2_65, 0), 0) >= 0.70 AS INTEGER) >= 2) AS filter_l,

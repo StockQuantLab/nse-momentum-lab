@@ -21,7 +21,9 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time
+from math import isclose
 from pathlib import Path
+from typing import TypedDict
 from uuid import uuid4
 
 import numpy as np
@@ -32,7 +34,11 @@ from tqdm.auto import tqdm
 
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db.market_db import MarketDataDB, get_market_db
-from nse_momentum_lab.services.backtest.engine import PositionSide
+from nse_momentum_lab.services.backtest.engine import ExitReason, PositionSide
+from nse_momentum_lab.services.backtest.intraday_execution import (
+    IntradayExecutionResult,
+    resolve_intraday_execution_from_5min,
+)
 from nse_momentum_lab.services.backtest.persistence import (
     BacktestArtifactPublisher,
     build_strategy_hash,
@@ -63,6 +69,33 @@ from nse_momentum_lab.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class IntradayEntry(TypedDict):
+    """Result from intraday entry resolver (threshold or ORH mode)."""
+
+    entry_price: float
+    initial_stop: float
+    same_day_stop_hit: bool
+    entry_ts: datetime
+    same_day_exit_price: float | None
+    same_day_exit_ts: datetime | None
+    same_day_exit_time: time | None
+    same_day_exit_reason: str | None
+    carry_stop_next_session: float | None
+    entry_time: time | None
+
+
+@dataclass(frozen=True)
+class ProgressContext:
+    exp_id: str
+    strategy_name: str
+    strategy_hash: str
+    dataset_hash: str
+    params_json: str
+    code_hash: str
+    started_at: datetime
+    progress_file: Path | None
 
 
 @dataclass
@@ -102,39 +135,93 @@ class BacktestParams:
     time_stop_days: int = 5
     abnormal_profit_pct: float = 0.10
     abnormal_gap_exit_pct: float = 0.20
+    abnormal_gap_mode: str = "immediate_exit"
+    same_day_r_ladder: bool = True
+    same_day_r_ladder_start_r: int = 2
+    short_post_day3_buffer_pct: float | None = None
+    short_trail_activation_pct: float | None = None
+    short_time_stop_days: int | None = None
+    short_abnormal_profit_pct: float | None = None
+    short_max_stop_dist_pct: float | None = None
     follow_through_threshold: float = 0.0
 
     # FEE (Find and Enter Early) — Stockbee: enter in first N min of NSE open (09:15 IST)
     # 60min is the optimal window for NSE (vs 30min for US) due to pre-open auction.
     # Backtests (2015-2025, 1,776 stocks): 60min gives Calmar 27.06 vs 19.74 at 30min.
     entry_cutoff_minutes: int = 60  # 09:15 + 60 min = 10:15 cutoff
+    # Short side often benefits from tighter entry windows around the opening burst.
+    # When None, it falls back to ``entry_cutoff_minutes`` for backward-compatible
+    # behavior; when set, used only for SHORT strategies.
+    short_entry_cutoff_minutes: int | None = None
 
     # Maximum allowed distance from entry to stop.
     # Belt-and-suspenders guard: if stop is >8% below entry even within the time window,
     # the setup is invalid (e.g. stock crashed then bounced — FEE was still violated).
     max_stop_dist_pct: float = 0.08
+    breakout_daily_candidate_budget: int = 30
 
     # Parallel execution: number of worker threads for year-by-year backtest
     # Set to 1 for sequential (default), >1 for parallel (e.g., 4 for 4-way parallel)
     # Note: DuckDB read-only connections are thread-safe
     parallel_workers: int = 1
 
+    # EP-specific parameters
+    gap_threshold: float = 0.05
+    gap_vs_atr_threshold: float = 1.5
+    orh_window_minutes: int = 5
+    delayed_entry_window: int = 30
+    min_consolidation_days: int = 3
+    require_real_catalyst: bool = False
+
     def to_hash(self) -> str:
         """Deterministic SHA-256 of all parameters (for dedup)."""
-        return compute_short_hash(asdict(self), length=16)
+        serializable_fields = asdict(self)
+        # Preserve previous hash behavior for the historical default case where the
+        # short post-day3 buffer was not explicitly set.
+        if serializable_fields.get("short_post_day3_buffer_pct") is None:
+            serializable_fields["short_post_day3_buffer_pct"] = 0.0
+        return compute_short_hash(serializable_fields, length=16)
 
-    def to_vbt_config(self, direction: PositionSide = PositionSide.LONG) -> VectorBTConfig:
+    def to_vbt_config(
+        self,
+        direction: PositionSide = PositionSide.LONG,
+        short_post_day3_buffer_pct: float | None = None,
+    ) -> VectorBTConfig:
+        resolved_buffer = (
+            float(short_post_day3_buffer_pct)
+            if short_post_day3_buffer_pct is not None
+            else (
+                self.short_post_day3_buffer_pct
+                if self.short_post_day3_buffer_pct is not None
+                else 0.0
+            )
+        )
+        trail_activation_pct = self.trail_activation_pct
+        time_stop_days = self.time_stop_days
+        abnormal_profit_pct = self.abnormal_profit_pct
+        if direction == PositionSide.SHORT:
+            if self.short_trail_activation_pct is not None:
+                trail_activation_pct = self.short_trail_activation_pct
+            if self.short_time_stop_days is not None:
+                time_stop_days = self.short_time_stop_days
+            if self.short_abnormal_profit_pct is not None:
+                abnormal_profit_pct = self.short_abnormal_profit_pct
+
         return VectorBTConfig(
             direction=direction,
             risk_per_trade_pct=self.risk_per_trade_pct,
             default_portfolio_value=self.portfolio_value,
             fees_per_trade=self.fees_per_trade,
-            trail_activation_pct=self.trail_activation_pct,
+            trail_activation_pct=trail_activation_pct,
             trail_stop_pct=self.trail_stop_pct,
             min_hold_days=self.min_hold_days,
-            time_stop_days=self.time_stop_days,
-            abnormal_profit_pct=self.abnormal_profit_pct,
+            time_stop_days=time_stop_days,
+            abnormal_profit_pct=abnormal_profit_pct,
             abnormal_gap_exit_pct=self.abnormal_gap_exit_pct,
+            abnormal_gap_mode=self.abnormal_gap_mode,
+            same_day_r_ladder=self.same_day_r_ladder,
+            same_day_r_ladder_start_r=self.same_day_r_ladder_start_r,
+            short_post_day3_buffer_pct=resolved_buffer,
             follow_through_threshold=self.follow_through_threshold,
         )
 
@@ -143,12 +230,271 @@ class DuckDBBacktestRunner:
     """Orchestrates an end-to-end backtest and stores results in DuckDB."""
 
     DATASET_KIND = "duckdb_market_daily"
-    RUN_LOGIC_VERSION = "duckdb_backtest_runner_v2026_03_07_2lynch_filter2_fix"
+    RUN_LOGIC_VERSION = "duckdb_backtest_runner_v2026_03_12_breakout_ranking_budget"
 
     def __init__(self, db: MarketDataDB | None = None) -> None:
         self.db = db or get_market_db()
         self._active_strategy: StrategyDefinition | None = None
         self._progress_writer: BufferedProgressWriter | None = None
+
+    def _uses_breakout_ranking(self) -> bool:
+        strategy = self._active_strategy
+        if strategy is None:
+            return False
+        return strategy.direction == PositionSide.LONG and strategy.family in {
+            "indian_2lynch",
+            "threshold_breakout",
+        }
+
+    @staticmethod
+    def _resolve_short_post_day3_buffer_pct(
+        params: BacktestParams,
+        strategy: StrategyDefinition | None = None,
+    ) -> float:
+        if params.short_post_day3_buffer_pct is not None:
+            return params.short_post_day3_buffer_pct
+
+        if (
+            strategy is not None
+            and strategy.direction == PositionSide.SHORT
+            and isclose(params.breakout_threshold, 0.02, abs_tol=1e-9)
+        ):
+            return 0.005
+
+        return 0.0
+
+    @staticmethod
+    def _resolve_entry_cutoff_minutes(
+        params: BacktestParams,
+        strategy: StrategyDefinition | None = None,
+    ) -> int:
+        if strategy is not None and strategy.direction == PositionSide.SHORT:
+            return (
+                params.short_entry_cutoff_minutes
+                if params.short_entry_cutoff_minutes is not None
+                else params.entry_cutoff_minutes
+            )
+        return params.entry_cutoff_minutes
+
+    @staticmethod
+    def _resolve_max_stop_dist_pct(
+        params: BacktestParams,
+        strategy: StrategyDefinition | None = None,
+    ) -> float:
+        if (
+            params.short_max_stop_dist_pct is not None
+            and strategy is not None
+            and strategy.direction == PositionSide.SHORT
+        ):
+            return params.short_max_stop_dist_pct
+        return params.max_stop_dist_pct
+
+    @staticmethod
+    def _resolve_short_trail_activation_pct(
+        params: BacktestParams,
+        strategy: StrategyDefinition | None = None,
+    ) -> float:
+        if (
+            params.short_trail_activation_pct is not None
+            and strategy is not None
+            and strategy.direction == PositionSide.SHORT
+        ):
+            return params.short_trail_activation_pct
+        return params.trail_activation_pct
+
+    @staticmethod
+    def _resolve_short_time_stop_days(
+        params: BacktestParams,
+        strategy: StrategyDefinition | None = None,
+    ) -> int:
+        if (
+            params.short_time_stop_days is not None
+            and strategy is not None
+            and strategy.direction == PositionSide.SHORT
+        ):
+            return params.short_time_stop_days
+        return params.time_stop_days
+
+    @staticmethod
+    def _resolve_short_abnormal_profit_pct(
+        params: BacktestParams,
+        strategy: StrategyDefinition | None = None,
+    ) -> float:
+        if (
+            params.short_abnormal_profit_pct is not None
+            and strategy is not None
+            and strategy.direction == PositionSide.SHORT
+        ):
+            return params.short_abnormal_profit_pct
+        return params.abnormal_profit_pct
+
+    @staticmethod
+    def _build_backtest_logic_fingerprint() -> str:
+        """Hash the core backtest logic files so code changes create new experiment IDs."""
+        module_dir = Path(__file__).resolve().parent
+        logic_files = [
+            module_dir / "duckdb_backtest_runner.py",
+            module_dir / "strategy_families.py",
+            module_dir / "strategy_registry.py",
+            module_dir / "intraday_execution.py",
+            module_dir / "vectorbt_engine.py",
+            module_dir / "engine.py",
+            module_dir / "filters.py",
+            module_dir / "signal_models.py",
+        ]
+        file_digests: dict[str, str] = {}
+        for path in logic_files:
+            try:
+                file_digests[path.name] = compute_short_hash(
+                    path.read_text(encoding="utf-8"), length=16
+                )
+            except OSError:
+                file_digests[path.name] = "missing"
+        return compute_short_hash(file_digests, length=16)
+
+    @staticmethod
+    def _build_filter_snapshot(
+        row: dict[str, object],
+        active_filter_cols: list[str],
+        hold_quality_cols: list[str],
+    ) -> dict[str, bool]:
+        return {
+            col: bool(row.get(col, False))
+            for col in sorted({*active_filter_cols, *hold_quality_cols})
+        }
+
+    @staticmethod
+    def _coerce_int(value: object, default: int = 0) -> int:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            try:
+                return int(float(value))
+            except ValueError:
+                return default
+        return default
+
+    @staticmethod
+    def _build_selection_components(row: dict[str, object]) -> dict[str, object]:
+        return {
+            "c_strength": DuckDBBacktestRunner._coerce_int(row.get("selection_c_strength"), 0),
+            "y_score": DuckDBBacktestRunner._coerce_int(row.get("selection_y_score"), 0),
+            "n_score": DuckDBBacktestRunner._coerce_int(row.get("selection_n_score"), 0),
+            "r2_quality": float(row.get("selection_r2_quality", 0.0) or 0.0),
+            "value_traded_inr": float(row.get("value_traded_inr", 0.0) or 0.0),
+            "daily_budget": DuckDBBacktestRunner._coerce_int(row.get("selection_budget"), 0),
+        }
+
+    @staticmethod
+    def _build_diag_entry(
+        *,
+        year: int,
+        row: dict[str, object],
+        active_filter_cols: list[str],
+        hold_quality_cols: list[str],
+    ) -> tuple[dict[str, object], dict[str, bool], bool]:
+        sig_date = row["trading_date"]
+        if isinstance(sig_date, datetime):
+            sig_date = sig_date.date()
+        filter_snapshot = DuckDBBacktestRunner._build_filter_snapshot(
+            row, active_filter_cols, hold_quality_cols
+        )
+        hold_quality_passed = (
+            all(bool(row.get(col, False)) for col in hold_quality_cols)
+            if hold_quality_cols
+            else True
+        )
+        diag_entry: dict[str, object] = {
+            "year": year,
+            "signal_date": sig_date,
+            "symbol": row["symbol"],
+            "status": "queued_for_execution",
+            "reason": "eligible",
+            "entry_time": None,
+            "entry_price": None,
+            "initial_stop": None,
+            "filters_json": filter_snapshot,
+            "hold_quality_passed": hold_quality_passed,
+            "executed_exit_reason": None,
+            "pnl_pct": None,
+            "selection_score": float(row.get("selection_score", 0.0) or 0.0),
+            "selection_rank": DuckDBBacktestRunner._coerce_int(row.get("selection_rank"), 0),
+            "selection_components_json": DuckDBBacktestRunner._build_selection_components(row),
+        }
+        return diag_entry, filter_snapshot, hold_quality_passed
+
+    def _apply_breakout_selection_ranking(
+        self,
+        df_filtered: pl.DataFrame,
+        params: BacktestParams,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        if df_filtered.is_empty():
+            return df_filtered, df_filtered
+
+        ranked = df_filtered.with_columns(
+            (
+                (pl.col("prev_vol_dryup_ratio").fill_null(99.0) <= 1.0).cast(pl.Int64)
+                + (pl.col("prev_atr_compress_ratio").fill_null(99.0) <= 1.10).cast(pl.Int64)
+                + (pl.col("prev_range_percentile").fill_null(99.0) <= 0.60).cast(pl.Int64)
+            ).alias("selection_c_strength"),
+            (
+                pl.when(pl.col("prior_breakouts_30d").fill_null(0) <= 0)
+                .then(3)
+                .when(pl.col("prior_breakouts_30d").fill_null(0) == 1)
+                .then(2)
+                .when(pl.col("prior_breakouts_30d").fill_null(0) == 2)
+                .then(1)
+                .otherwise(0)
+            ).alias("selection_y_score"),
+            (
+                pl.when(
+                    pl.col("prev_close").is_not_null()
+                    & pl.col("prev_open").is_not_null()
+                    & (pl.col("prev_close") < pl.col("prev_open"))
+                )
+                .then(2)
+                .when(
+                    pl.col("prev_high").is_not_null()
+                    & pl.col("prev_low").is_not_null()
+                    & pl.col("atr_20").is_not_null()
+                    & ((pl.col("prev_high") - pl.col("prev_low")) < (pl.col("atr_20") * 0.5))
+                )
+                .then(1)
+                .otherwise(0)
+            ).alias("selection_n_score"),
+            pl.col("r2_65").clip(0.0, 1.0).fill_null(0.0).alias("selection_r2_quality"),
+        ).with_columns(
+            (
+                pl.col("selection_c_strength") * 10_000
+                + pl.col("selection_y_score") * 1_000
+                + ((pl.col("selection_r2_quality") * 100).round(0).cast(pl.Int64) * 5)
+                + pl.col("selection_n_score")
+            )
+            .cast(pl.Float64)
+            .alias("selection_score")
+        )
+
+        ranked = ranked.sort(
+            ["trading_date", "selection_score", "value_traded_inr", "symbol"],
+            descending=[False, True, True, False],
+        ).with_columns(
+            pl.col("symbol").cum_count().over("trading_date").alias("selection_rank"),
+            pl.lit(int(params.breakout_daily_candidate_budget)).alias("selection_budget"),
+        )
+
+        budget = int(params.breakout_daily_candidate_budget)
+        if budget <= 0:
+            return ranked, ranked.head(0)
+        return (
+            ranked.filter(pl.col("selection_rank") <= budget),
+            ranked.filter(pl.col("selection_rank") > budget),
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -184,6 +530,7 @@ class DuckDBBacktestRunner:
                 "strategy": strategy_name,
                 "strategy_version": self._active_strategy.version,
                 "run_logic_version": self.RUN_LOGIC_VERSION,
+                "logic_fingerprint": self._build_backtest_logic_fingerprint(),
             },
         )
         dataset_snapshot = self.db.get_dataset_snapshot()
@@ -218,6 +565,16 @@ class DuckDBBacktestRunner:
             write_interval_seconds=60,
             progress_file=progress_file,
         )
+        progress_context = ProgressContext(
+            exp_id=exp_id,
+            strategy_name=strategy_name,
+            strategy_hash=strategy_hash,
+            dataset_hash=dataset_hash,
+            params_json=params_json,
+            code_hash=code_hash,
+            started_at=started_at,
+            progress_file=progress_file,
+        )
         self.db.register_dataset_snapshot(dataset_snapshot)
         manifest_payload = build_manifest_payload_from_snapshot(
             dataset_kind=self.DATASET_KIND,
@@ -227,18 +584,11 @@ class DuckDBBacktestRunner:
         )
         upsert_dataset_manifest_sync(manifest_payload)
         self._emit_progress(
-            exp_id=exp_id,
-            strategy_name=strategy_name,
-            strategy_hash=strategy_hash,
-            dataset_hash=dataset_hash,
-            params_json=params_json,
-            code_hash=code_hash,
-            started_at=started_at,
+            context=progress_context,
             status="RUNNING",
             stage="starting",
             progress_pct=0.0,
             message="Initializing backtest run",
-            progress_file=progress_file,
         )
 
         try:
@@ -255,18 +605,11 @@ class DuckDBBacktestRunner:
                 dataset_snapshot=dataset_snapshot,
             )
             self._emit_progress(
-                exp_id=exp_id,
-                strategy_name=strategy_name,
-                strategy_hash=strategy_hash,
-                dataset_hash=dataset_hash,
-                params_json=params_json,
-                code_hash=code_hash,
-                started_at=started_at,
+                context=progress_context,
                 status="RUNNING",
                 stage="materializing_features",
                 progress_pct=5.0,
                 message="Building/validating feat_daily",
-                progress_file=progress_file,
             )
 
             # Ensure features are built
@@ -278,13 +621,7 @@ class DuckDBBacktestRunner:
             effective_start_year, effective_end_year = self._effective_year_range(params)
             total_years = max(effective_end_year - effective_start_year + 1, 1)
             self._emit_progress(
-                exp_id=exp_id,
-                strategy_name=strategy_name,
-                strategy_hash=strategy_hash,
-                dataset_hash=dataset_hash,
-                params_json=params_json,
-                code_hash=code_hash,
-                started_at=started_at,
+                context=progress_context,
                 status="RUNNING",
                 stage="running_years",
                 progress_pct=10.0,
@@ -292,26 +629,18 @@ class DuckDBBacktestRunner:
                     f"Universe ready ({len(symbols)} symbols). "
                     f"Running {effective_start_year}-{effective_end_year}."
                 ),
-                progress_file=progress_file,
             )
 
             def on_year_start(year: int, completed_years: int, years_total: int) -> None:
                 pct = min(90.0, 10.0 + (completed_years / max(years_total, 1)) * 80.0)
                 self._emit_progress(
-                    exp_id=exp_id,
-                    strategy_name=strategy_name,
-                    strategy_hash=strategy_hash,
-                    dataset_hash=dataset_hash,
-                    params_json=params_json,
-                    code_hash=code_hash,
-                    started_at=started_at,
+                    context=progress_context,
                     status="RUNNING",
                     stage="running_year",
                     progress_pct=pct,
                     message=(
                         f"Year {year} started ({completed_years}/{years_total} years completed)"
                     ),
-                    progress_file=progress_file,
                 )
 
             def on_year_complete(
@@ -322,13 +651,7 @@ class DuckDBBacktestRunner:
             ) -> None:
                 pct = min(92.0, 10.0 + (completed_years / max(years_total, 1)) * 82.0)
                 self._emit_progress(
-                    exp_id=exp_id,
-                    strategy_name=strategy_name,
-                    strategy_hash=strategy_hash,
-                    dataset_hash=dataset_hash,
-                    params_json=params_json,
-                    code_hash=code_hash,
-                    started_at=started_at,
+                    context=progress_context,
                     status="RUNNING",
                     stage="year_complete",
                     progress_pct=pct,
@@ -337,7 +660,6 @@ class DuckDBBacktestRunner:
                         f"return={float(stats.get('return_pct', 0.0)):+.2f}% "
                         f"({completed_years}/{years_total})"
                     ),
-                    progress_file=progress_file,
                 )
 
             def on_year_heartbeat(
@@ -348,21 +670,14 @@ class DuckDBBacktestRunner:
             ) -> None:
                 pct = min(89.0, 10.0 + ((completed_years + 0.5) / max(years_total, 1)) * 80.0)
                 self._emit_progress(
-                    exp_id=exp_id,
-                    strategy_name=strategy_name,
-                    strategy_hash=strategy_hash,
-                    dataset_hash=dataset_hash,
-                    params_json=params_json,
-                    code_hash=code_hash,
-                    started_at=started_at,
+                    context=progress_context,
                     status="RUNNING",
                     stage="running_year",
                     progress_pct=pct,
                     message=f"Year {year}: {message}",
-                    progress_file=progress_file,
                 )
 
-            yearly_results, all_trades = self._run_year_by_year(
+            yearly_results, all_trades, all_execution_diagnostics = self._run_year_by_year(
                 params,
                 symbols,
                 on_year_start=on_year_start,
@@ -370,35 +685,27 @@ class DuckDBBacktestRunner:
                 on_year_heartbeat=on_year_heartbeat,
             )
             self._emit_progress(
-                exp_id=exp_id,
-                strategy_name=strategy_name,
-                strategy_hash=strategy_hash,
-                dataset_hash=dataset_hash,
-                params_json=params_json,
-                code_hash=code_hash,
-                started_at=started_at,
+                context=progress_context,
                 status="RUNNING",
                 stage="persisting_results",
                 progress_pct=94.0,
                 message=(
                     f"Persisting {len(all_trades)} trades and {total_years} yearly metric rows"
                 ),
-                progress_file=progress_file,
             )
-            self._persist_results(exp_id, params, yearly_results, all_trades)
+            self._persist_results(
+                exp_id,
+                params,
+                yearly_results,
+                all_trades,
+                all_execution_diagnostics,
+            )
             self._emit_progress(
-                exp_id=exp_id,
-                strategy_name=strategy_name,
-                strategy_hash=strategy_hash,
-                dataset_hash=dataset_hash,
-                params_json=params_json,
-                code_hash=code_hash,
-                started_at=started_at,
+                context=progress_context,
                 status="RUNNING",
                 stage="publishing_artifacts",
                 progress_pct=97.0,
                 message="Publishing run artifacts to MinIO and Postgres",
-                progress_file=progress_file,
             )
 
             finished_at = datetime.now(UTC)
@@ -419,18 +726,11 @@ class DuckDBBacktestRunner:
         except Exception as exc:
             finished_at = datetime.now(UTC)
             self._emit_progress(
-                exp_id=exp_id,
-                strategy_name=strategy_name,
-                strategy_hash=strategy_hash,
-                dataset_hash=dataset_hash,
-                params_json=params_json,
-                code_hash=code_hash,
-                started_at=started_at,
+                context=progress_context,
                 status="FAILED",
                 stage="failed",
                 progress_pct=None,
                 message=f"Backtest failed: {exc}",
-                progress_file=progress_file,
                 force_write=True,
                 finished_at=finished_at,
             )
@@ -456,18 +756,11 @@ class DuckDBBacktestRunner:
     def _emit_progress(
         self,
         *,
-        exp_id: str,
-        strategy_name: str,
-        strategy_hash: str,
-        dataset_hash: str,
-        params_json: str,
-        code_hash: str,
-        started_at: datetime,
+        context: ProgressContext,
         status: str,
         stage: str,
         message: str,
         progress_pct: float | None,
-        progress_file: Path | None,
         force_write: bool = False,
         finished_at: datetime | None = None,
     ) -> None:
@@ -476,13 +769,13 @@ class DuckDBBacktestRunner:
                 progress_pct=progress_pct,
                 stage=stage,
                 message=message,
-                exp_id=exp_id,
-                strategy_name=strategy_name,
-                strategy_hash=strategy_hash,
-                dataset_hash=dataset_hash,
-                params_json=params_json,
-                code_hash=code_hash,
-                started_at=started_at,
+                exp_id=context.exp_id,
+                strategy_name=context.strategy_name,
+                strategy_hash=context.strategy_hash,
+                dataset_hash=context.dataset_hash,
+                params_json=context.params_json,
+                code_hash=context.code_hash,
+                started_at=context.started_at,
                 status=status,
                 finished_at=finished_at,
                 force_write=force_write,
@@ -494,28 +787,28 @@ class DuckDBBacktestRunner:
         logger.info("[PROGRESS] %s [%s] %s", pct_label, stage, message)
 
         heartbeat_at = datetime.now(UTC)
-        if progress_file is not None:
-            progress_file.parent.mkdir(parents=True, exist_ok=True)
+        if context.progress_file is not None:
+            context.progress_file.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "timestamp": heartbeat_at.isoformat(),
-                "exp_id": exp_id,
+                "exp_id": context.exp_id,
                 "status": status,
                 "stage": stage,
                 "progress_pct": progress_pct,
                 "message": message,
             }
-            with progress_file.open("a", encoding="utf-8") as fh:
+            with context.progress_file.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, sort_keys=True) + "\n")
 
         upsert_exp_run_with_artifacts_sync(
-            exp_hash=exp_id,
-            strategy_name=strategy_name,
-            strategy_hash=strategy_hash,
-            dataset_hash=dataset_hash,
-            params_json=params_json,
-            code_sha=code_hash,
+            exp_hash=context.exp_id,
+            strategy_name=context.strategy_name,
+            strategy_hash=context.strategy_hash,
+            dataset_hash=context.dataset_hash,
+            params_json=context.params_json,
+            code_sha=context.code_hash,
             status=status,
-            started_at=started_at,
+            started_at=context.started_at,
             finished_at=finished_at,
             metrics={},
             artifacts=[],
@@ -591,7 +884,7 @@ class DuckDBBacktestRunner:
         on_year_start: Callable[[int, int, int], None] | None = None,
         on_year_complete: Callable[[int, int, int, dict], None] | None = None,
         on_year_heartbeat: Callable[[int, int, int, str], None] | None = None,
-    ) -> tuple[dict[int, dict], list[dict]]:
+    ) -> tuple[dict[int, dict], list[dict], list[dict]]:
         """Run backtest year by year using parameterized queries.
 
         Supports parallel execution when params.parallel_workers > 1.
@@ -648,10 +941,11 @@ class DuckDBBacktestRunner:
         on_year_complete: Callable[[int, int, int, dict], None] | None,
         on_year_heartbeat: Callable[[int, int, int, str], None] | None,
         years_total: int,
-    ) -> tuple[dict[int, dict], list[dict]]:
+    ) -> tuple[dict[int, dict], list[dict], list[dict]]:
         """Run backtest sequentially year by year (original implementation)."""
         yearly_results: dict[int, dict] = {}
         all_trades: list[dict] = []
+        all_execution_diagnostics: list[dict] = []
 
         for idx, year in enumerate(years_to_run, start=1):
             year_window_start = date(year, 1, 1)
@@ -676,7 +970,7 @@ class DuckDBBacktestRunner:
                         message,
                     )
 
-            stats, trades = self._run_single_year(
+            stats, trades, execution_diagnostics = self._run_single_year(
                 params,
                 symbols,
                 year,
@@ -686,6 +980,7 @@ class DuckDBBacktestRunner:
             )
             yearly_results[year] = stats
             all_trades.extend(trades)
+            all_execution_diagnostics.extend(execution_diagnostics)
 
             if stats["trades"] > 0:
                 logger.info(
@@ -705,7 +1000,7 @@ class DuckDBBacktestRunner:
             if on_year_complete:
                 on_year_complete(year, idx, years_total, stats)
 
-        return yearly_results, all_trades
+        return yearly_results, all_trades, all_execution_diagnostics
 
     def _run_year_by_year_parallel(
         self,
@@ -718,7 +1013,7 @@ class DuckDBBacktestRunner:
         on_year_complete: Callable[[int, int, int, dict], None] | None,
         on_year_heartbeat: Callable[[int, int, int, str], None] | None,
         years_total: int,
-    ) -> tuple[dict[int, dict], list[dict]]:
+    ) -> tuple[dict[int, dict], list[dict], list[dict]]:
         """Run backtest in parallel using ThreadPoolExecutor.
 
         Each year runs independently. Results are collected and aggregated.
@@ -728,9 +1023,10 @@ class DuckDBBacktestRunner:
 
         yearly_results: dict[int, dict] = {}
         all_trades: list[dict] = []
+        all_execution_diagnostics: list[dict] = []
         results_lock = Lock()
 
-        def run_single_year_thread(year: int, idx: int) -> tuple[int, dict, list]:
+        def run_single_year_thread(year: int, idx: int) -> tuple[int, dict, list, list]:
             """Run a single year in a worker thread."""
             year_window_start = date(year, 1, 1)
             year_window_end = date(year, 12, 31)
@@ -744,7 +1040,7 @@ class DuckDBBacktestRunner:
             logger.info("[YEAR %d] [Thread %d] Running...", year, idx)
 
             # Note: Disable heartbeat in parallel mode to avoid concurrent callback issues
-            stats, trades = self._run_single_year(
+            stats, trades, execution_diagnostics = self._run_single_year(
                 params,
                 symbols,
                 year,
@@ -773,7 +1069,7 @@ class DuckDBBacktestRunner:
             if on_year_complete:
                 on_year_complete(year, idx, years_total, stats)
 
-            return year, stats, trades
+            return year, stats, trades, execution_diagnostics
 
         # Run all years in parallel
         with ThreadPoolExecutor(max_workers=params.parallel_workers) as executor:
@@ -785,14 +1081,15 @@ class DuckDBBacktestRunner:
 
             # Collect results as they complete
             for future in as_completed(futures):
-                year, stats, trades = future.result()
+                year, stats, trades, execution_diagnostics = future.result()
                 with results_lock:
                     yearly_results[year] = stats
                     all_trades.extend(trades)
+                    all_execution_diagnostics.extend(execution_diagnostics)
 
         # Sort results by year for consistent output
         sorted_results = dict(sorted(yearly_results.items()))
-        return sorted_results, all_trades
+        return sorted_results, all_trades, all_execution_diagnostics
 
     def _run_single_year(
         self,
@@ -802,8 +1099,8 @@ class DuckDBBacktestRunner:
         year_window_start: date,
         year_window_end: date,
         heartbeat_cb: Callable[[str], None] | None = None,
-    ) -> tuple[dict, list[dict]]:
-        """Run backtest for a single year, return (stats_dict, trades_list)."""
+    ) -> tuple[dict, list[dict], list[dict]]:
+        """Run backtest for a single year, return stats, trades, and diagnostics."""
         empty_stats = {
             "year": year,
             "signals": 0,
@@ -818,6 +1115,7 @@ class DuckDBBacktestRunner:
             "avg_holding_days": 0,
             "exit_reasons": {},
             "skipped_intraday_entry": 0,
+            "execution_diagnostics": {},
         }
 
         if not self._active_strategy:
@@ -825,9 +1123,10 @@ class DuckDBBacktestRunner:
                 "Strategy was not initialized. Call run() before running yearly backtests."
             )
         if not symbols:
-            return empty_stats, []
+            return empty_stats, [], []
 
         is_short = self._active_strategy.direction == PositionSide.SHORT
+        max_stop_dist_pct = self._resolve_max_stop_dist_pct(params, self._active_strategy)
 
         # Strategy-specific signal candidate query.
         query, params_tuple = self._active_strategy.build_candidate_query(
@@ -840,29 +1139,61 @@ class DuckDBBacktestRunner:
         # Execute with parameterized values.
         df = self.db.con.execute(query, params_tuple).fetchdf()
         if df.empty:
-            return empty_stats, []
+            return empty_stats, [], []
 
         df_pl = pl.from_pandas(df)
 
-        # Apply filters
-        for f in ALL_FILTERS:
-            df_pl = df_pl.with_columns(pl.col(f.value).fill_null(False))
-
-        df_pl = df_pl.with_columns(
-            (
-                pl.col("filter_h").cast(int)
-                + pl.col("filter_n").cast(int)
-                + pl.col("filter_2").cast(int)
-                + pl.col("filter_y").cast(int)
-                + pl.col("filter_c").cast(int)
-                + pl.col("filter_l").cast(int)
-            ).alias("filters_passed")
+        # Use strategy-specific entry filter columns if defined, else fall back to
+        # generic filter_columns / 2LYNCH defaults. Carry-quality filters (e.g. H)
+        # are evaluated after entry admission, not here.
+        active_filter_cols = (
+            self._active_strategy.entry_filter_columns
+            or self._active_strategy.filter_columns
+            or [f.value for f in ALL_FILTERS]
         )
+        hold_quality_cols = self._active_strategy.hold_quality_filter_columns or []
+        for col in active_filter_cols:
+            if col in df_pl.columns:
+                df_pl = df_pl.with_columns(pl.col(col).fill_null(False))
+            else:
+                df_pl = df_pl.with_columns(pl.lit(False).alias(col))
+        for col in hold_quality_cols:
+            if col in df_pl.columns:
+                df_pl = df_pl.with_columns(pl.col(col).fill_null(False))
+            else:
+                df_pl = df_pl.with_columns(pl.lit(False).alias(col))
 
-        df_filtered = df_pl.filter(pl.col("filters_passed") >= params.min_filters)
+        # Build filter count expression generically from active filter columns.
+        filter_sum_expr = pl.col(active_filter_cols[0]).cast(int)
+        for col in active_filter_cols[1:]:
+            filter_sum_expr = filter_sum_expr + pl.col(col).cast(int)
+        df_pl = df_pl.with_columns(filter_sum_expr.alias("filters_passed"))
+
+        effective_min_filters = (
+            self._active_strategy.min_filters_override
+            if self._active_strategy.min_filters_override is not None
+            else params.min_filters
+        )
+        df_filtered = df_pl.filter(pl.col("filters_passed") >= effective_min_filters)
 
         if df_filtered.height == 0:
-            return {**empty_stats, "signals": len(df)}, []
+            return {**empty_stats, "signals": len(df)}, [], []
+
+        ranking_rejected = pl.DataFrame()
+        if self._uses_breakout_ranking():
+            df_filtered, ranking_rejected = self._apply_breakout_selection_ranking(
+                df_filtered, params
+            )
+        else:
+            df_filtered = df_filtered.with_columns(
+                pl.lit(None, dtype=pl.Float64).alias("selection_score"),
+                pl.lit(None, dtype=pl.Int64).alias("selection_rank"),
+                pl.lit(None, dtype=pl.Int64).alias("selection_budget"),
+                pl.lit(None, dtype=pl.Int64).alias("selection_c_strength"),
+                pl.lit(None, dtype=pl.Int64).alias("selection_y_score"),
+                pl.lit(None, dtype=pl.Int64).alias("selection_n_score"),
+                pl.lit(None, dtype=pl.Float64).alias("selection_r2_quality"),
+            )
 
         last_heartbeat = datetime.now(UTC)
 
@@ -897,26 +1228,47 @@ class DuckDBBacktestRunner:
             columns=["symbol", "date", "open", "high", "low", "close"],
         )
         if not daily_df.is_empty():
+            grouped_daily = daily_df.partition_by(["symbol"], as_dict=True, maintain_order=True)
             loaded_symbols: set[str] = set()
             with tqdm(
-                total=daily_df.height, desc="loading daily price data", unit="rows"
+                total=len(grouped_daily), desc="loading daily price data", unit="symbols"
             ) as price_bar:
-                for row in daily_df.iter_rows(named=True):
-                    symbol = row["symbol"]
+                for group_key, symbol_daily in grouped_daily.items():
+                    symbol = str(group_key[0]) if isinstance(group_key, tuple) else str(group_key)
                     symbol_id = symbol_id_by_symbol.get(symbol)
                     if symbol_id is None:
                         price_bar.update(1)
                         continue
-                    dt = row["date"]
-                    if isinstance(dt, datetime):
-                        dt = dt.date()
-                    price_data.setdefault(symbol_id, {})[dt] = {
-                        "open_adj": float(row["open"]),
-                        "close_adj": float(row["close"]),
-                        "high_adj": float(row["high"]),
-                        "low_adj": float(row["low"]),
-                    }
-                    if symbol not in loaded_symbols:
+
+                    symbol_price_map: dict[date, dict[str, float]] = {}
+                    dates = symbol_daily["date"].to_list()
+                    opens = symbol_daily["open"].to_list()
+                    highs = symbol_daily["high"].to_list()
+                    lows = symbol_daily["low"].to_list()
+                    closes = symbol_daily["close"].to_list()
+                    for dt, open_px, high_px, low_px, close_px in zip(
+                        dates, opens, highs, lows, closes, strict=False
+                    ):
+                        if (
+                            dt is None
+                            or open_px is None
+                            or high_px is None
+                            or low_px is None
+                            or close_px is None
+                        ):
+                            continue
+                        trading_day = dt.date() if isinstance(dt, datetime) else dt
+                        if not isinstance(trading_day, date):
+                            continue
+                        symbol_price_map[trading_day] = {
+                            "open_adj": float(open_px),
+                            "close_adj": float(close_px),
+                            "high_adj": float(high_px),
+                            "low_adj": float(low_px),
+                        }
+
+                    if symbol_price_map:
+                        price_data[symbol_id] = symbol_price_map
                         loaded_symbols.add(symbol)
                         if len(loaded_symbols) % 200 == 0:
                             maybe_heartbeat(
@@ -950,16 +1302,37 @@ class DuckDBBacktestRunner:
         # Build VectorBT signals
         vbt_signals = []
         skipped_intraday_entry = 0
-        signal_context: dict[tuple[int, date], dict[str, float | int | None]] = {}
-        intraday_entry_by_signal: dict[tuple[str, date], dict[str, float | bool]] = {}
+        execution_diagnostics: list[dict[str, object]] = []
+        signal_context: dict[tuple[int, date], dict[str, object]] = {}
+        intraday_entry_by_signal: dict[tuple[str, date], IntradayEntry] = {}
         if params.entry_timeframe.lower() == "5min":
+            is_ep_proxy = self._active_strategy.family == "ep_proxy"
+            orh_window = params.orh_window_minutes if is_ep_proxy else 0
             intraday_entry_by_signal = self._resolve_intraday_entries_bulk(
                 df_filtered=df_filtered,
                 breakout_threshold=params.breakout_threshold,
-                entry_cutoff_minutes=params.entry_cutoff_minutes,
+                entry_cutoff_minutes=self._resolve_entry_cutoff_minutes(
+                    params, self._active_strategy
+                ),
                 is_short=is_short,
+                orh_window_minutes=orh_window,
+                same_day_r_ladder=params.same_day_r_ladder,
+                same_day_r_ladder_start_r=params.same_day_r_ladder_start_r,
                 heartbeat_cb=maybe_heartbeat,
             )
+
+        for row in ranking_rejected.iter_rows(named=True):
+            diag_entry, _filter_snapshot, hold_quality_passed = self._build_diag_entry(
+                year=year,
+                row=row,
+                active_filter_cols=active_filter_cols,
+                hold_quality_cols=hold_quality_cols,
+            )
+            diag_entry["status"] = "skipped_rank_budget"
+            diag_entry["reason"] = "below_daily_rank_budget"
+            diag_entry["hold_quality_passed"] = hold_quality_passed
+            execution_diagnostics.append(diag_entry)
+
         with tqdm(
             total=df_filtered.height, desc="assembling VectorBT signals", unit="signals"
         ) as signal_bar:
@@ -969,18 +1342,36 @@ class DuckDBBacktestRunner:
                 )
                 symbol = row["symbol"]
                 symbol_id = symbol_id_by_symbol[symbol]
-                if symbol_id not in price_data:
-                    signal_bar.update(1)
-                    continue
                 sig_date = row["trading_date"]
                 if isinstance(sig_date, datetime):
                     sig_date = sig_date.date()
+                if not isinstance(sig_date, date):
+                    signal_bar.update(1)
+                    continue
+
+                diag_entry, filter_snapshot, hold_quality_passed = self._build_diag_entry(
+                    year=year,
+                    row=row,
+                    active_filter_cols=active_filter_cols,
+                    hold_quality_cols=hold_quality_cols,
+                )
+
+                if symbol_id not in price_data:
+                    diag_entry["status"] = "skipped_no_price_data"
+                    diag_entry["reason"] = "missing_daily_price_data"
+                    execution_diagnostics.append(diag_entry)
+                    signal_bar.update(1)
+                    continue
 
                 intraday_entry = None
                 if params.entry_timeframe.lower() == "5min":
                     intraday_entry = intraday_entry_by_signal.get((symbol, sig_date))
                     if intraday_entry is None:
                         skipped_intraday_entry += 1
+                        diag_entry["status"] = "skipped_no_intraday_entry"
+                        diag_entry["reason"] = "no_5min_breakout_before_cutoff"
+                        execution_diagnostics.append(diag_entry)
+                        signal_bar.update(1)
                         continue
 
                 # Legacy daily execution fallback.
@@ -998,9 +1389,13 @@ class DuckDBBacktestRunner:
                     entry_price = float(intraday_entry["entry_price"])
                     initial_stop = float(intraday_entry["initial_stop"])
                     same_day_stop_hit = bool(intraday_entry["same_day_stop_hit"])
+                    diag_entry["entry_time"] = intraday_entry.get("entry_time")
 
                     if entry_price is None or initial_stop is None:
                         skipped_intraday_entry += 1
+                        diag_entry["status"] = "skipped_invalid_intraday_entry"
+                        diag_entry["reason"] = "missing_entry_price_or_stop"
+                        execution_diagnostics.append(diag_entry)
                         signal_bar.update(1)
                         continue
 
@@ -1008,27 +1403,86 @@ class DuckDBBacktestRunner:
                     # For LONG: stop must not be too far below entry.
                     # For SHORT: stop must not be too far above entry.
                     if entry_price > 0:
-                        if is_short and initial_stop > entry_price * (1 + params.max_stop_dist_pct):
+                        if is_short and initial_stop > entry_price * (1 + max_stop_dist_pct):
                             skipped_intraday_entry += 1
+                            diag_entry["status"] = "skipped_stop_too_wide"
+                            diag_entry["reason"] = "short_stop_above_max_distance"
+                            execution_diagnostics.append(diag_entry)
                             signal_bar.update(1)
                             continue
                         elif not is_short and initial_stop < entry_price * (
                             1 - params.max_stop_dist_pct
                         ):
                             skipped_intraday_entry += 1
+                            diag_entry["status"] = "skipped_stop_too_wide"
+                            diag_entry["reason"] = "long_stop_below_max_distance"
+                            execution_diagnostics.append(diag_entry)
                             signal_bar.update(1)
                             continue
-                # Store signal context for progress tracking
                 filters_passed = (
                     int(row["filters_passed"]) if row["filters_passed"] is not None else 0
                 )
-                signal_context[(symbol_id, sig_date)] = {
-                    "gap_pct": row["gap_pct"],
-                    "filters_passed": filters_passed,
-                    "entry_time": intraday_entry.get("entry_time") if intraday_entry else None,
-                }
+                gap_pct = row.get("gap_pct", row.get("anchor_gap_pct", 0.0))
+                entry_time = intraday_entry.get("entry_time") if intraday_entry else None
+                same_day_exit_price = (
+                    intraday_entry.get("same_day_exit_price") if intraday_entry else None
+                )
+                same_day_exit_reason = (
+                    intraday_entry.get("same_day_exit_reason") if intraday_entry else None
+                )
+                same_day_exit_ts = (
+                    intraday_entry.get("same_day_exit_ts") if intraday_entry else None
+                )
+                same_day_exit_time = (
+                    intraday_entry.get("same_day_exit_time") if intraday_entry else None
+                )
+                carry_stop_next_session = (
+                    intraday_entry.get("carry_stop_next_session") if intraday_entry else None
+                )
+                carry_action = "normal"
 
-                # Create typed signal instead of tuple
+                if intraday_entry is not None:
+                    (
+                        same_day_exit_price,
+                        same_day_exit_reason,
+                        same_day_exit_ts,
+                        same_day_exit_time,
+                        carry_stop_next_session,
+                        carry_action,
+                    ) = self._apply_hold_quality_carry_rule(
+                        hold_quality_passed=hold_quality_passed,
+                        entry_price=entry_price,
+                        close_price=float(row["close"]) if row.get("close") is not None else None,
+                        carry_stop_next_session=carry_stop_next_session,
+                        same_day_exit_price=same_day_exit_price,
+                        same_day_exit_reason=same_day_exit_reason,
+                        same_day_exit_ts=same_day_exit_ts,
+                        same_day_exit_time=same_day_exit_time,
+                        signal_date=sig_date,
+                        is_short=is_short,
+                    )
+
+                diag_entry["entry_time"] = entry_time
+                diag_entry["entry_price"] = entry_price
+                diag_entry["initial_stop"] = initial_stop
+                diag_entry["filters_json"] = filter_snapshot
+                diag_entry["hold_quality_passed"] = hold_quality_passed
+
+                signal_context[(symbol_id, sig_date)] = {
+                    "gap_pct": gap_pct,
+                    "filters_passed": filters_passed,
+                    "entry_time": entry_time,
+                    "filter_snapshot": filter_snapshot,
+                    "hold_quality_passed": hold_quality_passed,
+                    "entry_filter_columns": list(active_filter_cols),
+                    "hold_quality_columns": list(hold_quality_cols),
+                    "carry_action": carry_action,
+                    "selection_score": diag_entry.get("selection_score"),
+                    "selection_rank": diag_entry.get("selection_rank"),
+                    "selection_components": diag_entry.get("selection_components_json", {}),
+                }
+                execution_diagnostics.append(diag_entry)
+
                 vbt_signals.append(
                     BacktestSignal(
                         signal_date=sig_date,
@@ -1036,88 +1490,61 @@ class DuckDBBacktestRunner:
                         symbol=symbol,
                         initial_stop=initial_stop,
                         metadata=SignalMetadata(
-                            gap_pct=row["gap_pct"],
+                            gap_pct=gap_pct,
                             atr=row["atr_20"] if row["atr_20"] else 0.0,
                             filters_passed=filters_passed,
                             entry_price=entry_price,
                             same_day_stop_hit=same_day_stop_hit,
-                            entry_time=intraday_entry.get("entry_time") if intraday_entry else None,
+                            entry_time=entry_time,
+                            entry_ts=intraday_entry.get("entry_ts") if intraday_entry else None,
+                            same_day_exit_ts=same_day_exit_ts,
+                            carry_stop_next_session=carry_stop_next_session,
+                            extra={
+                                "same_day_exit_price": same_day_exit_price,
+                                "same_day_exit_reason": same_day_exit_reason,
+                                "same_day_exit_time": same_day_exit_time,
+                                "filter_snapshot": filter_snapshot,
+                                "hold_quality_passed": hold_quality_passed,
+                                "entry_filter_columns": list(active_filter_cols),
+                                "hold_quality_columns": list(hold_quality_cols),
+                                "carry_action": carry_action,
+                                "selection_score": diag_entry.get("selection_score"),
+                                "selection_rank": diag_entry.get("selection_rank"),
+                                "selection_components": diag_entry.get(
+                                    "selection_components_json", {}
+                                ),
+                            },
                         ),
                     )
                 )
+                signal_bar.update(1)
 
-        if not vbt_signals:
-            return {
-                **empty_stats,
-                "signals": len(df),
-                "filtered_signals": len(df_filtered),
-                "skipped_intraday_entry": skipped_intraday_entry,
-            }, []
-
-        # Run VectorBT engine
-        if self._active_strategy is None:
-            raise RuntimeError(
-                "Strategy was not initialized. Call run() before running yearly backtests."
+        result = None
+        vectorbt_return_pct = 0.0
+        vectorbt_max_dd_pct = 0.0
+        if vbt_signals:
+            strategy_label = self._active_strategy.label_for_year(year)
+            direction = self._active_strategy.direction
+            vbt_config = params.to_vbt_config(
+                direction=direction,
+                short_post_day3_buffer_pct=self._resolve_short_post_day3_buffer_pct(
+                    params,
+                    self._active_strategy,
+                ),
             )
-        strategy_label = self._active_strategy.label_for_year(year)
-        direction = self._active_strategy.direction
-        engine = VectorBTEngine(config=params.to_vbt_config(direction=direction))
-        result = engine.run_backtest(
-            strategy_name=strategy_label,
-            signals=vbt_signals,
-            price_data=price_data,
-            value_traded_inr=value_traded_inr,
-        )
-
-        # Gather exit reasons
-        exit_reasons: dict[str, int] = {}
-        for t in result.trades:
-            if t.exit_reason:
-                r = t.exit_reason.value
-                exit_reasons[r] = exit_reasons.get(r, 0) + 1
-
-        wins = sum(1 for t in result.trades if t.pnl and t.pnl > 0)
-        losses = sum(1 for t in result.trades if t.pnl and t.pnl < 0)
-
-        # Calculate holding days and profit factor
-        # For SHORT trades: profit = entry > exit, so invert the formula.
-        holding_days = []
-        total_gains = 0.0
-        total_losses_val = 0.0
-        for t in result.trades:
-            if t.exit_date and t.entry_date:
-                holding_days.append((t.exit_date - t.entry_date).days)
-            if t.entry_price and t.exit_price and t.entry_price > 0:
-                if is_short:
-                    pct = ((t.entry_price - t.exit_price) / t.entry_price) * 100
-                else:
-                    pct = ((t.exit_price - t.entry_price) / t.entry_price) * 100
-                if pct > 0:
-                    total_gains += pct
-                else:
-                    total_losses_val += abs(pct)
-
-        profit_factor = total_gains / total_losses_val if total_losses_val > 0 else 0
-
-        stats = {
-            "year": year,
-            "signals": len(df_filtered),
-            "trades": len(result.trades),
-            "wins": wins,
-            "losses": losses,
-            "return_pct": result.total_return * 100,
-            "win_rate_pct": result.win_rate * 100,
-            "avg_r": result.avg_r,
-            "max_dd_pct": result.max_drawdown * 100,
-            "profit_factor": profit_factor,
-            "avg_holding_days": float(np.mean(holding_days)) if holding_days else 0,
-            "exit_reasons": exit_reasons,
-            "skipped_intraday_entry": skipped_intraday_entry,
-        }
+            engine = VectorBTEngine(config=vbt_config)
+            result = engine.run_backtest(
+                strategy_name=strategy_label,
+                signals=vbt_signals,
+                price_data=price_data,
+                value_traded_inr=value_traded_inr,
+            )
+            vectorbt_return_pct = result.total_return * 100
+            vectorbt_max_dd_pct = result.max_drawdown * 100
 
         # Build trade dicts — direction-aware PnL percentage
         trades_out: list[dict] = []
-        for t in result.trades:
+        for t in result.trades if result is not None else []:
             hd = (t.exit_date - t.entry_date).days if t.exit_date and t.entry_date else 0
             pct = 0.0
             if t.entry_price and t.exit_price and t.entry_price > 0:
@@ -1133,11 +1560,10 @@ class DuckDBBacktestRunner:
             gap_pct = context.get("gap_pct")
             filters_passed = context.get("filters_passed")
 
-            # Infer exit time from exit reason.
-            # Gap-based exits occur at market open (09:15 IST).
-            # Close-based exits occur at market close (15:30 IST).
-            # Intraday stop exits have unknown timing — stored as NULL.
-            exit_time = get_exit_time_for_reason(t.exit_reason.value)
+            # Timestamped exits from vectorbt timeline are authoritative.
+            exit_time = t.exit_time
+            if exit_time is None and t.exit_reason is not None:
+                exit_time = get_exit_time_for_reason(t.exit_reason.value)
 
             trades_out.append(
                 {
@@ -1153,12 +1579,156 @@ class DuckDBBacktestRunner:
                     "holding_days": hd,
                     "gap_pct": gap_pct,
                     "filters_passed": filters_passed,
-                    "entry_time": context.get("entry_time"),
+                    "entry_time": t.entry_time or context.get("entry_time"),
                     "exit_time": exit_time,
+                    "entry_mode": t.entry_mode,
+                    "qty": t.qty,
+                    "initial_stop": t.initial_stop,
+                    "fees": t.fees,
+                    "slippage_bps": t.slippage_bps,
+                    "mfe_r": t.mfe_r,
+                    "mae_r": t.mae_r,
+                    "exit_rule_version": t.exit_rule_version,
+                    "selection_score": context.get("selection_score"),
+                    "selection_rank": context.get("selection_rank"),
+                    "reason_json": json.dumps(
+                        {
+                            "filter_snapshot": context.get("filter_snapshot", {}),
+                            "hold_quality_passed": context.get("hold_quality_passed"),
+                            "entry_filter_columns": context.get("entry_filter_columns", []),
+                            "hold_quality_columns": context.get("hold_quality_columns", []),
+                            "selection_score": context.get("selection_score"),
+                            "selection_rank": context.get("selection_rank"),
+                            "selection_components": context.get("selection_components", {}),
+                        },
+                        sort_keys=True,
+                    ),
+                    "timeline_version": "mixed_resolution_v1",
                 }
             )
 
-        return stats, trades_out
+        executed_by_signal: dict[tuple[str, date], dict] = {}
+        for trade in trades_out:
+            key = (str(trade["symbol"]), trade["entry_date"])
+            executed_by_signal[key] = trade
+
+        for diag in execution_diagnostics:
+            if diag.get("status") != "queued_for_execution":
+                continue
+            key = (str(diag["symbol"]), diag["signal_date"])
+            executed_trade = executed_by_signal.get(key)
+            if executed_trade is None:
+                diag["status"] = "not_executed_portfolio"
+                diag["reason"] = "capital_or_position_limits"
+                continue
+            diag["status"] = "executed"
+            diag["reason"] = "executed"
+            diag["executed_exit_reason"] = executed_trade.get("exit_reason")
+            diag["pnl_pct"] = executed_trade.get("pnl_pct")
+
+        if not trades_out:
+            signals_after_filters = len(df_filtered) + len(ranking_rejected)
+            execution_summary = {
+                "signals_total": len(df),
+                "signals_filtered": signals_after_filters,
+                "signals_after_rank_budget": len(df_filtered),
+                "queued_for_execution": len(vbt_signals),
+                "executed": 0,
+                "not_executed_portfolio": sum(
+                    1 for d in execution_diagnostics if d.get("status") == "not_executed_portfolio"
+                ),
+                "skipped_rank_budget": sum(
+                    1 for d in execution_diagnostics if d.get("status") == "skipped_rank_budget"
+                ),
+                "skipped_no_intraday_entry": sum(
+                    1
+                    for d in execution_diagnostics
+                    if d.get("status") == "skipped_no_intraday_entry"
+                ),
+                "skipped_no_price_data": sum(
+                    1 for d in execution_diagnostics if d.get("status") == "skipped_no_price_data"
+                ),
+                "skipped_stop_too_wide": sum(
+                    1 for d in execution_diagnostics if d.get("status") == "skipped_stop_too_wide"
+                ),
+            }
+            return (
+                {
+                    **empty_stats,
+                    "signals": len(df),
+                    "filtered_signals": signals_after_filters,
+                    "skipped_intraday_entry": skipped_intraday_entry,
+                    "execution_diagnostics": execution_summary,
+                },
+                [],
+                execution_diagnostics,
+            )
+
+        total_return_pct = vectorbt_return_pct
+
+        wins = sum(1 for t in trades_out if float(t.get("pnl_pct", 0.0)) > 0)
+        losses = sum(1 for t in trades_out if float(t.get("pnl_pct", 0.0)) < 0)
+        total_trades = len(trades_out)
+        win_rate_pct = (wins / total_trades * 100) if total_trades else 0.0
+
+        exit_reasons: dict[str, int] = {}
+        holding_days: list[int] = []
+        total_gains = 0.0
+        total_losses_val = 0.0
+        r_values: list[float] = []
+        for t in trades_out:
+            reason = str(t.get("exit_reason", "unknown"))
+            exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
+            hd = int(t.get("holding_days", 0) or 0)
+            holding_days.append(hd)
+            pnl_pct = float(t.get("pnl_pct", 0.0) or 0.0)
+            if pnl_pct > 0:
+                total_gains += pnl_pct
+            elif pnl_pct < 0:
+                total_losses_val += abs(pnl_pct)
+            r_values.append(float(t.get("r_multiple", 0.0) or 0.0))
+
+        profit_factor = total_gains / total_losses_val if total_losses_val > 0 else 0.0
+
+        stats = {
+            "year": year,
+            "signals": len(df_filtered) + len(ranking_rejected),
+            "trades": total_trades,
+            "wins": wins,
+            "losses": losses,
+            "return_pct": total_return_pct,
+            "win_rate_pct": win_rate_pct,
+            "avg_r": float(np.mean(r_values)) if r_values else 0.0,
+            "max_dd_pct": vectorbt_max_dd_pct,
+            "profit_factor": profit_factor,
+            "avg_holding_days": float(np.mean(holding_days)) if holding_days else 0.0,
+            "exit_reasons": exit_reasons,
+            "skipped_intraday_entry": skipped_intraday_entry,
+            "execution_diagnostics": {
+                "signals_total": len(df),
+                "signals_filtered": len(df_filtered) + len(ranking_rejected),
+                "signals_after_rank_budget": len(df_filtered),
+                "queued_for_execution": len(vbt_signals),
+                "executed": len(trades_out),
+                "not_executed_portfolio": max(len(vbt_signals) - len(trades_out), 0),
+                "skipped_rank_budget": sum(
+                    1 for d in execution_diagnostics if d.get("status") == "skipped_rank_budget"
+                ),
+                "skipped_no_intraday_entry": sum(
+                    1
+                    for d in execution_diagnostics
+                    if d.get("status") == "skipped_no_intraday_entry"
+                ),
+                "skipped_no_price_data": sum(
+                    1 for d in execution_diagnostics if d.get("status") == "skipped_no_price_data"
+                ),
+                "skipped_stop_too_wide": sum(
+                    1 for d in execution_diagnostics if d.get("status") == "skipped_stop_too_wide"
+                ),
+            },
+        }
+
+        return stats, trades_out, execution_diagnostics
 
     @staticmethod
     def _minutes_from_nse_open(candle_time: object) -> int | None:
@@ -1180,113 +1750,181 @@ class DuckDBBacktestRunner:
         return normalize_candle_time(candle_time)
 
     @staticmethod
+    def _apply_hold_quality_carry_rule(
+        *,
+        hold_quality_passed: bool,
+        entry_price: float | None,
+        close_price: float | None,
+        carry_stop_next_session: float | None,
+        same_day_exit_price: float | None,
+        same_day_exit_reason: str | None,
+        same_day_exit_ts: datetime | None,
+        same_day_exit_time: time | None,
+        signal_date: date,
+        is_short: bool,
+    ) -> tuple[float | None, str | None, datetime | None, time | None, float | None, str]:
+        """Apply post-entry carry logic driven by hold-quality filters."""
+        if hold_quality_passed or same_day_exit_reason is not None:
+            return (
+                same_day_exit_price,
+                same_day_exit_reason,
+                same_day_exit_ts,
+                same_day_exit_time,
+                carry_stop_next_session,
+                "normal",
+            )
+
+        if entry_price is None or close_price is None:
+            return (
+                same_day_exit_price,
+                same_day_exit_reason,
+                same_day_exit_ts,
+                same_day_exit_time,
+                carry_stop_next_session,
+                "normal",
+            )
+
+        # Keep short-side H=false behavior conservative: exit at the close.
+        if is_short:
+            return (
+                float(close_price),
+                ExitReason.WEAK_CLOSE_EXIT.value,
+                datetime.combine(signal_date, time(15, 30)),
+                time(15, 30),
+                carry_stop_next_session,
+                "weak_close_exit",
+            )
+
+        close_failed_entry = close_price <= entry_price
+        if close_failed_entry:
+            return (
+                float(close_price),
+                ExitReason.WEAK_CLOSE_EXIT.value,
+                datetime.combine(signal_date, time(15, 30)),
+                time(15, 30),
+                carry_stop_next_session,
+                "weak_close_exit",
+            )
+
+        base_carry_stop = (
+            carry_stop_next_session if carry_stop_next_session is not None else entry_price
+        )
+        tightened_stop = (
+            min(float(base_carry_stop), float(entry_price))
+            if is_short
+            else max(float(base_carry_stop), float(entry_price))
+        )
+        return (
+            same_day_exit_price,
+            same_day_exit_reason,
+            same_day_exit_ts,
+            same_day_exit_time,
+            tightened_stop,
+            "breakeven_carry",
+        )
+
+    @staticmethod
+    def _simulate_same_day_stop_execution(
+        *,
+        rows: list[dict[str, object]],
+        entry_idx: int,
+        entry_price: float,
+        initial_stop: float,
+        is_short: bool,
+        same_day_r_ladder: bool,
+        same_day_r_ladder_start_r: int = 2,
+    ) -> tuple[bool, float | None, time | None, str | None]:
+        """Simulate same-day post-entry stop execution on 5-min bars.
+
+        Scans only bars after the entry bar (no intrabar sequencing assumptions).
+        If same_day_r_ladder is enabled, ratchet stop by R-steps before checking stop-hit on each bar.
+        """
+        stop_level = float(initial_stop)
+        risk = (
+            (float(initial_stop) - float(entry_price))
+            if is_short
+            else (float(entry_price) - float(initial_stop))
+        )
+
+        for follow_row in rows[entry_idx + 1 :]:
+            high_px = float(follow_row["high"])
+            low_px = float(follow_row["low"])
+
+            if same_day_r_ladder and risk > 0:
+                if is_short:
+                    realized_r = (float(entry_price) - low_px) / risk
+                    r_steps = int(np.floor(realized_r))
+                    if r_steps >= same_day_r_ladder_start_r:
+                        locked_r = float(max(0, r_steps - same_day_r_ladder_start_r))
+                        candidate_stop = float(entry_price) - (locked_r * risk)
+                        stop_level = min(stop_level, candidate_stop)
+                else:
+                    realized_r = (high_px - float(entry_price)) / risk
+                    r_steps = int(np.floor(realized_r))
+                    if r_steps >= same_day_r_ladder_start_r:
+                        locked_r = float(max(0, r_steps - same_day_r_ladder_start_r))
+                        candidate_stop = float(entry_price) + (locked_r * risk)
+                        stop_level = max(stop_level, candidate_stop)
+
+            stop_hit = high_px >= stop_level if is_short else low_px <= stop_level
+            if not stop_hit:
+                continue
+
+            if is_short:
+                if stop_level < float(entry_price):
+                    reason = ExitReason.STOP_TRAIL.value
+                elif np.isclose(stop_level, float(entry_price)):
+                    reason = ExitReason.STOP_BREAKEVEN.value
+                else:
+                    reason = ExitReason.STOP_INITIAL.value
+            else:
+                if stop_level > float(entry_price):
+                    reason = ExitReason.STOP_TRAIL.value
+                elif np.isclose(stop_level, float(entry_price)):
+                    reason = ExitReason.STOP_BREAKEVEN.value
+                else:
+                    reason = ExitReason.STOP_INITIAL.value
+
+            exit_time = DuckDBBacktestRunner._normalize_candle_time(follow_row.get("candle_time"))
+            return True, float(stop_level), exit_time, reason
+
+        return False, None, None, None
+
+    @staticmethod
     def _resolve_intraday_entry_from_5min(
         candles: pl.DataFrame,
         breakout_price: float,
         entry_cutoff_minutes: int = 30,
         is_short: bool = False,
-    ) -> dict[str, float | bool] | None:
-        """Resolve first intraday breakout/breakdown touch and stop level at entry time.
-
-        FEE (Find and Enter Early) — Stockbee: enter in the first N minutes of
-        NSE open (09:15 IST). Candles after the cutoff are ignored.
-
-        LONG: first bar where high >= breakout_price. Stop = day low up to entry bar.
-        SHORT: first bar where low <= breakdown_price. Stop = day high up to entry bar.
-        """
-        if candles.is_empty():
+        orh_window_minutes: int = 0,
+        same_day_r_ladder: bool = False,
+        same_day_r_ladder_start_r: int = 2,
+    ) -> IntradayEntry | None:
+        result: IntradayExecutionResult | None = resolve_intraday_execution_from_5min(
+            candles,
+            breakout_price=breakout_price,
+            entry_cutoff_minutes=entry_cutoff_minutes,
+            is_short=is_short,
+            orh_window_minutes=orh_window_minutes,
+            same_day_r_ladder=same_day_r_ladder,
+            same_day_r_ladder_start_r=same_day_r_ladder_start_r,
+        )
+        if result is None:
             return None
-
-        rows = list(candles.sort("candle_time").iter_rows(named=True))
-
-        if is_short:
-            day_high_before = float("-inf")
-
-            for idx, row in enumerate(rows):
-                candle_time = row.get("candle_time")
-                if candle_time is not None:
-                    mins = DuckDBBacktestRunner._minutes_from_nse_open(candle_time)
-                    if mins is not None and mins > entry_cutoff_minutes:
-                        break
-
-                open_px = float(row["open"])
-                high_px = float(row["high"])
-                low_px = float(row["low"])
-
-                known_high_at_bar_open = max(day_high_before, open_px)
-                if low_px <= breakout_price:
-                    entry_price = open_px if open_px <= breakout_price else breakout_price
-
-                    # Sanity check: entry must not be wildly below the breakdown price.
-                    if entry_price < breakout_price * 0.5:
-                        return None
-
-                    initial_stop = known_high_at_bar_open
-
-                    same_day_stop_hit = False
-                    for follow_row in rows[idx + 1 :]:
-                        if float(follow_row["high"]) >= initial_stop:
-                            same_day_stop_hit = True
-                            break
-
-                    return {
-                        "entry_price": entry_price,
-                        "initial_stop": initial_stop,
-                        "same_day_stop_hit": same_day_stop_hit,
-                        "entry_time": DuckDBBacktestRunner._normalize_candle_time(candle_time),
-                    }
-
-                day_high_before = max(day_high_before, high_px)
-
-            return None
-
-        # LONG path (original FEE logic)
-        day_low_before = float("inf")
-
-        for idx, row in enumerate(rows):
-            # FEE cutoff: reject candles that arrive after the entry window.
-            candle_time = row.get("candle_time")
-            if candle_time is not None:
-                mins = DuckDBBacktestRunner._minutes_from_nse_open(candle_time)
-                if mins is not None and mins > entry_cutoff_minutes:
-                    break  # All subsequent candles are also past cutoff (sorted)
-
-            open_px = float(row["open"])
-            high_px = float(row["high"])
-            low_px = float(row["low"])
-
-            known_low_at_bar_open = min(day_low_before, open_px)
-            if high_px >= breakout_price:
-                entry_price = open_px if open_px >= breakout_price else breakout_price
-
-                # Sanity check: entry must not be wildly above the daily-derived breakout
-                # price. Two data quality issues this catches:
-                #   1. Wrong instrument in 5-min Parquet (GABRIEL, GHCL): 5-100x ratio
-                #   2. Unadjusted 5-min vs adjusted daily (RELAXO bonus 2015): ~2x ratio
-                # NSE max circuit = 20%, so max legitimate ratio = (1.20/1.04) ≈ 1.15x.
-                # Threshold of 1.5x gives generous headroom while catching both bug types.
-                if entry_price > breakout_price * 1.5:
-                    return None
-
-                initial_stop = known_low_at_bar_open
-
-                # Same-day stop hit check only on subsequent completed candles.
-                same_day_stop_hit = False
-                for follow_row in rows[idx + 1 :]:
-                    if float(follow_row["low"]) <= initial_stop:
-                        same_day_stop_hit = True
-                        break
-
-                return {
-                    "entry_price": entry_price,
-                    "initial_stop": initial_stop,
-                    "same_day_stop_hit": same_day_stop_hit,
-                    "entry_time": DuckDBBacktestRunner._normalize_candle_time(candle_time),
-                }
-
-            day_low_before = min(day_low_before, low_px)
-
-        return None
+        return {
+            "entry_price": result.entry_price,
+            "initial_stop": result.initial_stop,
+            "same_day_stop_hit": result.same_day_exit_ts is not None,
+            "entry_ts": result.entry_ts,
+            "same_day_exit_price": result.same_day_exit_price,
+            "same_day_exit_ts": result.same_day_exit_ts,
+            "same_day_exit_time": result.same_day_exit_time,
+            "same_day_exit_reason": result.same_day_exit_reason.value
+            if result.same_day_exit_reason is not None
+            else None,
+            "carry_stop_next_session": result.carry_stop_next_session,
+            "entry_time": result.entry_time,
+        }
 
     def _resolve_intraday_entries_bulk(
         self,
@@ -1295,12 +1933,20 @@ class DuckDBBacktestRunner:
         breakout_threshold: float,
         entry_cutoff_minutes: int = 30,
         is_short: bool = False,
+        orh_window_minutes: int = 0,
+        same_day_r_ladder: bool = False,
+        same_day_r_ladder_start_r: int = 2,
         heartbeat_cb: Callable[[str], None] | None = None,
-    ) -> dict[tuple[str, date], dict[str, float | bool]]:
+    ) -> dict[tuple[str, date], IntradayEntry]:
         """Resolve intraday entries for all signal days with one 5-min batch query.
 
-        For LONG: trigger = prev_close * (1 + threshold), look for high >= trigger.
-        For SHORT: trigger = prev_close * (1 - threshold), look for low <= trigger.
+        Threshold mode (orh_window_minutes=0):
+            LONG: trigger = prev_close * (1 + threshold), look for high >= trigger.
+            SHORT: trigger = prev_close * (1 - threshold), look for low <= trigger.
+
+        ORH mode (orh_window_minutes>0, LONG only):
+            Observe first orh_window_minutes to build ORH, then enter on ORH break.
+            breakout_price stored as prev_close (sanity-check reference only).
         """
         targets = (
             df_filtered.select(["symbol", "trading_date", "prev_close"])
@@ -1310,33 +1956,42 @@ class DuckDBBacktestRunner:
         if targets.is_empty():
             return {}
 
-        targets_pd = targets.to_pandas()
-        targets_pd["trading_date"] = pd.to_datetime(
-            targets_pd["trading_date"], errors="coerce"
-        ).dt.date
-        targets_pd = targets_pd.dropna(subset=["trading_date"])
-        if targets_pd.empty:
-            return {}
-
         breakout_price_by_key: dict[tuple[str, date], float] = {}
-        for row in targets_pd.itertuples(index=False):
-            prev_close = float(row.prev_close)
+        for symbol_raw, trading_date_raw, prev_close_raw in targets.iter_rows():
+            if trading_date_raw is None or prev_close_raw is None:
+                continue
+            if isinstance(trading_date_raw, datetime):
+                trading_day = trading_date_raw.date()
+            elif isinstance(trading_date_raw, date):
+                trading_day = trading_date_raw
+            else:
+                try:
+                    trading_day = date.fromisoformat(str(trading_date_raw))
+                except ValueError:
+                    continue
+
+            prev_close = float(prev_close_raw)
             if prev_close <= 0:
                 continue
-            # SHORT: trigger price is below prev_close; LONG: above prev_close
-            multiplier = (1 - breakout_threshold) if is_short else (1 + breakout_threshold)
-            breakout_price_by_key[(str(row.symbol), row.trading_date)] = prev_close * multiplier
+            symbol = str(symbol_raw)
+            if orh_window_minutes > 0:
+                # ORH mode: store prev_close as sanity-check reference (trigger is ORH from candles)
+                breakout_price_by_key[(symbol, trading_day)] = prev_close
+            else:
+                # Threshold mode: SHORT trigger below, LONG trigger above prev_close
+                multiplier = (1 - breakout_threshold) if is_short else (1 + breakout_threshold)
+                breakout_price_by_key[(symbol, trading_day)] = prev_close * multiplier
         if not breakout_price_by_key:
             return {}
 
-        join_df = pd.DataFrame(
-            {
-                "symbol": [key[0] for key in breakout_price_by_key],
-                "trading_date": [key[1].isoformat() for key in breakout_price_by_key],
-            }
+        join_df = pl.DataFrame(
+            [
+                {"symbol": symbol, "trading_date": trading_day}
+                for symbol, trading_day in breakout_price_by_key
+            ]
         )
         tmp_name = "tmp_intraday_signal_days"
-        self.db.con.register(tmp_name, join_df)
+        self.db.con.register(tmp_name, join_df.to_arrow())
         try:
             candles = self.db.con.execute(
                 f"""
@@ -1344,7 +1999,7 @@ class DuckDBBacktestRunner:
                 FROM v_5min c
                 INNER JOIN {tmp_name} t
                   ON c.symbol = t.symbol
-                 AND c.date = CAST(t.trading_date AS DATE)
+                 AND c.date = t.trading_date
                 ORDER BY c.symbol, c.date, c.candle_time
                 """
             ).pl()
@@ -1357,7 +2012,7 @@ class DuckDBBacktestRunner:
         if candles.is_empty():
             return {}
 
-        resolved_entries: dict[tuple[str, date], dict[str, float | bool]] = {}
+        resolved_entries: dict[tuple[str, date], IntradayEntry] = {}
         grouped = candles.partition_by(
             ["symbol", "trading_date"], as_dict=True, maintain_order=True
         )
@@ -1370,28 +2025,34 @@ class DuckDBBacktestRunner:
                     heartbeat_cb(f"processing 5-min entries ({idx}/{total_groups} signal-days)")
                 symbol = str(group_key[0])
                 trading_day_raw = group_key[1]
-                trading_day: date | None
+                trading_day_from_group: date | None
                 if isinstance(trading_day_raw, datetime):
-                    trading_day = trading_day_raw.date()
+                    trading_day_from_group = trading_day_raw.date()
                 elif isinstance(trading_day_raw, date):
-                    trading_day = trading_day_raw
+                    trading_day_from_group = trading_day_raw
                 else:
                     try:
-                        trading_day = date.fromisoformat(str(trading_day_raw))
+                        trading_day_from_group = date.fromisoformat(str(trading_day_raw))
                     except ValueError:
                         entry_bar.update(1)
                         continue
 
-                breakout_price = breakout_price_by_key.get((symbol, trading_day))
+                breakout_price = breakout_price_by_key.get((symbol, trading_day_from_group))
                 if breakout_price is None:
                     entry_bar.update(1)
                     continue
 
                 intraday_entry = self._resolve_intraday_entry_from_5min(
-                    group_candles, breakout_price, entry_cutoff_minutes, is_short=is_short
+                    group_candles,
+                    breakout_price,
+                    entry_cutoff_minutes,
+                    is_short=is_short,
+                    orh_window_minutes=orh_window_minutes,
+                    same_day_r_ladder=same_day_r_ladder,
+                    same_day_r_ladder_start_r=same_day_r_ladder_start_r,
                 )
                 if intraday_entry is not None:
-                    resolved_entries[(symbol, trading_day)] = intraday_entry
+                    resolved_entries[(symbol, trading_day_from_group)] = intraday_entry
                 entry_bar.update(1)
 
         return resolved_entries
@@ -1404,7 +2065,9 @@ class DuckDBBacktestRunner:
         prev_close: float | None,
         breakout_threshold: float,
         entry_cutoff_minutes: int = 30,
-    ) -> dict[str, float | bool] | None:
+        same_day_r_ladder: bool = False,
+        same_day_r_ladder_start_r: int = 2,
+    ) -> IntradayEntry | None:
         if prev_close is None or prev_close <= 0:
             return None
 
@@ -1415,7 +2078,13 @@ class DuckDBBacktestRunner:
             end_date=trading_date.isoformat(),
             columns=["candle_time", "open", "high", "low", "close", "volume"],
         )
-        return self._resolve_intraday_entry_from_5min(candles, breakout_price, entry_cutoff_minutes)
+        return self._resolve_intraday_entry_from_5min(
+            candles,
+            breakout_price,
+            entry_cutoff_minutes,
+            same_day_r_ladder=same_day_r_ladder,
+            same_day_r_ladder_start_r=same_day_r_ladder_start_r,
+        )
 
     def _persist_results(
         self,
@@ -1423,10 +2092,12 @@ class DuckDBBacktestRunner:
         params: BacktestParams,
         yearly_results: dict[int, dict],
         all_trades: list[dict],
+        all_execution_diagnostics: list[dict],
     ) -> None:
         """Write results to DuckDB tables."""
         # Save trades
         self.db.save_trades(exp_id, all_trades)
+        self.db.save_execution_diagnostics(exp_id, all_execution_diagnostics)
 
         # Save yearly metrics
         for _year, stats in yearly_results.items():
@@ -1455,6 +2126,7 @@ class DuckDBBacktestRunner:
             max_drawdown_pct=max_dd,
             profit_factor=pf,
         )
+        self.db.refresh_backtest_read_snapshot()
 
     @staticmethod
     def _to_trades_df(all_trades: list[dict]) -> pd.DataFrame:
