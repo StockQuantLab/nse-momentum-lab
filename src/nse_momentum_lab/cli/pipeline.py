@@ -67,6 +67,7 @@ async def _create_pipeline_job(trading_date: date, skip_ingest: bool = False) ->
         async with session.begin():
             job = JobRun(
                 job_name="daily_pipeline",
+                job_kind="PIPELINE",
                 asof_date=trading_date,
                 idempotency_key=idempotency_key,
                 status="RUNNING",

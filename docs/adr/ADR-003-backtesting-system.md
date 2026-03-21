@@ -29,7 +29,7 @@ This ADR defines the backtesting system architecture, including the VectorBT eng
 | Alternative | Status | Reason Rejected |
 |--------------|--------|-----------------|
 | Backtrader | Not chosen | Less performant than vectorized approaches |
-| Zipline | Not chosen | More complex, pandas-based |
+| Zipline | Not chosen | More complex, DataFrame-centric stack |
 | Custom loop engine | Not chosen | Reimplementing vectorization is wasteful |
 
 ### 1.3 Engine Components

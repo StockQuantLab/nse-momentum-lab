@@ -250,19 +250,26 @@ CREATE TABLE IF NOT EXISTS paper_position (
 CREATE TABLE IF NOT EXISTS job_run (
   job_run_id bigserial PRIMARY KEY,
   job_name text NOT NULL,
+  job_kind text NOT NULL DEFAULT 'GENERIC',
   asof_date date NOT NULL,
+  idempotency_key text,
   dataset_hash text,
+  inputs_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  outputs_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  partition_scope jsonb NOT NULL DEFAULT '{}'::jsonb,
   status text NOT NULL,
   started_at timestamptz NOT NULL DEFAULT now(),
   finished_at timestamptz,
   duration_ms bigint,
   logs_uri text,
   metrics_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-  error_json jsonb NOT NULL DEFAULT '{}'::jsonb
+  error_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  code_hash text
 );
 
 CREATE INDEX IF NOT EXISTS idx_job_run_name_date ON job_run(job_name, asof_date);
 CREATE INDEX IF NOT EXISTS idx_job_run_status_date ON job_run(status, asof_date);
+CREATE INDEX IF NOT EXISTS idx_job_run_kind ON job_run(job_kind);
 
 CREATE TABLE IF NOT EXISTS bt_trade (
   trade_id bigserial PRIMARY KEY,

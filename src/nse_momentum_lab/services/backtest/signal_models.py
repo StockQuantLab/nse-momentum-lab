@@ -5,7 +5,7 @@ Replaces tuple-based signals with type-safe, documented structures.
 """
 
 from dataclasses import dataclass, field
-from datetime import date, time
+from datetime import date, datetime, time
 from typing import Any
 
 from nse_momentum_lab.services.backtest.engine import PositionSide
@@ -21,6 +21,9 @@ class SignalMetadata:
     entry_price: float | None = None
     same_day_stop_hit: bool = False
     entry_time: time | None = None
+    entry_ts: datetime | None = None
+    same_day_exit_ts: datetime | None = None
+    carry_stop_next_session: float | None = None
     direction: PositionSide = PositionSide.LONG
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -32,6 +35,11 @@ class SignalMetadata:
             "entry_price": self.entry_price,
             "same_day_stop_hit": self.same_day_stop_hit,
             "entry_time": self.entry_time.isoformat() if self.entry_time else None,
+            "entry_ts": self.entry_ts.isoformat() if self.entry_ts else None,
+            "same_day_exit_ts": self.same_day_exit_ts.isoformat()
+            if self.same_day_exit_ts
+            else None,
+            "carry_stop_next_session": self.carry_stop_next_session,
             "direction": self.direction.value,
         }
         result.update(self.extra)
@@ -42,6 +50,10 @@ class SignalMetadata:
         direction = PositionSide(data.get("direction", "LONG"))
         entry_time_str = data.get("entry_time")
         entry_time = time.fromisoformat(entry_time_str) if entry_time_str else None
+        entry_ts_str = data.get("entry_ts")
+        entry_ts = datetime.fromisoformat(entry_ts_str) if entry_ts_str else None
+        exit_ts_str = data.get("same_day_exit_ts")
+        same_day_exit_ts = datetime.fromisoformat(exit_ts_str) if exit_ts_str else None
         extra = {k: v for k, v in data.items() if k not in cls._fields()}
         return cls(
             gap_pct=data.get("gap_pct", 0.0),
@@ -50,6 +62,9 @@ class SignalMetadata:
             entry_price=data.get("entry_price"),
             same_day_stop_hit=data.get("same_day_stop_hit", False),
             entry_time=entry_time,
+            entry_ts=entry_ts,
+            same_day_exit_ts=same_day_exit_ts,
+            carry_stop_next_session=data.get("carry_stop_next_session"),
             direction=direction,
             extra=extra,
         )
@@ -63,6 +78,9 @@ class SignalMetadata:
             "entry_price",
             "same_day_stop_hit",
             "entry_time",
+            "entry_ts",
+            "same_day_exit_ts",
+            "carry_stop_next_session",
             "direction",
         }
 
@@ -104,14 +122,7 @@ class BacktestSignal:
         if isinstance(metadata_dict, dict):
             metadata = SignalMetadata.from_dict(metadata_dict)
         else:
-            metadata = SignalMetadata(
-                gap_pct=metadata_dict.get("gap_pct", 0.0),
-                atr=metadata_dict.get("atr", 0.0),
-                filters_passed=metadata_dict.get("filters_passed", 0),
-                entry_price=metadata_dict.get("entry_price"),
-                same_day_stop_hit=metadata_dict.get("same_day_stop_hit", False),
-                entry_time=metadata_dict.get("entry_time"),
-            )
+            metadata = SignalMetadata()
         return cls(
             signal_date=signal_date,
             symbol_id=symbol_id,

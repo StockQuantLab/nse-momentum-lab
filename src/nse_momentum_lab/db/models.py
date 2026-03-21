@@ -392,7 +392,7 @@ class JobRun(Base):
     job_run_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     job_name: Mapped[str] = mapped_column(Text, nullable=False)
     job_kind: Mapped[str] = mapped_column(
-        Text, nullable=False
+        Text, nullable=False, server_default="GENERIC"
     )  # raw_ingest_daily, silver_validate, etc.
     asof_date: Mapped[date | None] = mapped_column(Date)  # Null for non-date-scoped jobs
     idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True)

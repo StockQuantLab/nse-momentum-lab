@@ -14,7 +14,7 @@ if str(_project_root / "src") not in sys.path:
 if str(_apps_root) not in sys.path:
     sys.path.insert(0, str(_apps_root))
 
-import pandas as pd
+import polars as pl
 import plotly.graph_objects as go
 from nicegui import ui
 
@@ -40,7 +40,7 @@ def trade_analytics_page() -> None:
     with page_layout("Trade Analytics", "analytics"):
         experiments_df = get_experiments()
 
-        if experiments_df.empty:
+        if experiments_df.is_empty():
             page_header("Trade Analytics")
             empty_state(
                 "No experiments available",
@@ -59,7 +59,7 @@ def trade_analytics_page() -> None:
             trades_df = get_experiment_trades(exp_id)
             trades_df = prepare_trades_df(trades_df)
 
-            if trades_df.empty:
+            if trades_df.is_empty():
                 empty_state(
                     "No trades for this experiment",
                     "This experiment doesn't have any trades to analyze.",
@@ -123,20 +123,17 @@ def trade_analytics_page() -> None:
                 with ui.tab_panel(tab_exit):
                     if "exit_reason" in trades_df.columns and "pnl_pct" in trades_df.columns:
                         exit_summary = (
-                            trades_df.groupby("exit_reason")
+                            trades_df.group_by("exit_reason")
                             .agg(
-                                count=("pnl_pct", "count"),
-                                avg_pnl=("pnl_pct", "mean"),
-                                avg_r=("pnl_r", "mean"),
-                                wins=("pnl_pct", lambda x: (x > 0).sum()),
+                                pl.col("pnl_pct").count().alias("count"),
+                                pl.col("pnl_pct").mean().alias("avg_pnl"),
+                                pl.col("pnl_r").mean().alias("avg_r"),
+                                (pl.col("pnl_pct") > 0).sum().alias("wins"),
+                                pl.col("pnl_pct").sum().alias("total_pnl"),
                             )
-                            .reset_index()
-                        )
-                        exit_summary["win_rate"] = (
-                            exit_summary["wins"] / exit_summary["count"] * 100
-                        ).round(1)
-                        exit_summary["total_pnl"] = (
-                            trades_df.groupby("exit_reason")["pnl_pct"].sum().values
+                            .with_columns(
+                                (pl.col("wins") / pl.col("count") * 100).round(1).alias("win_rate"),
+                            )
                         )
 
                         ui.table(
@@ -161,18 +158,18 @@ def trade_analytics_page() -> None:
                                     "win_rate_fmt": f"{row['win_rate']:.1f}%",
                                     "total_pnl_fmt": f"{row['total_pnl']:.2f}%",
                                 }
-                                for _, row in exit_summary.iterrows()
+                                for row in exit_summary.iter_rows(named=True)
                             ],
                         ).classes("w-full")
 
                         fig = go.Figure()
                         fig.add_trace(
                             go.Bar(
-                                x=exit_summary["exit_reason"],
-                                y=exit_summary["avg_pnl"],
+                                x=exit_summary["exit_reason"].to_list(),
+                                y=exit_summary["avg_pnl"].to_list(),
                                 marker_color=[
                                     COLORS["success"] if v > 0 else COLORS["error"]
-                                    for v in exit_summary["avg_pnl"]
+                                    for v in exit_summary["avg_pnl"].to_list()
                                 ],
                             )
                         )
@@ -187,20 +184,32 @@ def trade_analytics_page() -> None:
                 # Monthly Performance
                 with ui.tab_panel(tab_monthly):
                     if "entry_date" in trades_df.columns and "pnl_pct" in trades_df.columns:
-                        trades_df["month"] = pd.to_datetime(trades_df["entry_date"]).dt.to_period(
-                            "M"
+                        monthly_df = trades_df.with_columns(
+                            pl.col("entry_date").cast(pl.Date, strict=False).alias("_date"),
+                        ).with_columns(
+                            pl.col("_date").dt.year().alias("_year"),
+                            pl.col("_date").dt.month().alias("_month"),
                         )
+
                         monthly_data = (
-                            trades_df.groupby("month")
+                            monthly_df.group_by("_year", "_month")
                             .agg(
-                                trades=("pnl_pct", "count"),
-                                total_pnl=("pnl_pct", "sum"),
-                                avg_pnl=("pnl_pct", "mean"),
-                                win_rate=("pnl_pct", lambda x: (x > 0).mean() * 100),
+                                pl.col("pnl_pct").count().alias("trades"),
+                                pl.col("pnl_pct").sum().alias("total_pnl"),
+                                pl.col("pnl_pct").mean().alias("avg_pnl"),
+                                (
+                                    (pl.col("pnl_pct") > 0).sum() / pl.col("pnl_pct").count() * 100
+                                ).alias("win_rate"),
                             )
-                            .reset_index()
+                            .sort("_year", "_month")
+                            .with_columns(
+                                (
+                                    pl.col("_year").cast(pl.Utf8)
+                                    + "-"
+                                    + pl.col("_month").cast(pl.Utf8).str.pad_start(2, "0")
+                                ).alias("month_str"),
+                            )
                         )
-                        monthly_data["month_str"] = monthly_data["month"].astype(str)
 
                         ui.table(
                             columns=[
@@ -222,7 +231,7 @@ def trade_analytics_page() -> None:
                                     "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
                                     "win_rate_fmt": f"{row['win_rate']:.1f}%",
                                 }
-                                for _, row in monthly_data.iterrows()
+                                for row in monthly_data.iter_rows(named=True)
                             ],
                             pagination=15,
                         ).classes("w-full")
@@ -230,8 +239,8 @@ def trade_analytics_page() -> None:
                         fig = go.Figure()
                         fig.add_trace(
                             go.Scatter(
-                                x=monthly_data["month_str"],
-                                y=monthly_data["total_pnl"],
+                                x=monthly_data["month_str"].to_list(),
+                                y=monthly_data["total_pnl"].to_list(),
                                 mode="lines+markers",
                                 line=dict(color=COLORS["success"]),
                             )
@@ -246,16 +255,15 @@ def trade_analytics_page() -> None:
                 with ui.tab_panel(tab_symbol):
                     if "symbol" in trades_df.columns and "pnl_pct" in trades_df.columns:
                         symbol_stats = (
-                            trades_df.groupby("symbol")
+                            trades_df.group_by("symbol")
                             .agg(
-                                trades=("pnl_pct", "count"),
-                                total_pnl=("pnl_pct", "sum"),
-                                avg_pnl=("pnl_pct", "mean"),
-                                best=("pnl_pct", "max"),
-                                worst=("pnl_pct", "min"),
+                                pl.col("pnl_pct").count().alias("trades"),
+                                pl.col("pnl_pct").sum().alias("total_pnl"),
+                                pl.col("pnl_pct").mean().alias("avg_pnl"),
+                                pl.col("pnl_pct").max().alias("best"),
+                                pl.col("pnl_pct").min().alias("worst"),
                             )
-                            .reset_index()
-                            .sort_values("total_pnl", ascending=False)
+                            .sort("total_pnl", descending=True)
                         )
 
                         ui.table(
@@ -280,7 +288,7 @@ def trade_analytics_page() -> None:
                                     "best_fmt": f"{row['best']:.1f}%",
                                     "worst_fmt": f"{row['worst']:.1f}%",
                                 }
-                                for _, row in symbol_stats.head(30).iterrows()
+                                for row in symbol_stats.head(30).iter_rows(named=True)
                             ],
                             pagination=10,
                         ).classes("w-full")

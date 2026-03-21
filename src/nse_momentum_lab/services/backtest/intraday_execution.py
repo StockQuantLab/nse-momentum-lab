@@ -83,6 +83,7 @@ def _simulate_same_day_stop_execution(
     is_short: bool,
     same_day_r_ladder: bool,
     same_day_r_ladder_start_r: int = 2,
+    short_same_day_take_profit_pct: float | None = None,
 ) -> tuple[bool, float | None, time | None, ExitReason | None, float]:
     """Simulate stop execution on bars after entry and return final carry stop."""
     stop_level = float(initial_stop)
@@ -98,11 +99,22 @@ def _simulate_same_day_stop_execution(
         high_px = float(follow_row["high"])
         low_px = float(follow_row["low"])
         open_px = float(follow_row["open"])
+        exit_time = normalize_candle_time(follow_row.get("candle_time"))
+
+        # Optional short-only same-day profit-taking.
+        if (
+            is_short
+            and short_same_day_take_profit_pct is not None
+            and short_same_day_take_profit_pct > 0
+        ):
+            target_price = float(entry_price) * (1 - float(short_same_day_take_profit_pct))
+            if low_px <= target_price:
+                exit_price = open_px if open_px <= target_price else target_price
+                return True, float(exit_price), exit_time, ExitReason.ABNORMAL_PROFIT, stop_level
 
         # Gap-through stop is filled at open.
         gap_through = open_px >= stop_level if is_short else open_px <= stop_level
         if gap_through:
-            exit_time = normalize_candle_time(follow_row.get("candle_time"))
             return True, open_px, exit_time, ExitReason.GAP_THROUGH_STOP, stop_level
 
         if same_day_r_ladder:
@@ -155,6 +167,9 @@ def resolve_intraday_execution_from_5min(
     orh_window_minutes: int = 0,
     same_day_r_ladder: bool = False,
     same_day_r_ladder_start_r: int = 2,
+    short_initial_stop_atr: float | None = None,
+    short_initial_stop_atr_cap_mult: float | None = None,
+    short_same_day_take_profit_pct: float | None = None,
 ) -> IntradayExecutionResult | None:
     """Resolve intraday entry and same-day stop behavior from 5-minute candles."""
     if candles.is_empty():
@@ -207,7 +222,18 @@ def resolve_intraday_execution_from_5min(
 
         if is_short:
             entry_price = o if o <= trigger_price else trigger_price
-            initial_stop = float(session_high if session_high is not None else h)
+            session_stop = float(session_high if session_high is not None else h)
+            initial_stop = session_stop
+            if (
+                short_initial_stop_atr is not None
+                and short_initial_stop_atr_cap_mult is not None
+                and short_initial_stop_atr > 0
+                and short_initial_stop_atr_cap_mult > 0
+            ):
+                capped_stop = float(entry_price) + (
+                    float(short_initial_stop_atr_cap_mult) * float(short_initial_stop_atr)
+                )
+                initial_stop = min(session_stop, capped_stop)
         else:
             entry_price = o if o >= trigger_price else trigger_price
             initial_stop = float(session_low if session_low is not None else low_px)
@@ -238,6 +264,7 @@ def resolve_intraday_execution_from_5min(
             is_short=is_short,
             same_day_r_ladder=same_day_r_ladder,
             same_day_r_ladder_start_r=same_day_r_ladder_start_r,
+            short_same_day_take_profit_pct=short_same_day_take_profit_pct,
         )
     )
 

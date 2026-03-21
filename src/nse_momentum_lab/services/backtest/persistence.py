@@ -8,7 +8,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+import polars as pl
 import psycopg
 
 from nse_momentum_lab.config import get_settings
@@ -49,13 +49,13 @@ class BacktestArtifactPublisher:
         return digest.hexdigest()
 
     @staticmethod
-    def _to_csv_bytes(df: pd.DataFrame) -> bytes:
-        return df.to_csv(index=False).encode("utf-8")
+    def _to_csv_bytes(df: pl.DataFrame) -> bytes:
+        return df.write_csv().encode("utf-8")
 
     @staticmethod
-    def _to_parquet_bytes(df: pd.DataFrame) -> bytes:
+    def _to_parquet_bytes(df: pl.DataFrame) -> bytes:
         out = BytesIO()
-        df.to_parquet(out, index=False)
+        df.write_parquet(out)
         return out.getvalue()
 
     def _publish_bytes(
@@ -84,9 +84,9 @@ class BacktestArtifactPublisher:
         self,
         *,
         exp_id: str,
-        trades_df: pd.DataFrame,
-        yearly_df: pd.DataFrame,
-        equity_df: pd.DataFrame,
+        trades_df: pl.DataFrame,
+        yearly_df: pl.DataFrame,
+        equity_df: pl.DataFrame,
         summary: dict[str, Any],
     ) -> list[ExperimentArtifact]:
         artifacts: list[ExperimentArtifact] = []

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 from nse_momentum_lab.services.backtest.persistence import (
     BacktestArtifactPublisher,
@@ -50,9 +50,9 @@ def test_build_strategy_hash_is_deterministic() -> None:
 def test_publish_run_artifacts() -> None:
     store = _FakeStore()
     publisher = BacktestArtifactPublisher(store=store)
-    trades_df = pd.DataFrame([{"symbol": "TCS", "pnl_pct": 1.2}])
-    yearly_df = pd.DataFrame([{"year": 2024, "return_pct": 12.3}])
-    equity_df = pd.DataFrame([{"entry_date": "2024-01-01", "cumulative_return_pct": 1.2}])
+    trades_df = pl.DataFrame([{"symbol": "TCS", "pnl_pct": 1.2}])
+    yearly_df = pl.DataFrame([{"year": 2024, "return_pct": 12.3}])
+    equity_df = pl.DataFrame([{"entry_date": "2024-01-01", "cumulative_return_pct": 1.2}])
 
     artifacts = publisher.publish_run_artifacts(
         exp_id="exp123",

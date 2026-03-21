@@ -32,6 +32,7 @@ from apps.nicegui.pages.data_quality import data_quality_page
 from apps.nicegui.pages.pipeline import pipeline_page
 from apps.nicegui.pages.paper_ledger import paper_ledger_page
 from apps.nicegui.pages.daily_summary import daily_summary_page
+from apps.nicegui.pages.market_monitor import market_monitor_page
 
 
 # Each page function calls page_layout() itself — no wrapper needed.
@@ -45,6 +46,7 @@ ui.page("/data_quality")(data_quality_page)
 ui.page("/pipeline")(pipeline_page)
 ui.page("/paper_ledger")(paper_ledger_page)
 ui.page("/daily_summary")(daily_summary_page)
+ui.page("/market_monitor")(market_monitor_page)
 
 
 def main() -> None:
@@ -55,17 +57,9 @@ def main() -> None:
     warnings.filterwarnings("ignore", message=".*chardet.*")
     warnings.filterwarnings("ignore", message=".*charset_normalizer.*")
 
-    # Suppress Windows asyncio ConnectionResetError during cleanup
-    # This is a cosmetic issue on Windows when connections close abruptly
+    # Suppress Windows asyncio ConnectionResetError noise during cleanup.
+    # Setting level above CRITICAL silences all asyncio log messages.
     logging.getLogger("asyncio").setLevel(logging.CRITICAL + 1)
-
-    # Suppress the traceback for ConnectionResetError exceptions
-    class ConnectionResetFilter(logging.Filter):
-        def filter(self, record):
-            return "ConnectionResetError" not in record.getMessage()
-
-    asyncio_logger = logging.getLogger("asyncio")
-    asyncio_logger.addFilter(ConnectionResetFilter())
 
     ui.run(
         title="NSE Momentum Lab",

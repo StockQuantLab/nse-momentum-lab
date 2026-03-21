@@ -16,12 +16,13 @@ Theme System:
 
 from __future__ import annotations
 
+import inspect
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
+import polars as pl
 
 # ---------------------------------------------------------------------------
 # Path setup (must run before any project imports)
@@ -103,6 +104,7 @@ NAV_ITEMS = [
     {"label": "Pipeline", "icon": "engineering", "path": "/pipeline"},
     {"label": "Paper Ledger", "icon": "receipt_long", "path": "/paper_ledger"},
     {"label": "Daily Summary", "icon": "today", "path": "/daily_summary"},
+    {"label": "Market Monitor", "icon": "monitoring", "path": "/market_monitor"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -275,10 +277,15 @@ body.terminal-mode::after {
     color: var(--theme-text-secondary);
     position: relative;
 }
+.nav-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
 .nav-item::before {
     content: ">";
     position: absolute;
-    left: 4px;
+    left: 8px;
     opacity: 0;
     color: var(--theme-primary);
     font-family: 'JetBrains Mono', monospace;
@@ -287,7 +294,7 @@ body.terminal-mode::after {
 .nav-item:hover {
     background: var(--theme-surface-hover);
     color: var(--theme-text-primary);
-    padding-left: 20px;
+    padding-left: 24px;
 }
 .nav-item:hover::before {
     opacity: 1;
@@ -300,6 +307,16 @@ body.terminal-mode::after {
 .nav-item-active::before {
     content: ">";
     opacity: 1;
+}
+.nav-icon {
+    width: 24px;
+    flex: 0 0 24px;
+    text-align: center;
+    margin-left: 3px;
+}
+.nav-label {
+    flex: 1;
+    line-height: 1.2;
 }
 
 /* Quasar table overrides — uses theme variables, more vertical padding */
@@ -934,10 +951,10 @@ def export_button(
     label: str = "Download CSV",
 ) -> None:
     """Add a CSV export button with Material icon."""
-    if data is None or (hasattr(data, "empty") and data.empty):
+    if data is None or (hasattr(data, "is_empty") and data.is_empty()):
         return
 
-    csv_content = data.to_csv(index=False)
+    csv_content = data.write_csv()
 
     def do_download():
         ui.download(csv_content.encode("utf-8"), filename=filename)
@@ -970,6 +987,7 @@ def paginated_table(
     columns: list,
     page_size: int = 20,
     row_key: Any = None,
+    on_row_click: Any = None,
 ) -> None:
     """Paginated table that only renders current page."""
     if not rows:
@@ -978,6 +996,69 @@ def paginated_table(
 
     total_pages = (len(rows) + page_size - 1) // page_size
     state = {"page": 0}
+    table_row_key = row_key or ("id" if rows and "id" in rows[0] else None)
+
+    def _is_probable_row(payload: dict[str, Any]) -> bool:
+        if not payload:
+            return False
+        row_markers = {
+            "run_id",
+            "strategy",
+            "symbol",
+            "date",
+            "trade_date",
+            "entry_time",
+            "exit_time",
+            "idx",
+            "trade_row_id",
+        }
+        if row_markers.intersection(payload.keys()):
+            return True
+        pointer_event_keys = {
+            "altKey",
+            "ctrlKey",
+            "metaKey",
+            "shiftKey",
+            "button",
+            "buttons",
+            "clientX",
+            "clientY",
+            "offsetX",
+            "offsetY",
+            "pageX",
+            "pageY",
+            "screenX",
+            "screenY",
+            "type",
+            "isTrusted",
+        }
+        return not set(payload.keys()).issubset(pointer_event_keys)
+
+    def _extract_row_payload(event: Any) -> dict[str, Any]:
+        args = getattr(event, "args", None)
+
+        if isinstance(args, dict):
+            for key in ("row", "record", "item", "data"):
+                val = args.get(key)
+                if isinstance(val, dict):
+                    return val
+            for val in args.values():
+                if isinstance(val, dict) and _is_probable_row(val):
+                    return val
+            return args if _is_probable_row(args) else {}
+
+        if isinstance(args, list | tuple):
+            if len(args) >= 2 and isinstance(args[1], dict) and _is_probable_row(args[1]):
+                return args[1]
+            for item in args:
+                if isinstance(item, dict) and _is_probable_row(item):
+                    return item
+            for item in reversed(args):
+                if isinstance(item, dict):
+                    return item
+            return {}
+
+        return {}
 
     def show_page():
         start = state["page"] * page_size
@@ -985,12 +1066,29 @@ def paginated_table(
 
         with ui.column().classes("w-full"):
             with ui.element("div").style("width: 100%; overflow-x: auto;"):
-                ui.table(
+                table = ui.table(
                     columns=columns,
                     rows=rows[start:end],
                     pagination={"rowsPerPage": page_size, "rowsPerPage_options": [10, 20, 50, 100]},
-                    row_key="id" if rows and "id" in rows[0] else None,
+                    row_key=table_row_key,
                 ).style("min-width: max-content;")
+
+                if on_row_click:
+
+                    async def _handle_row_click(e) -> None:
+                        row_payload = _extract_row_payload(e)
+                        if not row_payload:
+                            return
+                        try:
+                            if not ui.context.client.has_socket_connection:
+                                return
+                        except AttributeError, RuntimeError:
+                            return
+                        result = on_row_click(row_payload)
+                        if inspect.isawaitable(result):
+                            await result
+
+                    table.on("row-click", _handle_row_click)
 
             with ui.row().classes("justify-between items-center mt-4 w-full"):
                 ui.label(f"Showing {start + 1}-{min(end, len(rows))} of {len(rows)}").classes(
@@ -1071,17 +1169,17 @@ def export_menu(
     label: str = "Export",
 ) -> None:
     """Dropdown with multiple export formats."""
-    if data is None or (hasattr(data, "empty") and data.empty):
+    if data is None or (hasattr(data, "is_empty") and data.is_empty()):
         return
 
     with ui.button(label, icon="download").props("flat"):
         with ui.menu().props("anchor=top-end"):
-            csv_content = data.to_csv(index=False)
+            csv_content = data.write_csv()
             ui.menu_item(
                 "Download as CSV",
                 lambda: ui.download(csv_content.encode("utf-8"), filename=f"{filename_base}.csv"),
             )
-            json_content = data.to_json(indent=2) if hasattr(data, "to_json") else str(data)
+            json_content = data.write_json() if hasattr(data, "write_json") else str(data)
             ui.menu_item(
                 "Download as JSON",
                 lambda: ui.download(json_content.encode("utf-8"), filename=f"{filename_base}.json"),
@@ -1092,7 +1190,7 @@ def export_menu(
 # Trade table with filters
 # ---------------------------------------------------------------------------
 def trade_table_with_filters(
-    trades_df: pd.DataFrame,
+    trades_df: pl.DataFrame,
     columns: list,
     rows: list,
     page_size: int = 50,
@@ -1108,7 +1206,7 @@ def trade_table_with_filters(
 
     filters = {"symbol": "", "exit_reason": "all", "min_pnl": None, "max_pnl": None}
 
-    exit_reasons = ["all", *sorted(trades_df["exit_reason"].unique().tolist())]
+    exit_reasons = ["all", *sorted(trades_df["exit_reason"].unique().to_list())]
 
     def update_filter(key: str, value: Any) -> None:
         filters[key] = value
@@ -1464,7 +1562,7 @@ class ExperimentAlerts:
         self._last_seen_count = 0
         self._alert_element = None
 
-    def check_and_alert(self, experiments_df: pd.DataFrame) -> None:
+    def check_and_alert(self, experiments_df: pl.DataFrame) -> None:
         """Check for new experiments and show alert if found."""
         current_count = len(experiments_df)
 

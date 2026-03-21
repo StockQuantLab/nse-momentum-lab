@@ -201,6 +201,13 @@ async def home_page() -> None:
                 "/data_quality",
                 COLORS["success"],
             )
+            nav_card(
+                "Market Monitor",
+                "Track Stockbee-style market regime and breadth",
+                "monitoring",
+                "/market_monitor",
+                COLORS["info"],
+            )
 
         ui.label("Operations").classes("text-lg font-semibold mb-3 mt-2").style(
             f"color: {THEME['text_secondary']};"

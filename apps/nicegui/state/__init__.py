@@ -19,11 +19,11 @@ if str(_project_root / "src") not in sys.path:
 from typing import TYPE_CHECKING
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import pandas as pd
+import polars as pl
 import time
 
 if TYPE_CHECKING:
-    from nicegui import ui  # noqa: F401  # Imported for type hints only
+    pass
 
 from nse_momentum_lab.db.market_db import get_backtest_db, get_market_db, MarketDataDB
 
@@ -41,7 +41,7 @@ _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="db-worker")
 # freeing the asyncio event loop during slow queries (e.g. COUNT DISTINCT on Parquet).
 
 # Global experiment cache (refreshed periodically)
-_experiments_cache: pd.DataFrame | None = None
+_experiments_cache: pl.DataFrame | None = None
 _experiments_cache_time: float = 0
 
 # Global status cache - persist to disk for fast restarts
@@ -61,7 +61,7 @@ def get_db() -> MarketDataDB:
     return db
 
 
-def _fetch_experiments_sync(force_refresh: bool = False) -> pd.DataFrame:
+def _fetch_experiments_sync(force_refresh: bool = False) -> pl.DataFrame:
     """Synchronous implementation — always call via get_experiments() or aget_experiments()."""
     global _experiments_cache, _experiments_cache_time
 
@@ -73,33 +73,29 @@ def _fetch_experiments_sync(force_refresh: bool = False) -> pd.DataFrame:
     ):
         exps = backtest_db.list_experiments()
         if not exps.is_empty():
-            _experiments_cache = exps.to_pandas()
-            _experiments_cache["status"] = _experiments_cache["status"].astype(str).str.lower()
-            _experiments_cache = _experiments_cache[_experiments_cache["status"] == "completed"]
+            _experiments_cache = exps.with_columns(
+                pl.col("status").cast(pl.Utf8).str.to_lowercase()
+            ).filter(pl.col("status") == "completed")
             # DB returns ORDER BY created_at DESC; preserve that as primary sort
             if "created_at" in _experiments_cache.columns:
-                _experiments_cache = _experiments_cache.sort_values(
-                    by="created_at", ascending=False
-                )
+                _experiments_cache = _experiments_cache.sort("created_at", descending=True)
             else:
-                _experiments_cache = _experiments_cache.sort_values(
-                    by="start_year", ascending=False
-                )
+                _experiments_cache = _experiments_cache.sort("start_year", descending=True)
         else:
-            _experiments_cache = pd.DataFrame()
+            _experiments_cache = pl.DataFrame()
         _experiments_cache_time = now
 
     return _experiments_cache
 
 
-def get_experiments(force_refresh: bool = False) -> pd.DataFrame:
+def get_experiments(force_refresh: bool = False) -> pl.DataFrame:
     """Get cached experiments list synchronously."""
     return _fetch_experiments_sync(force_refresh)
 
 
-async def aget_experiments(force_refresh: bool = False) -> pd.DataFrame:
+async def aget_experiments(force_refresh: bool = False) -> pl.DataFrame:
     """Async wrapper — runs the blocking DB call in a thread pool."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, lambda: _fetch_experiments_sync(force_refresh))
 
 
@@ -195,7 +191,7 @@ async def aget_db_status(lite: bool = False) -> dict:
     if lite:
         return get_status_lite()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, _fetch_status_sync)
 
 
@@ -206,41 +202,91 @@ def get_experiment(exp_id: str) -> dict | None:
 
 async def aget_experiment(exp_id: str) -> dict | None:
     """Async wrapper for get_experiment."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, lambda: get_experiment(exp_id))
 
 
-def get_experiment_trades(exp_id: str) -> pd.DataFrame:
+def get_experiment_trades(exp_id: str) -> pl.DataFrame:
     """Get all trades for an experiment."""
     df = backtest_db.get_experiment_trades(exp_id)
-    return df.to_pandas() if not df.is_empty() else pd.DataFrame()
+    return df if not df.is_empty() else pl.DataFrame()
 
 
-async def aget_experiment_trades(exp_id: str) -> pd.DataFrame:
+def get_experiment_execution_diagnostics(exp_id: str) -> pl.DataFrame:
+    """Get execution diagnostics for an experiment."""
+    df = backtest_db.get_experiment_execution_diagnostics(exp_id)
+    return df if not df.is_empty() else pl.DataFrame()
+
+
+async def aget_experiment_trades(exp_id: str) -> pl.DataFrame:
     """Async wrapper for get_experiment_trades."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, lambda: get_experiment_trades(exp_id))
 
 
-def get_experiment_yearly_metrics(exp_id: str) -> pd.DataFrame:
+async def aget_experiment_execution_diagnostics(exp_id: str) -> pl.DataFrame:
+    """Async wrapper for get_experiment_execution_diagnostics."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _executor, lambda: get_experiment_execution_diagnostics(exp_id)
+    )
+
+
+def get_experiment_yearly_metrics(exp_id: str) -> pl.DataFrame:
     """Get yearly metrics for an experiment."""
     df = backtest_db.get_experiment_yearly_metrics(exp_id)
-    return df.to_pandas() if not df.is_empty() else pd.DataFrame()
+    return df if not df.is_empty() else pl.DataFrame()
 
 
-async def aget_experiment_yearly_metrics(exp_id: str) -> pd.DataFrame:
+async def aget_experiment_yearly_metrics(exp_id: str) -> pl.DataFrame:
     """Async wrapper for get_experiment_yearly_metrics."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(_executor, lambda: get_experiment_yearly_metrics(exp_id))
 
 
-def _strategy_display_name(row: pd.Series) -> str:
+def get_market_monitor_latest() -> pl.DataFrame:
+    """Get the latest market monitor snapshot, if available."""
+    df = db.get_market_monitor_latest()
+    return df if not df.is_empty() else pl.DataFrame()
+
+
+def get_market_monitor_history(days: int = 252) -> pl.DataFrame:
+    """Get recent market monitor history, if available."""
+    df = db.get_market_monitor_history(days=days)
+    return df if not df.is_empty() else pl.DataFrame()
+
+
+def get_market_monitor_all() -> pl.DataFrame:
+    """Get ALL market monitor history, if available."""
+    df = db.get_market_monitor_all()
+    return df if not df.is_empty() else pl.DataFrame()
+
+
+async def aget_market_monitor_latest() -> pl.DataFrame:
+    """Async wrapper for get_market_monitor_latest."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, get_market_monitor_latest)
+
+
+async def aget_market_monitor_history(days: int = 252) -> pl.DataFrame:
+    """Async wrapper for get_market_monitor_history."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, lambda: get_market_monitor_history(days=days))
+
+
+async def aget_market_monitor_all() -> pl.DataFrame:
+    """Async wrapper for get_market_monitor_all - fetches all available data."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_executor, get_market_monitor_all)
+
+
+def _strategy_display_name(row: dict) -> str:
     """Derive display name that includes breakout threshold when applicable."""
     import json as _json
 
     name = str(row.get("strategy_name", "?"))
     params: dict = {}
-    if "params_json" in row.index and pd.notna(row.get("params_json")):
+    if "params_json" in row and row.get("params_json") is not None:
         try:
             params = _json.loads(row["params_json"])
         except ValueError, TypeError:
@@ -252,25 +298,55 @@ def _strategy_display_name(row: pd.Series) -> str:
     return name
 
 
-def build_experiment_options(experiments_df: pd.DataFrame) -> dict[str, str]:
+def _run_window_display(row: dict) -> str:
+    """Return exact backtest date window when available, else year range."""
+    import json as _json
+
+    start_year = row.get("start_year", "?")
+    end_year = row.get("end_year", "?")
+    fallback = f"{start_year}-{end_year}"
+
+    if "params_json" not in row or row.get("params_json") is None:
+        return fallback
+
+    try:
+        params = _json.loads(row["params_json"])
+    except TypeError, ValueError:
+        return fallback
+
+    start_date = params.get("start_date")
+    end_date = params.get("end_date")
+    if start_date and end_date:
+        return f"{start_date} to {end_date}"
+    if start_date:
+        return f"from {start_date}"
+    if end_date:
+        return f"to {end_date}"
+    return fallback
+
+
+def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
     """Build {label: exp_id} dict with human-readable labels, latest first.
 
-    Label format: "2LYNCHBreakout 4% | 2015-2025 | 7,073 trades | Ret 193.9% | Mar 01"
+    Label format: "2LYNCHBreakout 4% | 2025-04-01 to 2026-03-10 | 991 trades | Ret 136.4% | Mar 12 13:52"
     """
     options: dict[str, str] = {}
-    for _, row in experiments_df.iterrows():
+    for row in experiments_df.iter_rows(named=True):
         strategy = _strategy_display_name(row)
-        start = row.get("start_year", "?")
-        end = row.get("end_year", "?")
+        window = _run_window_display(row)
         trades = int(row.get("total_trades", 0) or 0)
         ret = float(row.get("total_return_pct", 0) or 0)
 
         # Created-at date for disambiguation
         created = ""
-        if "created_at" in row.index and pd.notna(row["created_at"]):
-            created = f" | {pd.Timestamp(row['created_at']).strftime('%b %d %H:%M')}"
+        created_val = row.get("created_at")
+        if created_val is not None:
+            try:
+                created = f" | {created_val.strftime('%b %d %H:%M')}"
+            except AttributeError, TypeError:
+                created = f" | {str(created_val)[:16]}"
 
-        label = f"{strategy} | {start}-{end} | {trades:,} trades | Ret {ret:.1f}%{created}"
+        label = f"{strategy} | {window} | {trades:,} trades | Ret {ret:.1f}%{created}"
         options[label] = row["exp_id"]
     return options
 
@@ -282,24 +358,38 @@ def format_time(value) -> str:
     return str(value)[:5]
 
 
-def prepare_trades_df(df: pd.DataFrame) -> pd.DataFrame:
+def prepare_trades_df(df: pl.DataFrame) -> pl.DataFrame:
     """Prepare trades dataframe for display with proper formatting."""
-    if df.empty:
+    if df.is_empty():
         return df
 
+    casts = []
     if "entry_date" in df.columns:
-        df["entry_date"] = pd.to_datetime(df["entry_date"], errors="coerce")
+        casts.append(pl.col("entry_date").cast(pl.Date, strict=False))
     if "exit_date" in df.columns:
-        df["exit_date"] = pd.to_datetime(df["exit_date"], errors="coerce")
+        casts.append(pl.col("exit_date").cast(pl.Date, strict=False))
 
+    if casts:
+        df = df.with_columns(casts)
+
+    time_cols = []
     if "entry_time" in df.columns:
-        df["entry_time"] = df["entry_time"].apply(format_time)
+        time_cols.append(
+            pl.col("entry_time").cast(pl.Utf8, strict=False).str.slice(0, 5).alias("entry_time")
+        )
     if "exit_time" in df.columns:
-        df["exit_time"] = df["exit_time"].apply(format_time)
+        time_cols.append(
+            pl.col("exit_time").cast(pl.Utf8, strict=False).str.slice(0, 5).alias("exit_time")
+        )
+    if time_cols:
+        df = df.with_columns(time_cols)
 
+    numeric_casts = []
     for col in ["pnl_pct", "pnl_r", "holding_days", "year", "entry_price", "exit_price"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            numeric_casts.append(pl.col(col).cast(pl.Float64, strict=False))
+    if numeric_casts:
+        df = df.with_columns(numeric_casts)
 
     return df
 
@@ -312,7 +402,7 @@ def on_new_experiments(callback) -> None:
     _experiment_callbacks.append(callback)
 
 
-async def poll_new_experiments(force_refresh: bool = True) -> pd.DataFrame:
+async def poll_new_experiments(force_refresh: bool = True) -> pl.DataFrame:
     """Check for new experiments and notify listeners."""
     global _experiments_cache, _experiments_cache_time
 

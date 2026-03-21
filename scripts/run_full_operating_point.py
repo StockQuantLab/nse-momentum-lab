@@ -4,7 +4,7 @@ Includes:
 - Breakout 4% (canonical, no daily ranking budget cap)
 - Breakout 2% (canonical, no daily ranking budget cap)
 - Breakdown 4% (Option-B short tuning)
-- Breakdown 2% (canonical short config)
+- Breakdown 2% (Phase-1 flags: strict_filter_l, narrow_n, skip_gap_down, rs_min=-0.10, budget=5)
 """
 
 from __future__ import annotations
@@ -38,6 +38,13 @@ def build_parser() -> argparse.ArgumentParser:
             "Use 0 to disable and run canonical unbudgeted breakout selection."
         ),
     )
+    parser.add_argument(
+        "--breakout-c-quality-source",
+        type=str,
+        default="current",
+        choices=["current", "prev"],
+        help="Breakout ranking C-quality source for breakout legs.",
+    )
     parser.add_argument("--force", action="store_true", help="Force rerun even if cached")
     parser.add_argument(
         "--snapshot",
@@ -58,6 +65,7 @@ def _run_variant(
     common: dict[str, object],
     breakout_budget: int | None = None,
     short_option_b: bool = False,
+    breakdown_phase1: bool = False,
 ) -> str:
     params = BacktestParams(
         strategy=strategy,
@@ -77,6 +85,13 @@ def _run_variant(
         params.short_max_stop_dist_pct = 0.05
         params.short_abnormal_profit_pct = 0.05
 
+    if breakdown_phase1:
+        params.breakdown_daily_candidate_budget = 5
+        params.breakdown_rs_min = -0.10
+        params.breakdown_strict_filter_l = True
+        params.breakdown_filter_n_narrow_only = True
+        params.breakdown_skip_gap_down = True
+
     print(f"[RUN] {label} start")
     exp_id = runner.run(params, force=force, snapshot=snapshot)
     print(f"[RUN] {label} done exp_id={exp_id}")
@@ -95,56 +110,61 @@ def main() -> None:
         "start_date": args.start_date,
         "end_date": args.end_date,
         "entry_timeframe": args.entry_timeframe,
+        "breakout_use_current_day_c_quality": args.breakout_c_quality_source == "current",
     }
 
-    runner = DuckDBBacktestRunner()
+    try:
+        runner = DuckDBBacktestRunner()
 
-    exp_bo_4 = _run_variant(
-        runner,
-        label="4% breakout (canonical)",
-        strategy="thresholdbreakout",
-        breakout_threshold=0.04,
-        force=args.force,
-        snapshot=args.snapshot,
-        common=common,
-        breakout_budget=args.breakout_daily_candidate_budget,
-    )
-    exp_bo_2 = _run_variant(
-        runner,
-        label="2% breakout (canonical)",
-        strategy="thresholdbreakout",
-        breakout_threshold=0.02,
-        force=args.force,
-        snapshot=args.snapshot,
-        common=common,
-        breakout_budget=args.breakout_daily_candidate_budget,
-    )
-    exp_bd_4 = _run_variant(
-        runner,
-        label="4% breakdown (Option-B tuned)",
-        strategy="thresholdbreakdown",
-        breakout_threshold=0.04,
-        force=args.force,
-        snapshot=args.snapshot,
-        common=common,
-        short_option_b=True,
-    )
-    exp_bd_2 = _run_variant(
-        runner,
-        label="2% breakdown (canonical)",
-        strategy="thresholdbreakdown",
-        breakout_threshold=0.02,
-        force=args.force,
-        snapshot=args.snapshot,
-        common=common,
-    )
+        exp_bo_4 = _run_variant(
+            runner,
+            label="4% breakout (canonical)",
+            strategy="thresholdbreakout",
+            breakout_threshold=0.04,
+            force=args.force,
+            snapshot=args.snapshot,
+            common=common,
+            breakout_budget=args.breakout_daily_candidate_budget,
+        )
+        exp_bo_2 = _run_variant(
+            runner,
+            label="2% breakout (canonical)",
+            strategy="thresholdbreakout",
+            breakout_threshold=0.02,
+            force=args.force,
+            snapshot=args.snapshot,
+            common=common,
+            breakout_budget=args.breakout_daily_candidate_budget,
+        )
+        exp_bd_4 = _run_variant(
+            runner,
+            label="4% breakdown (Option-B tuned)",
+            strategy="thresholdbreakdown",
+            breakout_threshold=0.04,
+            force=args.force,
+            snapshot=args.snapshot,
+            common=common,
+            short_option_b=True,
+        )
+        exp_bd_2 = _run_variant(
+            runner,
+            label="2% breakdown (Phase-1 flags + R²-ranking)",
+            strategy="thresholdbreakdown",
+            breakout_threshold=0.02,
+            force=args.force,
+            snapshot=args.snapshot,
+            common=common,
+            breakdown_phase1=True,
+        )
 
-    print()
-    print("Full operating point completed")
-    print(f"breakout_4pct_exp_id: {exp_bo_4}")
-    print(f"breakout_2pct_exp_id: {exp_bo_2}")
-    print(f"breakdown_4pct_exp_id: {exp_bd_4}")
-    print(f"breakdown_2pct_exp_id: {exp_bd_2}")
+        print()
+        print("Full operating point completed")
+        print(f"breakout_4pct_exp_id: {exp_bo_4}")
+        print(f"breakout_2pct_exp_id: {exp_bo_2}")
+        print(f"breakdown_4pct_exp_id: {exp_bd_4}")
+        print(f"breakdown_2pct_exp_id: {exp_bd_2}")
+    except (RuntimeError, ValueError) as exc:
+        raise SystemExit(f"[BACKTEST BLOCKED] {exc}") from exc
 
 
 if __name__ == "__main__":

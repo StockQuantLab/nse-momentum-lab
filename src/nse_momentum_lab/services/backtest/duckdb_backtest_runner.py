@@ -26,14 +26,19 @@ from pathlib import Path
 from typing import TypedDict
 from uuid import uuid4
 
+import duckdb
 import numpy as np
-import pandas as pd
 import polars as pl
 import psycopg
 from tqdm.auto import tqdm
 
 from nse_momentum_lab.config import get_settings
-from nse_momentum_lab.db.market_db import MarketDataDB, get_backtest_db, get_market_db
+from nse_momentum_lab.db.market_db import (
+    BACKTEST_DUCKDB_FILE,
+    MarketDataDB,
+    get_backtest_db,
+    get_market_db,
+)
 from nse_momentum_lab.services.backtest.engine import ExitReason, PositionSide
 from nse_momentum_lab.services.backtest.intraday_execution import (
     IntradayExecutionResult,
@@ -138,11 +143,20 @@ class BacktestParams:
     abnormal_gap_mode: str = "immediate_exit"
     same_day_r_ladder: bool = True
     same_day_r_ladder_start_r: int = 2
+    # Optional short-side override for same-day R-ladder start.
+    # None uses same_day_r_ladder_start_r (default behavior).
+    short_same_day_r_ladder_start_r: int | None = None
     short_post_day3_buffer_pct: float | None = None
     short_trail_activation_pct: float | None = None
     short_time_stop_days: int | None = None
     short_abnormal_profit_pct: float | None = None
     short_max_stop_dist_pct: float | None = None
+    # Optional short-side cap for intraday initial stop distance: cap at N * ATR_20.
+    # None disables the cap (default, preserves existing behavior).
+    short_initial_stop_atr_cap_mult: float | None = None
+    # Optional short-only same-day take-profit threshold.
+    # Example: 0.02 exits same day once price moves +2% in favor.
+    short_same_day_take_profit_pct: float | None = None
     follow_through_threshold: float = 0.0
 
     # FEE (Find and Enter Early) — Stockbee: enter in first N min of NSE open (09:15 IST)
@@ -159,6 +173,47 @@ class BacktestParams:
     # the setup is invalid (e.g. stock crashed then bounced — FEE was still violated).
     max_stop_dist_pct: float = 0.08
     breakout_daily_candidate_budget: int = 30
+    # Breakout ranking C-quality source:
+    # True  -> use breakout-day feat values (current behavior)
+    # False -> prefer T-1 feat values when available (fallbacks to current-day values)
+    breakout_use_current_day_c_quality: bool = True
+    # Parity toggle for threshold_breakout long-side carry semantics.
+    # When enabled, apply filter_h as a hold-quality check after entry admission
+    # (restores weak-close/breakeven-carry behavior used in earlier canonical runs).
+    breakout_legacy_h_carry_rule: bool = False
+    # Daily cap for breakdown (short) candidates. Analogous to breakout_daily_candidate_budget
+    # but for short setups. Default is much tighter (5) because the 2% breakdown universe
+    # is far larger than the 4% breakout universe in down-trending markets.
+    breakdown_daily_candidate_budget: int = 5
+    # Minimum rs_252 for short candidate. Default 0.0 = require rs_252 < 0 (current).
+    # Set to e.g. -0.10 to require stock down >= 10% vs market YTD (tighter quality gate).
+    breakdown_rs_min: float = 0.0
+    # Whether to use the strict 3-of-4 filter_l for breakdown (adds close < ma_65_sma).
+    # Default False = original 2-of-3 (close<ma20, ret5d<0, r2>=0.70).
+    # Set True for 2% BD to require established medium-term downtrend confirmation.
+    breakdown_strict_filter_l: bool = False
+    # Phase 1d: use narrow-only filter_n (remove the 'OR prev_close > prev_open' clause).
+    # Default False = original (narrow OR green T-1). True = narrow T-1 only.
+    breakdown_filter_n_narrow_only: bool = False
+    # Phase 2c: skip gap-down entries where stock already gapped down >= threshold at open.
+    # Avoids chasing a move that already happened overnight.
+    breakdown_skip_gap_down: bool = False
+    # Phase 1b: max allowed prior 4%-down breakdown count in 90d.
+    # -1 = disabled (no filter). 0 = no prior breakdowns allowed. 1 = at most 1 prior breakdown.
+    # Avoids shorting already-exhausted stocks that have broken down repeatedly.
+    breakdown_max_prior_breakdowns: int = -1
+    # Phase 3d: optional market-breadth gate for breakdown.
+    # When set (0.0 to 1.0), require pct(close < ma_20) across the market to be above threshold.
+    # Keep unset (None) to preserve existing behavior.
+    breakdown_breadth_threshold: float | None = None
+    # Optional TI65 gate for short-side trend quality.
+    # "off"     = keep current behavior (no direct TI65 check)
+    # "bearish" = require MA7/MA65_SMA <= 0.95 (with close<MA20 fallback if MA65 unavailable)
+    breakdown_ti65_mode: str = "off"
+    # Phase 3e: require ATR expansion for breakdowns.
+    # If true, require atr_20 > SMA20(atr_20) on the breakdown day.
+    # This filters stale breakdowns where the move has already cooled down.
+    breakdown_require_atr_expansion: bool = False
 
     # Parallel execution: number of worker threads for year-by-year backtest
     # Set to 1 for sequential (default), >1 for parallel (e.g., 4 for 4-way parallel)
@@ -222,6 +277,9 @@ class BacktestParams:
             same_day_r_ladder=self.same_day_r_ladder,
             same_day_r_ladder_start_r=self.same_day_r_ladder_start_r,
             short_post_day3_buffer_pct=resolved_buffer,
+            respect_same_day_exit_metadata=(
+                direction == PositionSide.LONG and self.breakout_legacy_h_carry_rule
+            ),
             follow_through_threshold=self.follow_through_threshold,
         )
 
@@ -238,9 +296,33 @@ class DuckDBBacktestRunner:
         results_db: MarketDataDB | None = None,
     ) -> None:
         self.db = db or get_market_db(read_only=True)
-        self.results_db = results_db or get_backtest_db()
+        if results_db is not None:
+            self.results_db = results_db
+        else:
+            self._assert_no_conflicting_backtest_runtime()
+            try:
+                self.results_db = get_backtest_db()
+            except Exception as exc:  # pragma: no cover - depends on host process state
+                raise RuntimeError(
+                    "Unable to open backtest DuckDB for writes. "
+                    "Stop any running backtest/dashboard process and retry."
+                ) from exc
         self._active_strategy: StrategyDefinition | None = None
         self._progress_writer: BufferedProgressWriter | None = None
+
+    @classmethod
+    def _assert_no_conflicting_backtest_runtime(cls) -> None:
+        """Fail fast when runtime state can lock backtest.duckdb on Windows."""
+        lock_probe = None
+        try:
+            lock_probe = duckdb.connect(str(BACKTEST_DUCKDB_FILE), read_only=False)
+        except Exception as exc:
+            raise RuntimeError(
+                f"backtest.duckdb is not writable (likely locked by another process): {exc}"
+            ) from exc
+        finally:
+            if lock_probe is not None:
+                lock_probe.close()
 
     def _uses_breakout_ranking(self) -> bool:
         strategy = self._active_strategy
@@ -250,6 +332,117 @@ class DuckDBBacktestRunner:
             "indian_2lynch",
             "threshold_breakout",
         }
+
+    def _uses_breakdown_ranking(self) -> bool:
+        strategy = self._active_strategy
+        if strategy is None:
+            return False
+        return strategy.direction == PositionSide.SHORT and strategy.family in {
+            "threshold_breakdown",
+        }
+
+    def _apply_breakdown_selection_ranking(
+        self,
+        df_filtered: pl.DataFrame,
+        params: BacktestParams,
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        """Rank and budget daily breakdown (short) candidates.
+
+        Scoring rationale (short-specific, revised):
+        The original rs_252-magnitude-dominant formula anti-selected in downtrend markets
+        because every stock has negative rs_252 and picking the "most negative" selects the
+        most beaten-up stocks (mean-reversion risk), not fresh breakdowns.
+
+        v2 formula (H-dominant): picking stocks with extreme close near day-low created a
+        different problem — these stocks have wide stops (session_high far from entry) and
+        are often exhaustion moves rather than trend continuation. High DD resulted.
+
+        v3 formula (R²-primary): prioritises orderly downtrend continuation:
+        - R² quality: orderly 65d downtrend = continuation more likely + tighter stops (primary,
+          0-5000 pts). Orderly = small daily variation → range typically narrower → stop closer
+          to entry → smaller loss when wrong.
+        - H quality: close near the day's low = confirms selling pressure (secondary, 0-2000 pts)
+          close_pos_in_range range after filter_h: 0.0-0.30; lower = closer to low = better
+        - C quality: quieter prior day = better consolidation before breakdown (0-1000 pts)
+          vol_dryup_ratio: lower = more volume compression on prior day = better setup
+        - Freshness: fewer prior breakdowns in 90d = not an exhausted short (0-300 pts)
+          uses prior_breakdowns_90d (downside counter), not prior_breakouts_90d (upside)
+        - rs_252 tiebreaker: moderate negative YTD relative return (0-200 pts, capped at -40%)
+          capped to avoid rewarding the most beaten-up stocks
+        - Liquidity tiebreaker: higher value_traded_inr breaks final ties
+        """
+        if df_filtered.is_empty():
+            return df_filtered, df_filtered
+
+        # R² quality: orderly downtrend (PRIMARY, 0-5000) — orderly trend has tighter typical
+        # stops and higher continuation probability
+        r2_score = (pl.col("r2_65").fill_null(0.0).clip(0.0, 1.0) * 5_000.0).alias(
+            "selection_r2_quality"
+        )
+
+        # H quality: close near day low (SECONDARY, 0-2000) — filter_h ensures <= 0.30
+        h_score = (
+            ((0.30 - pl.col("close_pos_in_range").fill_null(0.30).clip(0.0, 0.30)) / 0.30) * 2_000.0
+        ).alias("selection_h_quality")
+
+        # C quality: quiet prior day (0-1000); lower vol_dryup = more compressed = better
+        c_score = (
+            ((1.3 - pl.col("vol_dryup_ratio").fill_null(1.3).clip(0.0, 1.3)) / 1.3) * 1_000.0
+        ).alias("selection_c_strength")
+
+        # Freshness: fewer prior breakdowns (0-300) using downside counter
+        freshness_score = (
+            pl.when(pl.col("prior_breakdowns_90d").fill_null(0) == 0)
+            .then(300)
+            .when(pl.col("prior_breakdowns_90d").fill_null(0) == 1)
+            .then(200)
+            .when(pl.col("prior_breakdowns_90d").fill_null(0) == 2)
+            .then(100)
+            .otherwise(0)
+        ).alias("selection_freshness")
+
+        # rs_252 tiebreaker: cap at -0.40 to avoid rewarding most-beaten-up stocks (0-200)
+        rs_score = (pl.col("rs_252").fill_null(0.0).clip(-0.40, 0.0).abs() / 0.40 * 200.0).alias(
+            "selection_rs_score"
+        )
+
+        ranked = df_filtered.with_columns(
+            h_score, r2_score, c_score, freshness_score, rs_score
+        ).with_columns(
+            (
+                pl.col("selection_h_quality")
+                + pl.col("selection_r2_quality")
+                + pl.col("selection_c_strength")
+                + pl.col("selection_freshness").cast(pl.Float64)
+                + pl.col("selection_rs_score")
+            )
+            .cast(pl.Float64)
+            .alias("selection_score")
+        )
+
+        ranked = ranked.sort(
+            ["trading_date", "selection_score", "value_traded_inr", "symbol"],
+            descending=[False, True, True, False],
+        ).with_columns(
+            pl.col("symbol").cum_count().over("trading_date").alias("selection_rank"),
+            pl.lit(int(params.breakdown_daily_candidate_budget)).alias("selection_budget"),
+        )
+        # Map to diagnostic component columns (y_score repurposed for freshness/breakdown counter)
+        ranked = ranked.with_columns(
+            pl.col("selection_h_quality").alias("selection_n_score"),
+            pl.col("selection_r2_quality").alias("selection_r2_quality"),
+            pl.col("selection_freshness").alias("selection_y_score"),
+            pl.col("selection_c_strength").alias("selection_c_strength"),
+            pl.col("selection_rs_score").alias("selection_rs_score"),
+        )
+
+        budget = int(params.breakdown_daily_candidate_budget)
+        if budget <= 0:
+            return ranked, ranked.head(0)
+        return (
+            ranked.filter(pl.col("selection_rank") <= budget),
+            ranked.filter(pl.col("selection_rank") > budget),
+        )
 
     @staticmethod
     def _resolve_short_post_day3_buffer_pct(
@@ -332,6 +525,19 @@ class DuckDBBacktestRunner:
         ):
             return params.short_abnormal_profit_pct
         return params.abnormal_profit_pct
+
+    @staticmethod
+    def _resolve_same_day_r_ladder_start_r(
+        params: BacktestParams,
+        strategy: StrategyDefinition | None = None,
+    ) -> int:
+        if (
+            params.short_same_day_r_ladder_start_r is not None
+            and strategy is not None
+            and strategy.direction == PositionSide.SHORT
+        ):
+            return int(params.short_same_day_r_ladder_start_r)
+        return int(params.same_day_r_ladder_start_r)
 
     @staticmethod
     def _build_backtest_logic_fingerprint() -> str:
@@ -442,11 +648,39 @@ class DuckDBBacktestRunner:
         if df_filtered.is_empty():
             return df_filtered, df_filtered
 
+        use_current_day_c = bool(params.breakout_use_current_day_c_quality)
+
+        # Ensure optional T-1 columns exist for the toggle path.
+        optional_prev_cols = (
+            "prev_vol_dryup_ratio",
+            "prev_atr_compress_ratio",
+            "prev_range_percentile",
+        )
+        for col in optional_prev_cols:
+            if col not in df_filtered.columns:
+                df_filtered = df_filtered.with_columns(pl.lit(None, dtype=pl.Float64).alias(col))
+
+        if use_current_day_c:
+            c_vol_expr = pl.col("vol_dryup_ratio").fill_null(99.0)
+            c_atr_expr = pl.col("atr_compress_ratio").fill_null(99.0)
+            c_rng_expr = pl.col("range_percentile").fill_null(99.0)
+        else:
+            # Prefer T-1 C-quality if present, fallback to breakout-day values.
+            c_vol_expr = pl.coalesce(
+                [pl.col("prev_vol_dryup_ratio"), pl.col("vol_dryup_ratio"), pl.lit(99.0)]
+            )
+            c_atr_expr = pl.coalesce(
+                [pl.col("prev_atr_compress_ratio"), pl.col("atr_compress_ratio"), pl.lit(99.0)]
+            )
+            c_rng_expr = pl.coalesce(
+                [pl.col("prev_range_percentile"), pl.col("range_percentile"), pl.lit(99.0)]
+            )
+
         ranked = df_filtered.with_columns(
             (
-                (pl.col("prev_vol_dryup_ratio").fill_null(99.0) <= 1.0).cast(pl.Int64)
-                + (pl.col("prev_atr_compress_ratio").fill_null(99.0) <= 1.10).cast(pl.Int64)
-                + (pl.col("prev_range_percentile").fill_null(99.0) <= 0.60).cast(pl.Int64)
+                (c_vol_expr <= 1.0).cast(pl.Int64)
+                + (c_atr_expr <= 1.10).cast(pl.Int64)
+                + (c_rng_expr <= 0.60).cast(pl.Int64)
             ).alias("selection_c_strength"),
             (
                 pl.when(pl.col("prior_breakouts_30d").fill_null(0) <= 0)
@@ -1156,11 +1390,21 @@ class DuckDBBacktestRunner:
         )
 
         # Execute with parameterized values.
-        df = self.db.con.execute(query, params_tuple).fetchdf()
-        if df.empty:
-            return empty_stats, [], []
+        query_result = self.db.con.execute(query, params_tuple)
+        try:
+            df_pl = query_result.pl()
+        except (
+            Exception
+        ) as exc:  # pragma: no cover - compatibility fallback for older duckdb builds
+            logger.debug(
+                "DuckDB .pl() failed for strategy candidate query (%s); falling back to Arrow",
+                exc,
+            )
+            df_pl = pl.from_arrow(query_result.arrow())
 
-        df_pl = pl.from_pandas(df)
+        if df_pl.is_empty():
+            return empty_stats, [], []
+        total_signals = df_pl.height
 
         # Use strategy-specific entry filter columns if defined, else fall back to
         # generic filter_columns / 2LYNCH defaults. Carry-quality filters (e.g. H)
@@ -1171,6 +1415,12 @@ class DuckDBBacktestRunner:
             or [f.value for f in ALL_FILTERS]
         )
         hold_quality_cols = self._active_strategy.hold_quality_filter_columns or []
+        if (
+            not hold_quality_cols
+            and self._active_strategy.family == "threshold_breakout"
+            and bool(getattr(params, "breakout_legacy_h_carry_rule", False))
+        ):
+            hold_quality_cols = ["filter_h"]
         for col in active_filter_cols:
             if col in df_pl.columns:
                 df_pl = df_pl.with_columns(pl.col(col).fill_null(False))
@@ -1196,11 +1446,15 @@ class DuckDBBacktestRunner:
         df_filtered = df_pl.filter(pl.col("filters_passed") >= effective_min_filters)
 
         if df_filtered.height == 0:
-            return {**empty_stats, "signals": len(df)}, [], []
+            return empty_stats, [], []
 
         ranking_rejected = pl.DataFrame()
         if self._uses_breakout_ranking():
             df_filtered, ranking_rejected = self._apply_breakout_selection_ranking(
+                df_filtered, params
+            )
+        elif self._uses_breakdown_ranking():
+            df_filtered, ranking_rejected = self._apply_breakdown_selection_ranking(
                 df_filtered, params
             )
         else:
@@ -1336,7 +1590,15 @@ class DuckDBBacktestRunner:
                 is_short=is_short,
                 orh_window_minutes=orh_window,
                 same_day_r_ladder=params.same_day_r_ladder,
-                same_day_r_ladder_start_r=params.same_day_r_ladder_start_r,
+                same_day_r_ladder_start_r=self._resolve_same_day_r_ladder_start_r(
+                    params, self._active_strategy
+                ),
+                short_initial_stop_atr_cap_mult=(
+                    params.short_initial_stop_atr_cap_mult if is_short else None
+                ),
+                short_same_day_take_profit_pct=(
+                    params.short_same_day_take_profit_pct if is_short else None
+                ),
                 heartbeat_cb=maybe_heartbeat,
             )
 
@@ -1648,7 +1910,7 @@ class DuckDBBacktestRunner:
         if not trades_out:
             signals_after_filters = len(df_filtered) + len(ranking_rejected)
             execution_summary = {
-                "signals_total": len(df),
+                "signals_total": total_signals,
                 "signals_filtered": signals_after_filters,
                 "signals_after_rank_budget": len(df_filtered),
                 "queued_for_execution": len(vbt_signals),
@@ -1674,7 +1936,7 @@ class DuckDBBacktestRunner:
             return (
                 {
                     **empty_stats,
-                    "signals": len(df),
+                    "signals": signals_after_filters,
                     "filtered_signals": signals_after_filters,
                     "skipped_intraday_entry": skipped_intraday_entry,
                     "execution_diagnostics": execution_summary,
@@ -1724,7 +1986,7 @@ class DuckDBBacktestRunner:
             "exit_reasons": exit_reasons,
             "skipped_intraday_entry": skipped_intraday_entry,
             "execution_diagnostics": {
-                "signals_total": len(df),
+                "signals_total": total_signals,
                 "signals_filtered": len(df_filtered) + len(ranking_rejected),
                 "signals_after_rank_budget": len(df_filtered),
                 "queued_for_execution": len(vbt_signals),
@@ -1918,6 +2180,9 @@ class DuckDBBacktestRunner:
         orh_window_minutes: int = 0,
         same_day_r_ladder: bool = False,
         same_day_r_ladder_start_r: int = 2,
+        short_initial_stop_atr: float | None = None,
+        short_initial_stop_atr_cap_mult: float | None = None,
+        short_same_day_take_profit_pct: float | None = None,
     ) -> IntradayEntry | None:
         result: IntradayExecutionResult | None = resolve_intraday_execution_from_5min(
             candles,
@@ -1927,6 +2192,9 @@ class DuckDBBacktestRunner:
             orh_window_minutes=orh_window_minutes,
             same_day_r_ladder=same_day_r_ladder,
             same_day_r_ladder_start_r=same_day_r_ladder_start_r,
+            short_initial_stop_atr=short_initial_stop_atr,
+            short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
+            short_same_day_take_profit_pct=short_same_day_take_profit_pct,
         )
         if result is None:
             return None
@@ -1955,6 +2223,8 @@ class DuckDBBacktestRunner:
         orh_window_minutes: int = 0,
         same_day_r_ladder: bool = False,
         same_day_r_ladder_start_r: int = 2,
+        short_initial_stop_atr_cap_mult: float | None = None,
+        short_same_day_take_profit_pct: float | None = None,
         heartbeat_cb: Callable[[str], None] | None = None,
     ) -> dict[tuple[str, date], IntradayEntry]:
         """Resolve intraday entries for all signal days with one 5-min batch query.
@@ -1968,7 +2238,7 @@ class DuckDBBacktestRunner:
             breakout_price stored as prev_close (sanity-check reference only).
         """
         targets = (
-            df_filtered.select(["symbol", "trading_date", "prev_close"])
+            df_filtered.select(["symbol", "trading_date", "prev_close", "atr_20"])
             .drop_nulls(["symbol", "trading_date", "prev_close"])
             .unique(subset=["symbol", "trading_date"], keep="first", maintain_order=True)
         )
@@ -1976,7 +2246,8 @@ class DuckDBBacktestRunner:
             return {}
 
         breakout_price_by_key: dict[tuple[str, date], float] = {}
-        for symbol_raw, trading_date_raw, prev_close_raw in targets.iter_rows():
+        short_initial_stop_atr_by_key: dict[tuple[str, date], float] = {}
+        for symbol_raw, trading_date_raw, prev_close_raw, atr_20_raw in targets.iter_rows():
             if trading_date_raw is None or prev_close_raw is None:
                 continue
             if isinstance(trading_date_raw, datetime):
@@ -2000,6 +2271,10 @@ class DuckDBBacktestRunner:
                 # Threshold mode: SHORT trigger below, LONG trigger above prev_close
                 multiplier = (1 - breakout_threshold) if is_short else (1 + breakout_threshold)
                 breakout_price_by_key[(symbol, trading_day)] = prev_close * multiplier
+            if is_short and short_initial_stop_atr_cap_mult is not None and atr_20_raw is not None:
+                atr_20 = float(atr_20_raw)
+                if atr_20 > 0:
+                    short_initial_stop_atr_by_key[(symbol, trading_day)] = atr_20
         if not breakout_price_by_key:
             return {}
 
@@ -2069,6 +2344,11 @@ class DuckDBBacktestRunner:
                     orh_window_minutes=orh_window_minutes,
                     same_day_r_ladder=same_day_r_ladder,
                     same_day_r_ladder_start_r=same_day_r_ladder_start_r,
+                    short_initial_stop_atr=short_initial_stop_atr_by_key.get(
+                        (symbol, trading_day_from_group)
+                    ),
+                    short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
+                    short_same_day_take_profit_pct=short_same_day_take_profit_pct,
                 )
                 if intraday_entry is not None:
                     resolved_entries[(symbol, trading_day_from_group)] = intraday_entry
@@ -2148,33 +2428,36 @@ class DuckDBBacktestRunner:
         self.results_db.refresh_backtest_read_snapshot()
 
     @staticmethod
-    def _to_trades_df(all_trades: list[dict]) -> pd.DataFrame:
+    def _to_trades_df(all_trades: list[dict]) -> pl.DataFrame:
         if not all_trades:
-            return pd.DataFrame(
-                columns=[
-                    "year",
-                    "entry_date",
-                    "exit_date",
-                    "symbol",
-                    "entry_price",
-                    "exit_price",
-                    "pnl_pct",
-                    "r_multiple",
-                    "exit_reason",
-                    "holding_days",
-                    "gap_pct",
-                    "filters_passed",
-                ]
+            return pl.DataFrame(
+                schema={
+                    "year": pl.Int64,
+                    "entry_date": pl.Date,
+                    "exit_date": pl.Date,
+                    "symbol": pl.Utf8,
+                    "entry_price": pl.Float64,
+                    "exit_price": pl.Float64,
+                    "pnl_pct": pl.Float64,
+                    "r_multiple": pl.Float64,
+                    "exit_reason": pl.Utf8,
+                    "holding_days": pl.Float64,
+                    "gap_pct": pl.Float64,
+                    "filters_passed": pl.Int64,
+                }
             )
-        trades_df = pd.DataFrame(all_trades)
+        trades_df = pl.DataFrame(all_trades)
+        casts: list[pl.Expr] = []
         if "entry_date" in trades_df.columns:
-            trades_df["entry_date"] = pd.to_datetime(trades_df["entry_date"], errors="coerce")
+            casts.append(pl.col("entry_date").cast(pl.Date, strict=False))
         if "exit_date" in trades_df.columns:
-            trades_df["exit_date"] = pd.to_datetime(trades_df["exit_date"], errors="coerce")
-        return trades_df.sort_values(["entry_date", "symbol"], na_position="last")
+            casts.append(pl.col("exit_date").cast(pl.Date, strict=False))
+        if casts:
+            trades_df = trades_df.with_columns(casts)
+        return trades_df.sort(["entry_date", "symbol"], nulls_last=True)
 
     @staticmethod
-    def _to_yearly_df(yearly_results: dict[int, dict]) -> pd.DataFrame:
+    def _to_yearly_df(yearly_results: dict[int, dict]) -> pl.DataFrame:
         rows: list[dict[str, float | int]] = []
         for year in sorted(yearly_results):
             stats = yearly_results[year]
@@ -2193,30 +2476,33 @@ class DuckDBBacktestRunner:
                     "avg_holding_days": float(stats.get("avg_holding_days", 0.0)),
                 }
             )
-        return pd.DataFrame(rows)
+        return pl.DataFrame(rows)
 
     @staticmethod
-    def _to_equity_df(trades_df: pd.DataFrame) -> pd.DataFrame:
-        if trades_df.empty or "pnl_pct" not in trades_df.columns:
-            return pd.DataFrame(
-                columns=[
-                    "entry_date",
-                    "symbol",
-                    "pnl_pct",
-                    "cumulative_return_pct",
-                    "drawdown_pct",
-                ]
+    def _to_equity_df(trades_df: pl.DataFrame) -> pl.DataFrame:
+        if trades_df.is_empty() or "pnl_pct" not in trades_df.columns:
+            return pl.DataFrame(
+                schema={
+                    "entry_date": pl.Date,
+                    "symbol": pl.Utf8,
+                    "pnl_pct": pl.Float64,
+                    "cumulative_return_pct": pl.Float64,
+                    "drawdown_pct": pl.Float64,
+                }
             )
 
-        equity = trades_df.copy()
-        equity["pnl_pct"] = pd.to_numeric(equity["pnl_pct"], errors="coerce").fillna(0.0)
-        equity = equity.sort_values("entry_date", na_position="last")
-        equity["cumulative_return_pct"] = equity["pnl_pct"].cumsum()
-        equity["running_peak_pct"] = equity["cumulative_return_pct"].cummax()
-        equity["drawdown_pct"] = equity["cumulative_return_pct"] - equity["running_peak_pct"]
-        return equity[
+        equity = (
+            trades_df.sort("entry_date", nulls_last=True)
+            .with_columns(pl.col("pnl_pct").cast(pl.Float64, strict=False).fill_null(0.0))
+            .with_columns(pl.col("pnl_pct").cum_sum().alias("cumulative_return_pct"))
+            .with_columns(pl.col("cumulative_return_pct").cum_max().alias("running_peak_pct"))
+            .with_columns(
+                (pl.col("cumulative_return_pct") - pl.col("running_peak_pct")).alias("drawdown_pct")
+            )
+        )
+        return equity.select(
             ["entry_date", "symbol", "pnl_pct", "cumulative_return_pct", "drawdown_pct"]
-        ].copy()
+        )
 
     def _persist_postgres_lineage(
         self,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, time
 
 import duckdb
 import polars as pl
@@ -12,6 +12,7 @@ from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
     BacktestParams,
     DuckDBBacktestRunner,
 )
+from nse_momentum_lab.services.backtest.strategy_registry import resolve_strategy
 
 
 def _make_in_memory_market_db() -> MarketDataDB:
@@ -41,6 +42,20 @@ def test_experiment_id_depends_on_dataset_hash() -> None:
     exp1 = DuckDBBacktestRunner.build_experiment_id(params_hash, "dataset_a")
     exp2 = DuckDBBacktestRunner.build_experiment_id(params_hash, "dataset_b")
     assert exp1 != exp2
+
+
+def test_resolve_same_day_r_ladder_start_r_uses_default_for_long() -> None:
+    params = BacktestParams(same_day_r_ladder_start_r=2, short_same_day_r_ladder_start_r=1)
+    strategy = resolve_strategy("thresholdbreakout")
+    assert strategy.direction.value == "LONG"
+    assert DuckDBBacktestRunner._resolve_same_day_r_ladder_start_r(params, strategy) == 2
+
+
+def test_resolve_same_day_r_ladder_start_r_uses_short_override() -> None:
+    params = BacktestParams(same_day_r_ladder_start_r=2, short_same_day_r_ladder_start_r=1)
+    strategy = resolve_strategy("thresholdbreakdown")
+    assert strategy.direction.value == "SHORT"
+    assert DuckDBBacktestRunner._resolve_same_day_r_ladder_start_r(params, strategy) == 1
 
 
 def test_symbol_id_map_is_collision_free_and_stable() -> None:
@@ -86,6 +101,71 @@ def test_resolve_intraday_entry_from_5min_returns_none_when_no_breakout() -> Non
     )
     result = DuckDBBacktestRunner._resolve_intraday_entry_from_5min(candles, breakout_price=103.0)
     assert result is None
+
+
+def test_resolve_intraday_entry_from_5min_short_applies_atr_stop_cap() -> None:
+    candles = pl.DataFrame(
+        {
+            "candle_time": [
+                "2024-01-02 09:15:00",
+                "2024-01-02 09:20:00",
+            ],
+            "open": [105.0, 100.0],
+            "high": [110.0, 101.0],
+            "low": [104.0, 97.0],
+            "close": [104.5, 98.5],
+            "volume": [1000, 900],
+        }
+    )
+    uncapped = DuckDBBacktestRunner._resolve_intraday_entry_from_5min(
+        candles, breakout_price=98.0, is_short=True
+    )
+    capped = DuckDBBacktestRunner._resolve_intraday_entry_from_5min(
+        candles,
+        breakout_price=98.0,
+        is_short=True,
+        short_initial_stop_atr=4.0,
+        short_initial_stop_atr_cap_mult=1.5,
+    )
+
+    assert uncapped is not None
+    assert capped is not None
+    assert float(uncapped["entry_price"]) == 98.0
+    assert float(uncapped["initial_stop"]) == 110.0
+    assert float(capped["initial_stop"]) == 104.0
+
+
+def test_resolve_intraday_entry_from_5min_short_same_day_take_profit() -> None:
+    candles = pl.DataFrame(
+        {
+            "trading_date": [date(2024, 1, 2), date(2024, 1, 2)],
+            "candle_time": [time(9, 15), time(9, 20)],
+            "open": [100.0, 99.5],
+            "high": [104.0, 101.0],
+            "low": [99.0, 97.0],
+            "close": [100.0, 98.0],
+            "volume": [1000, 900],
+        }
+    )
+
+    no_tp = DuckDBBacktestRunner._resolve_intraday_entry_from_5min(
+        candles,
+        breakout_price=100.0,
+        is_short=True,
+    )
+    with_tp = DuckDBBacktestRunner._resolve_intraday_entry_from_5min(
+        candles,
+        breakout_price=100.0,
+        is_short=True,
+        short_same_day_take_profit_pct=0.02,
+    )
+
+    assert no_tp is not None
+    assert with_tp is not None
+    assert bool(no_tp["same_day_stop_hit"]) is False
+    assert bool(with_tp["same_day_stop_hit"]) is True
+    assert float(with_tp["same_day_exit_price"]) == 98.0
+    assert with_tp["same_day_exit_reason"] == "ABNORMAL_PROFIT"
 
 
 def test_market_db_persists_trade_filter_count() -> None:
@@ -262,3 +342,15 @@ def test_validate_required_lineage_dependencies_raises_when_minio_unavailable(
 
     with pytest.raises(RuntimeError, match="MinIO artifacts store is unreachable"):
         DuckDBBacktestRunner._validate_required_lineage_dependencies()
+
+
+def test_backtest_runtime_guard_blocks_when_backtest_db_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise_locked(*_args, **_kwargs):
+        raise RuntimeError("used by another process")
+
+    monkeypatch.setattr(runner_module.duckdb, "connect", _raise_locked)
+
+    with pytest.raises(RuntimeError, match=r"backtest\.duckdb is not writable"):
+        DuckDBBacktestRunner._assert_no_conflicting_backtest_runtime()

@@ -4,6 +4,7 @@ __pycache__/
 *.pyd
 .venv/
 .pytest_cache/
+.pytest-tmp/
 .ruff_cache/
 .mypy_cache/
 *.egg-info/
@@ -42,6 +43,10 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+# Local agent metadata
+.codex/
+.claude/
 
 # Doppler secrets (local only, never commit)
 doppler.json

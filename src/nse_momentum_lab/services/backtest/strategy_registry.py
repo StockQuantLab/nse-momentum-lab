@@ -39,6 +39,15 @@ class StrategyDefinition:
     strategy_label: Callable[[int], str] | None = None
     build_candidate_query: CandidateQueryBuilder | None = None
     default_params: dict[str, Any] | None = None
+    # Entry admission filters (subset of all filter columns used for counting).
+    # If None, falls back to filter_columns then to ALL_FILTERS.
+    entry_filter_columns: list[str] | None = None
+    # All filter columns emitted by the candidate query (superseded by entry_filter_columns).
+    filter_columns: list[str] | None = None
+    # Filters evaluated *after* entry admission (hold/carry quality checks).
+    hold_quality_filter_columns: list[str] | None = None
+    # Override params.min_filters for this strategy. None → use params value.
+    min_filters_override: int | None = None
 
     def label_for_year(self, year: int) -> str:
         if self.strategy_label:
@@ -63,6 +72,7 @@ def _build_2lynch_candidate_query(
         with_lag AS (
             SELECT
                 symbol, date AS trading_date, open, high, low, close, volume,
+                LAG(date) OVER (PARTITION BY symbol ORDER BY date) AS prev_trading_date,
                 LAG(close) OVER (PARTITION BY symbol ORDER BY date) AS prev_close,
                 LAG(high) OVER (PARTITION BY symbol ORDER BY date) AS prev_high,
                 LAG(low) OVER (PARTITION BY symbol ORDER BY date) AS prev_low,
@@ -92,17 +102,23 @@ def _build_2lynch_candidate_query(
                 f.close_pos_in_range, f.ma_20, f.ret_5d, f.atr_20,
                 f.vol_dryup_ratio, f.atr_compress_ratio, f.range_percentile,
                 f.prior_breakouts_30d, f.prior_breakouts_90d, f.r2_65,
-                f.ma_7, f.ma_65_sma
+                f.ma_7, f.ma_65_sma,
+                f_prev.vol_dryup_ratio AS prev_vol_dryup_ratio,
+                f_prev.atr_compress_ratio AS prev_atr_compress_ratio,
+                f_prev.range_percentile AS prev_range_percentile
             FROM breakout_days g
             LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.trading_date
+            LEFT JOIN feat_daily f_prev
+              ON g.symbol = f_prev.symbol AND g.prev_trading_date = f_prev.trading_date
         )
         SELECT
-            symbol, trading_date, open, high, low, close, prev_close, prev_low, gap_pct,
+            symbol, trading_date, open, high, low, close, prev_close, prev_high, prev_low, prev_open, gap_pct,
             value_traded_inr, close_pos_in_range,
             (close > ma_20) AS above_ma20,
             (ret_5d > 0) AS positive_momentum,
-            atr_20, vol_dryup_ratio, atr_compress_ratio, range_percentile,
-            prior_breakouts_90d,
+            atr_20, vol_dryup_ratio, atr_compress_ratio, range_percentile, r2_65,
+            prev_vol_dryup_ratio, prev_atr_compress_ratio, prev_range_percentile,
+            prior_breakouts_30d, prior_breakouts_90d,
             (close_pos_in_range >= 0.70) AS filter_h,
             ((prev_high - prev_low) < (atr_20 * 0.5) OR prev_close < prev_open) AS filter_n,
             (COALESCE(prior_breakouts_30d, 0) <= 2) AS filter_y,

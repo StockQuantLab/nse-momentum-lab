@@ -4,7 +4,7 @@ import logging
 import traceback
 import warnings
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, time, timedelta
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,8 @@ class Trade:
     mae_r: float | None = None
     exit_reason: ExitReason | None = None
     exit_rule_version: str = "v1"
+    entry_time: time | None = None
+    exit_time: time | None = None
 
 
 @dataclass
@@ -90,6 +92,15 @@ class VectorBTConfig:
     # Portfolio risk limits
     max_positions: int = 10
     max_drawdown_pct: float = 0.15
+
+    # Intraday / same-day execution params (passed through from BacktestParams)
+    abnormal_gap_mode: str = "immediate_exit"
+    same_day_r_ladder: bool = True
+    same_day_r_ladder_start_r: int = 2
+    short_post_day3_buffer_pct: float = 0.0
+    # Compatibility toggle: honor runner-provided same-day exit metadata.
+    # Kept off by default to preserve current behavior unless explicitly requested.
+    respect_same_day_exit_metadata: bool = False
 
 
 @dataclass
@@ -338,6 +349,16 @@ class VectorBTEngine:
             for sdate, sid, _sym, _init_stop, meta in signals
         }
 
+        def _to_exit_reason(raw_value: object, fallback: ExitReason) -> ExitReason:
+            if raw_value is None:
+                return fallback
+            if isinstance(raw_value, ExitReason):
+                return raw_value
+            try:
+                return ExitReason(str(raw_value))
+            except ValueError:
+                return fallback
+
         exit_reason_map: dict[tuple[int, date], ExitReason] = {}
         initial_stop_map: dict[tuple[int, date], float] = {}
 
@@ -376,10 +397,33 @@ class VectorBTEngine:
                 order_price.iloc[entry_idx, col_idx] = entry_price
                 initial_stop_map[(int(symbol_id), entry_date)] = float(initial_stop)
 
+                if self.config.respect_same_day_exit_metadata:
+                    same_day_exit_reason_raw = signal_meta.get("same_day_exit_reason")
+                    same_day_exit_price = signal_meta.get("same_day_exit_price")
+                    if same_day_exit_reason_raw is not None:
+                        exits.iloc[entry_idx, col_idx] = True
+                        order_price.iloc[entry_idx, col_idx] = float(
+                            same_day_exit_price if same_day_exit_price is not None else initial_stop
+                        )
+                        exit_reason_map[(int(symbol_id), entry_date)] = _to_exit_reason(
+                            same_day_exit_reason_raw,
+                            ExitReason.STOP_INITIAL,
+                        )
+                        continue
+
                 if bool(signal_meta.get("same_day_stop_hit", False)):
                     exits.iloc[entry_idx, col_idx] = True
-                    order_price.iloc[entry_idx, col_idx] = float(initial_stop)
-                    exit_reason_map[(int(symbol_id), entry_date)] = ExitReason.STOP_INITIAL
+                    same_day_exit_price = signal_meta.get("same_day_exit_price")
+                    order_price.iloc[entry_idx, col_idx] = float(
+                        same_day_exit_price if same_day_exit_price is not None else initial_stop
+                    )
+                    if self.config.respect_same_day_exit_metadata:
+                        exit_reason_map[(int(symbol_id), entry_date)] = _to_exit_reason(
+                            signal_meta.get("same_day_exit_reason"),
+                            ExitReason.STOP_INITIAL,
+                        )
+                    else:
+                        exit_reason_map[(int(symbol_id), entry_date)] = ExitReason.STOP_INITIAL
                     continue
 
                 if position_is_short:
@@ -400,6 +444,15 @@ class VectorBTEngine:
                 else:
                     max_high = float(entry_price)
                 stop_level = float(initial_stop)
+                if self.config.respect_same_day_exit_metadata:
+                    carry_stop = signal_meta.get("carry_stop_next_session")
+                    if carry_stop is not None:
+                        carry_stop = float(carry_stop)
+                        stop_level = (
+                            min(stop_level, carry_stop)
+                            if position_is_short
+                            else max(stop_level, carry_stop)
+                        )
                 at_breakeven = False
                 trail_active = False
                 post_day3_stop_active = False

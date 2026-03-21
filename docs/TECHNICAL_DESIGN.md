@@ -195,7 +195,7 @@ Built by: `src/nse_momentum_lab/features/daily_core.py` → `build_feat_daily_vi
 - **100-1000x faster** than PostgreSQL for analytical queries (aggregations, window functions)
 - **Parquet columnar storage** enables reading only needed columns
 - **Vectorized execution** for time-series operations
-- **Zero-copy integration** with pandas, polars, arrow
+- **Zero-copy integration** with Polars and Arrow-native tabular workflows
 
 ### 3.4 PostgreSQL Indexes
 
@@ -661,7 +661,7 @@ Use `async` for I/O-bound work end-to-end:
 - MinIO/S3: async client (or isolate sync S3 calls behind a small threadpool wrapper)
 
 Notes:
-- Numeric computation (pandas/vectorbt) is typically CPU-bound and can remain synchronous; keep the boundary explicit.
+- Numeric computation in the backtest engine is typically CPU-bound and can remain synchronous; keep the boundary explicit.
 - If a service mixes heavy CPU work and async I/O, isolate CPU work into dedicated functions and avoid blocking the event loop.
 
 ### 12.5 AI agents & chatbot

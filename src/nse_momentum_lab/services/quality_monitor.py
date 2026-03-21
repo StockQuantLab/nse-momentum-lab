@@ -367,6 +367,7 @@ class DataQualityMonitor:
             for alert in report.alerts:
                 job = JobRun(
                     job_name=f"quality_{alert.alert_type}",
+                    job_kind="QUALITY_ALERT",
                     asof_date=self.check_date,
                     status="FAILED" if alert.severity == "CRITICAL" else "RUNNING",
                     metrics_json={
@@ -376,7 +377,7 @@ class DataQualityMonitor:
                         "affected_count": alert.count,
                         "symbols": alert.affected_symbols,
                     },
-                    error_json=alert.metadata if alert.severity == "CRITICAL" else None,
+                    error_json=alert.metadata if alert.severity == "CRITICAL" else {},
                 )
                 session.add(job)
 

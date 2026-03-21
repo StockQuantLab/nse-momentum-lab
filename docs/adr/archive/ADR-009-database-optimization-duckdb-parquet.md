@@ -94,7 +94,7 @@ DuckDB + Parquet (Analytics):
 | **Strategy Type** | Daily gap-up breakout | Intraday CPR levels |
 | **Time Granularity** | Daily (EOD) + 5-min available | 5-min candles |
 | **Feature Complexity** | 20+ features per day | CPR, ATR, volume profile |
-| **Backtest Engine** | VectorBT (Pandas) | Custom Polars engine |
+| **Backtest Engine** | VectorBT-based engine | Custom Polars engine |
 | **Universe Size** | ~1000+ symbols | ~500 symbols (filtering) |
 | **History Length** | 10+ years | 10 years |
 | **Project State** | **Greenfield** (no production data) | Production |

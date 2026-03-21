@@ -6,7 +6,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from nse_momentum_lab.db.market_db import get_market_db
+from nse_momentum_lab.db.market_db import get_backtest_db
 from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
     BacktestParams,
     DuckDBBacktestRunner,
@@ -77,12 +77,66 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional NDJSON file to append run progress heartbeats",
     )
+    parser.add_argument(
+        "--breakout-c-quality-source",
+        type=str,
+        default="current",
+        choices=["current", "prev"],
+        help="Breakout ranking C-quality source: current breakout-day feat values or prior-day feat values",
+    )
+    parser.add_argument(
+        "--breakout-legacy-h-carry-rule",
+        action="store_true",
+        help="Enable legacy thresholdbreakout H hold-quality carry behavior for parity testing.",
+    )
+    parser.add_argument(
+        "--breakdown-ti65-mode",
+        type=str,
+        default="off",
+        choices=["off", "bearish"],
+        help="Optional short-side TI65 gate for thresholdbreakdown: off (default) or bearish (ma_7/ma_65_sma <= 0.95)",
+    )
+    parser.add_argument(
+        "--breakdown-require-atr-expansion",
+        action="store_true",
+        help=(
+            "Require breakdown-day ATR20 > SMA20(ATR20) for thresholdbreakdown runs. "
+            "off by default."
+        ),
+    )
+    parser.add_argument(
+        "--short-initial-stop-atr-cap-mult",
+        type=float,
+        default=None,
+        help=(
+            "Optional short-side intraday initial-stop cap in ATR_20 multiples "
+            "(e.g. 1.5). None keeps uncapped session-high stop."
+        ),
+    )
+    parser.add_argument(
+        "--short-same-day-r-ladder-start-r",
+        type=int,
+        default=None,
+        help=(
+            "Optional short-side override for same-day R-ladder start "
+            "(e.g. 1). None uses the strategy default ladder start."
+        ),
+    )
+    parser.add_argument(
+        "--short-same-day-take-profit-pct",
+        type=float,
+        default=None,
+        help=(
+            "Optional short-side same-day take-profit threshold "
+            "(e.g. 0.02 for +2%% favorable move)."
+        ),
+    )
     return parser
 
 
 def _print_summary(exp_id: str) -> None:
     """Query DuckDB and print a compact backtest summary to stdout."""
-    db = get_market_db()
+    db = get_backtest_db(read_only=True)
     row = db.con.execute(
         """SELECT strategy_name, start_year, end_year, total_trades, win_rate_pct,
                   annualized_return_pct, max_drawdown_pct, total_return_pct, profit_factor
@@ -147,11 +201,18 @@ def main() -> None:
         time_stop_days=args.time_stop_days,
         abnormal_profit_pct=args.abnormal_profit_pct,
         abnormal_gap_exit_pct=args.abnormal_gap_exit_pct,
+        breakout_use_current_day_c_quality=(args.breakout_c_quality_source == "current"),
+        breakout_legacy_h_carry_rule=args.breakout_legacy_h_carry_rule,
+        breakdown_ti65_mode=args.breakdown_ti65_mode,
+        breakdown_require_atr_expansion=args.breakdown_require_atr_expansion,
+        short_initial_stop_atr_cap_mult=args.short_initial_stop_atr_cap_mult,
+        short_same_day_r_ladder_start_r=args.short_same_day_r_ladder_start_r,
+        short_same_day_take_profit_pct=args.short_same_day_take_profit_pct,
     )
 
-    runner = DuckDBBacktestRunner()
     progress_file = Path(args.progress_file).expanduser() if args.progress_file else None
     try:
+        runner = DuckDBBacktestRunner()
         exp_id = runner.run(
             params,
             force=args.force,

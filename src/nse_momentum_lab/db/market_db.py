@@ -33,7 +33,8 @@ BACKTEST_DUCKDB_FILE = DATA_DIR / "backtest.duckdb"
 BACKTEST_DASHBOARD_DUCKDB_FILE = DATA_DIR / "backtest_dashboard.duckdb"
 
 # Bump when feat_daily SQL logic changes.
-FEAT_DAILY_QUERY_VERSION = "feat_daily_v2lynch_ti65_2026_03_01"
+FEAT_DAILY_QUERY_VERSION = "feat_daily_v2lynch_ti65_2026_03_14_breakdown"
+MARKET_MONITOR_QUERY_VERSION = "market_monitor_v3_2026_03_20_ma40_t2108"
 
 
 @dataclass(frozen=True)
@@ -331,6 +332,30 @@ class MarketDataDB:
             )
         """)
 
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS bt_execution_diagnostic (
+                exp_id              VARCHAR NOT NULL,
+                year                INTEGER,
+                signal_date         DATE,
+                symbol              VARCHAR,
+                status              VARCHAR,
+                reason              VARCHAR,
+                entry_time          TIME,
+                entry_price         DOUBLE,
+                initial_stop        DOUBLE,
+                filters_json        VARCHAR,
+                hold_quality_passed BOOLEAN,
+                executed_exit_reason VARCHAR,
+                pnl_pct             DOUBLE,
+                selection_score     DOUBLE,
+                selection_rank      INTEGER,
+                selection_components_json VARCHAR
+            )
+        """)
+        self._ensure_column("bt_execution_diagnostic", "selection_score", "DOUBLE")
+        self._ensure_column("bt_execution_diagnostic", "selection_rank", "INTEGER")
+        self._ensure_column("bt_execution_diagnostic", "selection_components_json", "VARCHAR")
+
         # Query acceleration for experiment drill-down views.
         self.con.execute("""
             CREATE INDEX IF NOT EXISTS idx_bt_trade_exp_entry
@@ -602,6 +627,48 @@ class MarketDataDB:
             ],
         )
 
+    def save_execution_diagnostics(self, exp_id: str, diagnostics: list[dict]) -> None:
+        """Bulk-insert execution diagnostic records for an experiment."""
+        if not diagnostics:
+            return
+        rows = [
+            (
+                exp_id,
+                d.get("year"),
+                d.get("signal_date"),
+                d.get("symbol"),
+                d.get("status"),
+                d.get("reason"),
+                d.get("entry_time"),
+                d.get("entry_price"),
+                d.get("initial_stop"),
+                json.dumps(d.get("filters_json") or {}),
+                bool(d.get("hold_quality_passed", False)),
+                d.get("executed_exit_reason"),
+                d.get("pnl_pct"),
+                float(d.get("selection_score") or 0.0),
+                int(d.get("selection_rank") or 0),
+                json.dumps(d.get("selection_components_json") or {}),
+            )
+            for d in diagnostics
+        ]
+        self.con.execute("BEGIN TRANSACTION")
+        try:
+            self.con.executemany(
+                """INSERT INTO bt_execution_diagnostic
+                   (exp_id, year, signal_date, symbol, status, reason,
+                    entry_time, entry_price, initial_stop, filters_json,
+                    hold_quality_passed, executed_exit_reason, pnl_pct,
+                    selection_score, selection_rank, selection_components_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rows,
+            )
+            self.con.execute("COMMIT")
+        except Exception as e:
+            self.con.execute("ROLLBACK")
+            logger.error("Failed to save execution diagnostics: %s", e)
+            raise
+
     def get_experiment(self, exp_id: str) -> dict | None:
         """Fetch a single experiment record."""
         row = self.con.execute("SELECT * FROM bt_experiment WHERE exp_id = ?", [exp_id]).fetchone()
@@ -614,6 +681,13 @@ class MarketDataDB:
         """Fetch all trades for an experiment as a Polars DataFrame."""
         return self.con.execute(
             "SELECT * FROM bt_trade WHERE exp_id = ? ORDER BY entry_date", [exp_id]
+        ).pl()
+
+    def get_experiment_execution_diagnostics(self, exp_id: str) -> pl.DataFrame:
+        """Fetch execution diagnostics for an experiment as a Polars DataFrame."""
+        return self.con.execute(
+            "SELECT * FROM bt_execution_diagnostic WHERE exp_id = ? ORDER BY signal_date, symbol",
+            [exp_id],
         ).pl()
 
     def get_experiment_yearly_metrics(self, exp_id: str) -> pl.DataFrame:
@@ -690,10 +764,12 @@ class MarketDataDB:
                 logger.info("feat_daily is up-to-date (%d rows).", n)
                 return int(n)
 
-            if n > 0 and state is None:
+            # Fast column migration: if only prior_breakdowns_90d is missing, add it
+            # in a single CTAS pass from feat_daily (no parquet reads required).
+            if n > 0:
                 columns = self.con.execute("DESCRIBE feat_daily").fetchall()
                 col_names = {c[0] for c in columns}
-                required = {
+                base_required = {
                     "r2_65",
                     "atr_compress_ratio",
                     "range_percentile",
@@ -701,7 +777,56 @@ class MarketDataDB:
                     "prior_breakouts_30d",
                     "prior_breakouts_90d",
                 }
-                if required.issubset(col_names):
+                if base_required.issubset(col_names) and "prior_breakdowns_90d" not in col_names:
+                    logger.info(
+                        "feat_daily missing prior_breakdowns_90d — running fast column migration "
+                        "(%d rows, no parquet reads)...",
+                        n,
+                    )
+                    # Transactional migration: keep existing feat_daily intact on any failure.
+                    self.con.execute("BEGIN TRANSACTION")
+                    try:
+                        self.con.execute("DROP TABLE IF EXISTS feat_daily_migration")
+                        self.con.execute("""
+                            CREATE TABLE feat_daily_migration AS
+                            SELECT *,
+                                COALESCE(SUM(CASE WHEN ret_1d <= -0.04 THEN 1 ELSE 0 END) OVER (
+                                    PARTITION BY symbol ORDER BY trading_date
+                                    ROWS BETWEEN 89 PRECEDING AND 1 PRECEDING
+                                ), 0)::INTEGER AS prior_breakdowns_90d
+                            FROM feat_daily
+                        """)
+                        migrated_row = self.con.execute(
+                            "SELECT COUNT(*) FROM feat_daily_migration"
+                        ).fetchone()
+                        migrated_n = int(migrated_row[0]) if migrated_row and migrated_row[0] else 0
+                        if migrated_n != int(n):
+                            raise RuntimeError(
+                                f"feat_daily migration row-count mismatch: expected {n}, got {migrated_n}"
+                            )
+
+                        self.con.execute("DROP TABLE feat_daily")
+                        self.con.execute("ALTER TABLE feat_daily_migration RENAME TO feat_daily")
+                        self.con.execute(
+                            "CREATE INDEX idx_feat_symbol_date ON feat_daily(symbol, trading_date)"
+                        )
+                        self._upsert_materialization_state(
+                            table_name="feat_daily",
+                            dataset_hash=dataset_hash,
+                            query_version=FEAT_DAILY_QUERY_VERSION,
+                            row_count=int(n),
+                        )
+                        self.register_dataset_snapshot(snapshot)
+                        self.con.execute("COMMIT")
+                    except Exception:
+                        self.con.execute("ROLLBACK")
+                        raise
+
+                    logger.info("feat_daily fast migration complete (%d rows).", n)
+                    return int(n)
+
+                # All columns already present — just update state/version
+                if {*base_required, "prior_breakdowns_90d"}.issubset(col_names):
                     self._upsert_materialization_state(
                         table_name="feat_daily",
                         dataset_hash=dataset_hash,
@@ -709,7 +834,7 @@ class MarketDataDB:
                         row_count=int(n),
                     )
                     self.register_dataset_snapshot(snapshot)
-                    logger.info("feat_daily state initialized (%d rows).", n)
+                    logger.info("feat_daily state updated (%d rows).", n)
                     return int(n)
 
         logger.info("Building feat_daily materialized table with 2LYNCH filters...")
@@ -854,7 +979,10 @@ class MarketDataDB:
                     OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 29 PRECEDING AND 1 PRECEDING) AS prior_breakouts_30d,
                     -- Keep 90d for backward compat
                     SUM(CASE WHEN ret_1d >= 0.04 THEN 1 ELSE 0 END)
-                    OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 89 PRECEDING AND 1 PRECEDING) AS prior_breakouts_90d
+                    OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 89 PRECEDING AND 1 PRECEDING) AS prior_breakouts_90d,
+                    -- Count prior 4%+ down days in last 90 days (exhausted short filter)
+                    SUM(CASE WHEN ret_1d <= -0.04 THEN 1 ELSE 0 END)
+                    OVER (PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 89 PRECEDING AND 1 PRECEDING) AS prior_breakdowns_90d
                 FROM lynch_features
             )
             SELECT
@@ -877,7 +1005,8 @@ class MarketDataDB:
                 range_percentile,
                 vol_dryup_ratio,
                 prior_breakouts_30d,
-                prior_breakouts_90d
+                prior_breakouts_90d,
+                prior_breakdowns_90d
             FROM breakouts
         """)
 
@@ -894,6 +1023,7 @@ class MarketDataDB:
             self._build_modular_features(force=force)
         else:
             self.build_feat_daily_table(force=force)
+        self.build_market_monitor_table(force=force)
         logger.info("Done: market.duckdb is ready for backtesting.")
 
     def _build_modular_features(self, force: bool = False) -> None:
@@ -1115,6 +1245,329 @@ class MarketDataDB:
             logger.warning("Unexpected error checking table '%s': %s", table, e)
             return False
 
+    def build_market_monitor_table(self, force: bool = False) -> int:
+        """Materialize the Market Monitor daily breadth table."""
+        if self._read_only:
+            logger.info("Skipping market_monitor_daily build in read-only mode.")
+            return 0
+
+        snapshot = self.get_dataset_snapshot()
+        dataset_hash = str(snapshot["dataset_hash"])
+
+        if not self._table_exists("feat_daily_core"):
+            logger.info("feat_daily_core is missing; building it before market_monitor_daily.")
+            self.build_feat_daily_core(force=force)
+
+        if not force and self._table_exists("market_monitor_daily"):
+            row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
+            n = int(row[0]) if row and row[0] is not None else 0
+            state = self._get_materialization_state("market_monitor_daily")
+            if (
+                n > 0
+                and state is not None
+                and state["dataset_hash"] == dataset_hash
+                and state["query_version"] == MARKET_MONITOR_QUERY_VERSION
+            ):
+                logger.info("market_monitor_daily is up-to-date (%d rows).", n)
+                return n
+
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS market_monitor_daily (
+                trading_date        DATE PRIMARY KEY,
+                universe_size       INTEGER,
+                up_4pct_count       INTEGER,
+                down_4pct_count     INTEGER,
+                up_4pct_pct         DOUBLE,
+                down_4pct_pct       DOUBLE,
+                ratio_5d            DOUBLE,
+                ratio_10d           DOUBLE,
+                pct_above_ma40      DOUBLE,
+                t2108_equivalent_pct DOUBLE,
+                pct_below_ma40      DOUBLE,
+                up_25q_count        INTEGER,
+                down_25q_count      INTEGER,
+                up_25q_pct          DOUBLE,
+                down_25q_pct        DOUBLE,
+                up_25m_count        INTEGER,
+                down_25m_count      INTEGER,
+                up_50m_count        INTEGER,
+                down_50m_count      INTEGER,
+                up_13_34_count      INTEGER,
+                down_13_34_count    INTEGER,
+                pct_above_ma20      DOUBLE,
+                pct_below_ma20      DOUBLE,
+                primary_regime      VARCHAR,
+                tactical_regime     VARCHAR,
+                aggression_score    DOUBLE,
+                posture_label       VARCHAR,
+                alert_flags_json    VARCHAR DEFAULT '[]'
+            )
+        """)
+
+        if not self._table_exists("feat_daily_core"):
+            logger.warning("feat_daily_core is missing; created empty market_monitor_daily table.")
+            row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
+            return int(row[0] or 0) if row else 0
+
+        self.con.execute("DROP TABLE IF EXISTS market_monitor_daily")
+        self.con.execute("""
+            CREATE TABLE market_monitor_daily AS
+            WITH symbol_base AS (
+                SELECT
+                    symbol,
+                    trading_date,
+                    close,
+                    ma_20,
+                    COUNT(close) OVER (
+                        PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 39 PRECEDING AND CURRENT ROW
+                    ) AS ma_40_count,
+                    AVG(close) OVER (
+                        PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 39 PRECEDING AND CURRENT ROW
+                    ) AS ma_40,
+                    atr_20,
+                    vol_20,
+                    dollar_vol_20,
+                    ret_1d,
+                    ret_5d,
+                    atr_compress_ratio,
+                    range_percentile_252 AS range_percentile,
+                    MIN(close) OVER (
+                        PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 64 PRECEDING AND CURRENT ROW
+                    ) AS low_65,
+                    MAX(close) OVER (
+                        PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 64 PRECEDING AND CURRENT ROW
+                    ) AS high_65,
+                    MIN(close) OVER (
+                        PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+                    ) AS low_20,
+                    MAX(close) OVER (
+                        PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 19 PRECEDING AND CURRENT ROW
+                    ) AS high_20,
+                    MIN(close) OVER (
+                        PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 33 PRECEDING AND CURRENT ROW
+                    ) AS low_34,
+                    MAX(close) OVER (
+                        PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 33 PRECEDING AND CURRENT ROW
+                    ) AS high_34
+                FROM feat_daily_core
+            ),
+            eligible AS (
+                SELECT
+                    *,
+                    CASE
+                        WHEN close >= 10
+                         AND dollar_vol_20 >= 3000000
+                         AND ma_40_count = 40
+                         AND ma_20 IS NOT NULL
+                         AND atr_20 IS NOT NULL
+                        THEN TRUE
+                        ELSE FALSE
+                    END AS is_eligible
+                FROM symbol_base
+            ),
+            daily_raw AS (
+                SELECT
+                    trading_date,
+                    COUNT(*) FILTER (WHERE is_eligible) AS universe_size,
+                    COUNT(*) FILTER (WHERE is_eligible AND ret_1d >= 0.04) AS up_4pct_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND ret_1d <= -0.04) AS down_4pct_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close > ma_20) AS pct_above_ma20_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close <= ma_20) AS pct_below_ma20_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close > ma_40) AS pct_above_ma40_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close <= ma_40) AS pct_below_ma40_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close >= 1.25 * low_65) AS up_25q_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close <= 0.75 * high_65) AS down_25q_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close >= 1.25 * low_20) AS up_25m_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close <= 0.75 * high_20) AS down_25m_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close >= 1.50 * low_20) AS up_50m_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close <= 0.50 * high_20) AS down_50m_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close >= 1.13 * low_34) AS up_13_34_count,
+                    COUNT(*) FILTER (WHERE is_eligible AND close <= 0.87 * high_34) AS down_13_34_count
+                FROM eligible
+                GROUP BY trading_date
+            ),
+            daily_windowed AS (
+                SELECT
+                    trading_date,
+                    universe_size,
+                    up_4pct_count,
+                    down_4pct_count,
+                    CASE WHEN universe_size > 0 THEN 100.0 * up_4pct_count / universe_size ELSE NULL END AS up_4pct_pct,
+                    CASE WHEN universe_size > 0 THEN 100.0 * down_4pct_count / universe_size ELSE NULL END AS down_4pct_pct,
+                    CASE
+                        WHEN SUM(down_4pct_count) OVER (
+                            ORDER BY trading_date ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+                        ) > 0
+                        THEN SUM(up_4pct_count) OVER (
+                            ORDER BY trading_date ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+                        )::DOUBLE / NULLIF(
+                            SUM(down_4pct_count) OVER (
+                                ORDER BY trading_date ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+                            ), 0
+                        )
+                        ELSE NULL
+                    END AS ratio_5d,
+                    CASE
+                        WHEN SUM(down_4pct_count) OVER (
+                            ORDER BY trading_date ROWS BETWEEN 9 PRECEDING AND CURRENT ROW
+                        ) > 0
+                        THEN SUM(up_4pct_count) OVER (
+                            ORDER BY trading_date ROWS BETWEEN 9 PRECEDING AND CURRENT ROW
+                        )::DOUBLE / NULLIF(
+                            SUM(down_4pct_count) OVER (
+                                ORDER BY trading_date ROWS BETWEEN 9 PRECEDING AND CURRENT ROW
+                            ), 0
+                        )
+                        ELSE NULL
+                    END AS ratio_10d,
+                    up_25q_count,
+                    down_25q_count,
+                    CASE WHEN universe_size > 0 THEN 100.0 * up_25q_count / universe_size ELSE NULL END AS up_25q_pct,
+                    CASE WHEN universe_size > 0 THEN 100.0 * down_25q_count / universe_size ELSE NULL END AS down_25q_pct,
+                    CASE WHEN universe_size > 0 THEN 100.0 * pct_above_ma40_count / universe_size ELSE NULL END AS pct_above_ma40,
+                    CASE WHEN universe_size > 0 THEN 100.0 * pct_above_ma40_count / universe_size ELSE NULL END AS t2108_equivalent_pct,
+                    CASE WHEN universe_size > 0 THEN 100.0 * pct_below_ma40_count / universe_size ELSE NULL END AS pct_below_ma40,
+                    up_25m_count,
+                    down_25m_count,
+                    up_50m_count,
+                    down_50m_count,
+                    up_13_34_count,
+                    down_13_34_count,
+                    CASE WHEN universe_size > 0 THEN 100.0 * pct_above_ma20_count / universe_size ELSE NULL END AS pct_above_ma20,
+                    CASE WHEN universe_size > 0 THEN 100.0 * pct_below_ma20_count / universe_size ELSE NULL END AS pct_below_ma20
+                FROM daily_raw
+            ),
+            classified AS (
+                SELECT
+                    *,
+                    CASE
+                        WHEN up_25q_count > down_25q_count * 1.1 THEN 'bullish'
+                        WHEN down_25q_count > up_25q_count * 1.1 THEN 'bearish'
+                        ELSE 'transition'
+                    END AS primary_regime,
+                    CASE
+                        WHEN up_25q_count > down_25q_count * 1.1 AND ratio_10d >= 2.0 THEN 'long_favored'
+                        WHEN down_25q_count > up_25q_count * 1.1 AND ratio_10d <= 0.5 THEN 'short_favored'
+                        WHEN down_25q_count > up_25q_count * 1.1 AND ratio_10d > 0.5 THEN 'rebound_watch'
+                        WHEN up_25q_count > down_25q_count * 1.1 AND ratio_10d < 2.0 THEN 'correction_watch'
+                        ELSE 'mixed'
+                    END AS tactical_regime,
+                    CASE
+                        WHEN up_25q_count > down_25q_count * 1.1 AND ratio_10d >= 2.0 THEN 2.0
+                        WHEN down_25q_count > up_25q_count * 1.1 AND ratio_10d <= 0.5 THEN -2.0
+                        WHEN up_25q_count > down_25q_count * 1.1 THEN 1.0
+                        WHEN down_25q_count > up_25q_count * 1.1 THEN -1.0
+                        ELSE 0.0
+                    END AS aggression_score,
+                    CASE
+                        WHEN up_25q_count > down_25q_count * 1.1 AND ratio_10d >= 2.0 THEN 'aggressive'
+                        WHEN down_25q_count > up_25q_count * 1.1 AND ratio_10d <= 0.5 THEN 'aggressive'
+                        WHEN up_25q_count > down_25q_count * 1.1 OR down_25q_count > up_25q_count * 1.1 THEN 'standard'
+                        ELSE 'defensive'
+                    END AS posture_label,
+                    CASE
+                        WHEN up_25q_count > down_25q_count * 1.1 AND ratio_10d >= 2.0 THEN
+                            '["bullish_thrust","long_favored"]'
+                        WHEN down_25q_count > up_25q_count * 1.1 AND ratio_10d <= 0.5 THEN
+                            '["bearish_thrust","short_favored"]'
+                        WHEN up_25q_count > down_25q_count * 1.1 AND ratio_10d < 2.0 THEN
+                            '["bullish_regime","correction_watch"]'
+                        WHEN down_25q_count > up_25q_count * 1.1 AND ratio_10d > 0.5 THEN
+                            '["bearish_regime","rebound_watch"]'
+                        ELSE '["mixed"]'
+                    END AS alert_flags_json
+                FROM daily_windowed
+            )
+            SELECT
+                trading_date,
+                universe_size,
+                up_4pct_count,
+                down_4pct_count,
+                up_4pct_pct,
+                down_4pct_pct,
+                ratio_5d,
+                ratio_10d,
+                pct_above_ma40,
+                t2108_equivalent_pct,
+                pct_below_ma40,
+                up_25q_count,
+                down_25q_count,
+                up_25q_pct,
+                down_25q_pct,
+                up_25m_count,
+                down_25m_count,
+                up_50m_count,
+                down_50m_count,
+                up_13_34_count,
+                down_13_34_count,
+                pct_above_ma20,
+                pct_below_ma20,
+                primary_regime,
+                tactical_regime,
+                aggression_score,
+                posture_label,
+                alert_flags_json
+            FROM classified
+            ORDER BY trading_date
+        """)
+        row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
+        n = int(row[0]) if row and row[0] is not None else 0
+        self._upsert_materialization_state(
+            table_name="market_monitor_daily",
+            dataset_hash=dataset_hash,
+            query_version=MARKET_MONITOR_QUERY_VERSION,
+            row_count=n,
+        )
+        self.register_dataset_snapshot(snapshot)
+        logger.info("market_monitor_daily built: %d rows", n)
+        return n
+
+    def get_market_monitor_latest(self) -> pl.DataFrame:
+        """Return the latest Market Monitor snapshot, or an empty frame."""
+        if not self._table_exists("market_monitor_daily"):
+            return pl.DataFrame()
+        try:
+            return self.con.execute(
+                "SELECT * FROM market_monitor_daily ORDER BY trading_date DESC LIMIT 1"
+            ).pl()
+        except duckdb.CatalogException:
+            return pl.DataFrame()
+        except Exception as exc:
+            logger.warning("Failed to load latest market monitor row: %s", exc)
+            return pl.DataFrame()
+
+    def get_market_monitor_history(self, days: int = 252) -> pl.DataFrame:
+        """Return recent Market Monitor history, or an empty frame."""
+        if not self._table_exists("market_monitor_daily"):
+            return pl.DataFrame()
+
+        limit = max(int(days or 0), 1)
+        try:
+            return self.con.execute(
+                "SELECT * FROM market_monitor_daily ORDER BY trading_date DESC LIMIT ?",
+                [limit],
+            ).pl()
+        except duckdb.CatalogException:
+            return pl.DataFrame()
+        except Exception as exc:
+            logger.warning("Failed to load market monitor history: %s", exc)
+            return pl.DataFrame()
+
+    def get_market_monitor_all(self) -> pl.DataFrame:
+        """Return ALL Market Monitor history without limit, or an empty frame."""
+        if not self._table_exists("market_monitor_daily"):
+            return pl.DataFrame()
+
+        try:
+            return self.con.execute(
+                "SELECT * FROM market_monitor_daily ORDER BY trading_date DESC",
+            ).pl()
+        except duckdb.CatalogException:
+            return pl.DataFrame()
+        except Exception as exc:
+            logger.warning("Failed to load all market monitor data: %s", exc)
+            return pl.DataFrame()
+
     def get_features_range(
         self,
         symbols: list[str],
@@ -1218,6 +1671,7 @@ class MarketDataDB:
             "feat_event_core",
             "feat_2lynch_derived",
             "feat_daily",
+            "market_monitor_daily",
             "bt_experiment",
             "bt_trade",
             "bt_yearly_metric",

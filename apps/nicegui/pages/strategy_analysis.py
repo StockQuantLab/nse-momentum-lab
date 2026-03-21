@@ -16,7 +16,6 @@ if str(_apps_root) not in sys.path:
 
 import json
 
-import pandas as pd
 from nicegui import ui
 
 from apps.nicegui.state import get_experiments
@@ -31,11 +30,11 @@ from apps.nicegui.components import (
 )
 
 
-def _strategy_display_name(row: pd.Series) -> str:
+def _strategy_display_name(row: dict) -> str:
     """Build a human-readable strategy label that includes threshold when applicable."""
     name = row.get("strategy_name", "-")
     params: dict = {}
-    if "params_json" in row.index and pd.notna(row.get("params_json")):
+    if "params_json" in row and row.get("params_json") is not None:
         try:
             params = json.loads(row["params_json"])
         except ValueError, TypeError:
@@ -53,7 +52,7 @@ def strategy_page() -> None:
     with page_layout("Strategy", "tune"):
         experiments_df = get_experiments()
 
-        if experiments_df.empty:
+        if experiments_df.is_empty():
             page_header("Strategy Analysis")
             empty_state(
                 "No experiments available",
@@ -82,13 +81,13 @@ def strategy_page() -> None:
         ):
             if "strategy_name" in experiments_df.columns:
                 # Show all unique strategy names (no truncation)
-                unique_strategies = sorted(experiments_df["strategy_name"].unique().tolist())
+                unique_strategies = sorted(experiments_df["strategy_name"].unique().to_list())
                 ui.label(f"Strategies: {', '.join(unique_strategies)}").classes("mb-4").style(
                     f"color: {THEME['text_secondary']};"
                 )
 
             if "total_return_pct" in experiments_df.columns:
-                returns = experiments_df["total_return_pct"].dropna()
+                returns = experiments_df["total_return_pct"].drop_nulls()
                 with ui.row().classes("w-full gap-4 mb-4"):
                     ui.label(f"Best Return: {returns.max():.1f}%").style(
                         f"color: {COLORS['success']};"
@@ -116,15 +115,17 @@ def strategy_page() -> None:
                         "exp_id_fmt": str(row["exp_id"])[:12],
                         "strategy_label": _strategy_display_name(row),
                         "start_year": int(row["start_year"])
-                        if pd.notna(row["start_year"])
+                        if row.get("start_year") is not None
                         else "-",
-                        "end_year": int(row["end_year"]) if pd.notna(row["end_year"]) else "-",
-                        "return_fmt": f"{float(row.get('total_return_pct', 0)):.1f}%",
-                        "win_rate_fmt": f"{float(row.get('win_rate_pct', 0)):.1f}%",
-                        "max_dd_fmt": f"{float(row.get('max_drawdown_pct', 0)):.1f}%",
-                        "trades_fmt": f"{int(row.get('total_trades', 0)):,}",
+                        "end_year": int(row["end_year"])
+                        if row.get("end_year") is not None
+                        else "-",
+                        "return_fmt": f"{float(row.get('total_return_pct') or 0):.1f}%",
+                        "win_rate_fmt": f"{float(row.get('win_rate_pct') or 0):.1f}%",
+                        "max_dd_fmt": f"{float(row.get('max_drawdown_pct') or 0):.1f}%",
+                        "trades_fmt": f"{int(row.get('total_trades') or 0):,}",
                     }
-                    for _, row in experiments_df.iterrows()
+                    for row in experiments_df.iter_rows(named=True)
                 ],
                 pagination=15,
             ).classes("w-full")

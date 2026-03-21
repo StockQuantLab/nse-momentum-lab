@@ -91,11 +91,11 @@ features AS (
             ELSE NULL
         END AS body_ratio,
         CASE
-            WHEN high - low > 0 THEN (high - MAX(open, close)) / NULLIF(high - low, 0)
+            WHEN high - low > 0 THEN (high - GREATEST(open, close)) / NULLIF(high - low, 0)
             ELSE NULL
         END AS upper_wick_ratio,
         CASE
-            WHEN high - low > 0 THEN (MIN(open, close) - low) / NULLIF(high - low, 0)
+            WHEN high - low > 0 THEN (LEAST(open, close) - low) / NULLIF(high - low, 0)
             ELSE NULL
         END AS lower_wick_ratio,
         -- Moving averages (for reference in strategies)
@@ -323,8 +323,6 @@ def build_feat_daily_core(
     Returns:
         Number of rows in the built table
     """
-    from nse_momentum_lab.features.registry import FEAT_DAILY_CORE_VERSION
-
     # Check if already built
     if not force:
         try:

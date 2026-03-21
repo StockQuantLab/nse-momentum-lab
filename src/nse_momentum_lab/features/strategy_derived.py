@@ -331,6 +331,7 @@ SELECT
     vol_dryup_ratio,
     prior_breakouts_30d,
     prior_breakouts_90d,
+    prior_breakdowns_90d,
     open,
     close
 FROM feat_daily_core

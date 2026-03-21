@@ -79,6 +79,7 @@ def get_exit_time_for_reason(exit_reason_value: str) -> time | None:
         "DELISTING",
         "SUSPENSION",
         "STOP_POST_DAY3",
+        "WEAK_CLOSE_EXIT",
     }
     if exit_reason_value in close_exits:
         return EXIT_TIME_CLOSE

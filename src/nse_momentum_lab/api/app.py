@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from datetime import date, timedelta
 from typing import Any
 
-import pandas as pd
+import polars as pl
 from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import case, func, select
@@ -786,11 +786,11 @@ def create_app() -> FastAPI:
                     }
                 )
 
-            df = pd.DataFrame(trades_data)
+            df = pl.DataFrame(trades_data)
 
             # Export based on format
             if format.lower() == "csv":
-                output = df.to_csv(index=False)
+                output = df.write_csv()
                 media_type = "text/csv"
                 filename = f"trades_{exp_hash}.csv"
             else:

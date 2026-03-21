@@ -13,6 +13,7 @@ import sys
 import warnings
 from collections.abc import AsyncGenerator, Generator
 from datetime import date, datetime
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -70,6 +71,13 @@ def _set_integration_env_defaults() -> None:
     os.environ.setdefault("MINIO_SECURE", "false")
 
 
+def _apply_integration_schema_scripts(conn: psycopg.Connection) -> None:
+    init_dir = Path(__file__).resolve().parents[2] / "db" / "init"
+    for sql_file in sorted(init_dir.glob("*.sql")):
+        conn.execute(sql_file.read_text(encoding="utf-8"))
+    conn.commit()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def ensure_integration_services_available() -> None:
     """Skip integration suite when required infra/secrets are unavailable.
@@ -83,7 +91,7 @@ def ensure_integration_services_available() -> None:
     settings = get_settings()
 
     # Required tables from db/init/001_init.sql
-    REQUIRED_TABLES = {
+    required_tables = {
         "ref_symbol",
         "ref_exchange_calendar",
         "exp_run",
@@ -96,6 +104,7 @@ def ensure_integration_services_available() -> None:
 
     try:
         with psycopg.connect(str(settings.database_url), connect_timeout=3) as conn:
+            _apply_integration_schema_scripts(conn)
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
                 # Check for specific required tables
@@ -104,7 +113,7 @@ def ensure_integration_services_available() -> None:
                     "WHERE table_schema = 'nseml'"
                 )
                 existing_tables = {row[0] for row in cur.fetchall()}
-                missing = REQUIRED_TABLES - existing_tables
+                missing = required_tables - existing_tables
                 if missing:
                     pytest.skip(
                         f"Integration DB schema incomplete. Missing tables: {missing}. "
@@ -269,7 +278,8 @@ async def sample_job_run(db_session: AsyncSession) -> JobRun:
     """
     # Use raw SQL to insert only columns that exist in the current schema
     # This avoids issues with ORM models having columns not yet in the DB
-    from sqlalchemy import text
+    from sqlalchemy import bindparam, text
+    from sqlalchemy.dialects.postgresql import JSONB
 
     job_name = "daily_pipeline"
     asof_date = date(2024, 1, 19)
@@ -286,9 +296,9 @@ async def sample_job_run(db_session: AsyncSession) -> JobRun:
             "(job_name, asof_date, idempotency_key, status, started_at, finished_at, "
             "duration_ms, metrics_json) "
             "VALUES (:job_name, :asof_date, :idempotency_key, :status, :started_at, "
-            ":finished_at, :duration_ms, :metrics_json::jsonb) "
+            ":finished_at, :duration_ms, :metrics_json) "
             "RETURNING job_run_id"
-        ),
+        ).bindparams(bindparam("metrics_json", type_=JSONB)),
         {
             "job_name": job_name,
             "asof_date": asof_date,
