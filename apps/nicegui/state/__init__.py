@@ -21,10 +21,21 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import polars as pl
 import time
+from sqlalchemy import select
 
 if TYPE_CHECKING:
     pass
 
+from nse_momentum_lab.db import get_sessionmaker
+from nse_momentum_lab.db.models import PaperPosition
+from nse_momentum_lab.db.paper import (
+    get_paper_session_summary,
+    list_paper_fills,
+    list_paper_order_events,
+    list_paper_orders,
+    list_paper_session_signals,
+    list_paper_sessions,
+)
 from nse_momentum_lab.db.market_db import get_backtest_db, get_market_db, MarketDataDB
 
 # Singleton DB connection - created once at server startup.
@@ -392,6 +403,75 @@ def prepare_trades_df(df: pl.DataFrame) -> pl.DataFrame:
         df = df.with_columns(numeric_casts)
 
     return df
+
+
+async def aget_paper_sessions(status: str | None = None, limit: int = 50) -> list[dict]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return await list_paper_sessions(session, status=status, limit=limit)
+
+
+async def aget_paper_session_summary(session_id: str) -> dict | None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return await get_paper_session_summary(session, session_id)
+
+
+async def aget_paper_session_signals(session_id: str) -> list[dict]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return await list_paper_session_signals(session, session_id)
+
+
+async def aget_paper_session_orders(session_id: str, limit: int = 100) -> list[dict]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return await list_paper_orders(session, session_id, limit=limit)
+
+
+async def aget_paper_session_fills(session_id: str, limit: int = 100) -> list[dict]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return await list_paper_fills(session, session_id, limit=limit)
+
+
+async def aget_paper_session_events(session_id: str, limit: int = 100) -> list[dict]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return await list_paper_order_events(session, session_id, limit=limit)
+
+
+async def aget_paper_positions(
+    session_id: str | None = None,
+    *,
+    open_only: bool = True,
+) -> list[dict]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        query = select(PaperPosition)
+        if open_only:
+            query = query.where(PaperPosition.closed_at.is_(None))
+        if session_id:
+            query = query.where(PaperPosition.session_id == session_id)
+        query = query.order_by(PaperPosition.opened_at.desc())
+        result = await session.execute(query)
+        rows = result.scalars().all()
+        return [
+            {
+                "position_id": row.position_id,
+                "session_id": row.session_id,
+                "symbol_id": row.symbol_id,
+                "opened_at": row.opened_at.isoformat() if row.opened_at else None,
+                "closed_at": row.closed_at.isoformat() if row.closed_at else None,
+                "avg_entry": float(row.avg_entry) if row.avg_entry is not None else None,
+                "avg_exit": float(row.avg_exit) if row.avg_exit is not None else None,
+                "qty": float(row.qty) if row.qty is not None else None,
+                "pnl": float(row.pnl) if row.pnl is not None else None,
+                "state": row.state,
+                "metadata_json": row.metadata_json or {},
+            }
+            for row in rows
+        ]
 
 
 _experiment_callbacks: list = []

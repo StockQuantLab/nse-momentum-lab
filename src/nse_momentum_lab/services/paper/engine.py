@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from enum import Enum
 from typing import Any
 
@@ -18,6 +18,17 @@ from nse_momentum_lab.db.models import (
 from nse_momentum_lab.services.backtest.engine import ExitReason, SlippageModel
 
 logger = logging.getLogger(__name__)
+DEFAULT_FEE_RATE = 0.001
+DEFAULT_TIME_STOP_DAYS = 3
+DEFAULT_INITIAL_STOP_FRACTION = 0.95
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _utc_today() -> date:
+    return _utc_now().date()
 
 
 class SignalState(Enum):
@@ -43,6 +54,19 @@ class RiskConfig:
     max_positions: int = 10
     max_position_size_pct: float = 0.10
     kill_switch_threshold: float = 0.20
+
+    def __post_init__(self) -> None:
+        pct_fields = {
+            "max_daily_loss_pct": self.max_daily_loss_pct,
+            "max_drawdown_pct": self.max_drawdown_pct,
+            "max_position_size_pct": self.max_position_size_pct,
+            "kill_switch_threshold": self.kill_switch_threshold,
+        }
+        for field_name, value in pct_fields.items():
+            if not 0 < value <= 1:
+                raise ValueError(f"{field_name} must be in the range (0, 1]")
+        if self.max_positions <= 0:
+            raise ValueError("max_positions must be greater than 0")
 
 
 class RiskGovernance:
@@ -107,60 +131,79 @@ class PaperTrader:
     ) -> None:
         self._risk = RiskGovernance(risk_config)
         self._slippage = slippage_model or SlippageModel()
-        self._positions: dict[int, PaperPosition] = {}
+        self._positions: dict[tuple[str | None, int], PaperPosition] = {}
+
+    def _position_key(self, signal_id: int, session_id: str | None) -> tuple[str | None, int]:
+        return session_id, signal_id
 
     async def process_signals(
         self,
         signals: list[dict[str, Any]],
         prices: dict[int, dict[date, dict[str, float]]],
         session: AsyncSession,
+        paper_session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         results = []
 
         for sig in signals:
             state = sig.get("state", SignalState.NEW.value)
+            try:
+                if state == SignalState.NEW.value:
+                    can_enter, reason = self._risk.can_enter_position(sig.get("position_size", 0))
+                    if not can_enter:
+                        logger.warning("Signal %s rejected: %s", sig["signal_id"], reason)
+                        await self._update_signal_state(
+                            session, sig["signal_id"], SignalState.ARCHIVED
+                        )
+                        await session.commit()
+                        continue
 
-            if state == SignalState.NEW.value:
-                can_enter, reason = self._risk.can_enter_position(sig.get("position_size", 0))
-                if not can_enter:
-                    logger.warning(f"Signal {sig['signal_id']} rejected: {reason}")
-                    await self._update_signal_state(
-                        session, sig["signal_id"], SignalState.ARCHIVED.value
-                    )
-                    continue
+                    await self._enter_position(session, sig, prices, paper_session_id)
 
-                await self._enter_position(session, sig, prices)
+                elif state == SignalState.ENTERED.value:
+                    await self._manage_position(session, sig, prices, paper_session_id)
 
-            elif state == SignalState.ENTERED.value:
-                await self._manage_position(session, sig, prices)
-
-            results.append({"signal_id": sig["signal_id"], "action": "processed"})
+                await session.commit()
+                results.append({"signal_id": sig["signal_id"], "action": "processed"})
+            except Exception:
+                await session.rollback()
+                logger.exception(
+                    "Paper signal processing failed for session=%s signal_id=%s",
+                    paper_session_id or sig.get("session_id"),
+                    sig.get("signal_id"),
+                )
+                raise
 
         return results
 
     async def _update_signal_state(
-        self, session: AsyncSession, signal_id: int, new_state: SignalState
+        self, session: AsyncSession, signal_id: int, new_state: SignalState | str
     ) -> None:
+        state_value = new_state.value if isinstance(new_state, SignalState) else new_state
         await session.execute(
-            update(Signal).where(Signal.signal_id == signal_id).values(state=new_state.value)
+            update(Signal).where(Signal.signal_id == signal_id).values(state=state_value)
         )
-        await session.commit()
 
     async def _enter_position(
         self,
         session: AsyncSession,
         sig: dict[str, Any],
         prices: dict[int, dict[date, dict[str, float]]],
+        paper_session_id: str | None = None,
     ) -> None:
         symbol_id = sig["symbol_id"]
-        entry_date = sig.get("planned_entry_date") or date.today()
+        session_key = paper_session_id or sig.get("session_id")
+        entry_date = sig.get("planned_entry_date") or _utc_today()
 
         if symbol_id not in prices or entry_date not in prices[symbol_id]:
-            logger.warning(f"No price data for {symbol_id} on {entry_date}")
+            logger.warning("No price data for symbol_id=%s on %s", symbol_id, entry_date)
             return
 
         price_data = prices[symbol_id][entry_date]
         entry_price = price_data.get("close_adj", price_data.get("close", 0))
+        if entry_price <= 0:
+            logger.warning("Invalid entry price for symbol_id=%s on %s", symbol_id, entry_date)
+            return
 
         position_size = sig.get("position_size")
         if position_size and position_size > 0:
@@ -170,7 +213,7 @@ class PaperTrader:
             qty = int(max_position_value / entry_price)
 
         if qty <= 0:
-            logger.warning(f"Calculated qty is 0 for {symbol_id}")
+            logger.warning("Calculated qty is 0 for symbol_id=%s", symbol_id)
             return
 
         slippage_bps = self._slippage.get_slippage_bps(
@@ -180,18 +223,23 @@ class PaperTrader:
         entry_price_adjusted = entry_price * (1 + slippage_bps / 10000)
 
         position = PaperPosition(
+            session_id=session_key,
             symbol_id=symbol_id,
-            opened_at=datetime.now(),
+            opened_at=_utc_now(),
             closed_at=None,
             avg_entry=entry_price_adjusted,
             avg_exit=None,
             qty=qty,
             pnl=None,
             state=SignalState.ENTERED.value,
-            metadata_json={"signal_id": sig["signal_id"]},
+            metadata_json={
+                "signal_id": sig["signal_id"],
+                "session_id": session_key,
+            },
         )
         session.add(position)
-        self._positions[symbol_id] = position
+        await session.flush()
+        self._positions[self._position_key(sig["signal_id"], session_key)] = position
 
         order = PaperOrder(
             signal_id=sig["signal_id"],
@@ -200,23 +248,21 @@ class PaperTrader:
             order_type="MARKET",
             limit_price=None,
             status="FILLED",
+            session_id=session_key,
         )
         session.add(order)
-
-        # Ensure primary key is assigned before referencing it from fills
         await session.flush()
 
         fill = PaperFill(
+            session_id=session_key,
             order_id=order.order_id,
-            fill_time=datetime.now(),
+            fill_time=_utc_now(),
             fill_price=entry_price_adjusted,
             qty=qty,
-            fees=entry_price_adjusted * qty * 0.001,
+            fees=entry_price_adjusted * qty * DEFAULT_FEE_RATE,
             slippage_bps=slippage_bps,
         )
         session.add(fill)
-
-        await session.commit()
         await self._update_signal_state(session, sig["signal_id"], SignalState.ENTERED)
 
     async def _manage_position(
@@ -224,13 +270,14 @@ class PaperTrader:
         session: AsyncSession,
         sig: dict[str, Any],
         prices: dict[int, dict[date, dict[str, float]]],
+        paper_session_id: str | None = None,
     ) -> None:
         symbol_id = sig["symbol_id"]
-
-        if symbol_id not in self._positions:
+        session_key = paper_session_id or sig.get("session_id")
+        position = self._positions.get(self._position_key(sig["signal_id"], session_key))
+        if position is None:
             return
 
-        position = self._positions[symbol_id]
         entry_date = position.opened_at.date()
 
         if symbol_id not in prices or entry_date not in prices[symbol_id]:
@@ -239,26 +286,33 @@ class PaperTrader:
         price_data = prices[symbol_id][entry_date]
         current_price = price_data.get("close_adj", price_data.get("close", 0))
 
-        initial_stop = sig.get("initial_stop", position.avg_entry * 0.95)
+        initial_stop = sig.get("initial_stop", position.avg_entry * DEFAULT_INITIAL_STOP_FRACTION)
         current_pnl = (current_price - position.avg_entry) * position.qty
 
         safe, reason = self._risk.check_risk(current_pnl)
         if not safe:
             logger.warning(f"Risk breach for {symbol_id}: {reason}")
             await self._exit_position(
-                session, sig, position, ExitReason.STOP_INITIAL, current_price
+                session,
+                sig,
+                position,
+                ExitReason.STOP_INITIAL,
+                current_price,
+                paper_session_id,
             )
             return
 
         if current_price <= initial_stop:
             await self._exit_position(
-                session, sig, position, ExitReason.STOP_INITIAL, current_price
+                session, sig, position, ExitReason.STOP_INITIAL, current_price, paper_session_id
             )
             return
 
-        days_held = (date.today() - entry_date).days
-        if days_held >= 3:
-            await self._exit_position(session, sig, position, ExitReason.TIME_STOP, current_price)
+        days_held = (_utc_today() - entry_date).days
+        if days_held >= DEFAULT_TIME_STOP_DAYS:
+            await self._exit_position(
+                session, sig, position, ExitReason.TIME_STOP, current_price, paper_session_id
+            )
             return
 
     async def _exit_position(
@@ -268,17 +322,21 @@ class PaperTrader:
         position: PaperPosition,
         exit_reason: ExitReason,
         exit_price: float,
+        paper_session_id: str | None = None,
     ) -> None:
         slippage_bps = self._slippage.get_slippage_bps(None, exit_price, position.qty)
         exit_price_adjusted = exit_price * (1 - slippage_bps / 10000)
 
         pnl = (exit_price_adjusted - position.avg_entry) * position.qty
+        session_key = paper_session_id or sig.get("session_id")
+        position_key = self._position_key(sig["signal_id"], session_key)
+        position_update = update(PaperPosition).where(
+            PaperPosition.position_id == position.position_id
+        )
 
         await session.execute(
-            update(PaperPosition)
-            .where(PaperPosition.symbol_id == position.symbol_id)
-            .values(
-                closed_at=datetime.now(),
+            position_update.values(
+                closed_at=_utc_now(),
                 avg_exit=exit_price_adjusted,
                 pnl=pnl,
                 state=SignalState.EXITED.value,
@@ -286,6 +344,7 @@ class PaperTrader:
         )
 
         order = PaperOrder(
+            session_id=session_key,
             signal_id=sig["signal_id"],
             side="SELL",
             qty=position.qty,
@@ -294,23 +353,26 @@ class PaperTrader:
             status="FILLED",
         )
         session.add(order)
+        await session.flush()
 
         fill = PaperFill(
+            session_id=session_key,
             order_id=order.order_id,
-            fill_time=datetime.now(),
+            fill_time=_utc_now(),
             fill_price=exit_price_adjusted,
             qty=position.qty,
-            fees=exit_price_adjusted * position.qty * 0.001,
+            fees=exit_price_adjusted * position.qty * DEFAULT_FEE_RATE,
             slippage_bps=slippage_bps,
         )
         session.add(fill)
 
-        del self._positions[position.symbol_id]
-        await session.commit()
+        self._positions.pop(position_key, None)
         await self._update_signal_state(session, sig["signal_id"], SignalState.EXITED)
 
-    def get_open_positions(self) -> list[PaperPosition]:
-        return list(self._positions.values())
+    def get_open_positions(self, session_id: str | None = None) -> list[PaperPosition]:
+        if session_id is None:
+            return list(self._positions.values())
+        return [position for key, position in self._positions.items() if key[0] == session_id]
 
     def get_kill_switch_state(self) -> KillSwitchState:
         return self._risk.get_kill_switch_state()

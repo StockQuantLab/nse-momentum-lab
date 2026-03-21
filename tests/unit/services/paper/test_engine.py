@@ -47,6 +47,22 @@ class TestRiskConfig:
         assert config.max_drawdown_pct == 0.20
         assert config.max_positions == 5
 
+    def test_invalid_pct_raises(self) -> None:
+        try:
+            RiskConfig(max_daily_loss_pct=-0.1)
+        except ValueError as exc:
+            assert "max_daily_loss_pct" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for invalid max_daily_loss_pct")
+
+    def test_invalid_max_positions_raises(self) -> None:
+        try:
+            RiskConfig(max_positions=0)
+        except ValueError as exc:
+            assert "max_positions" in str(exc)
+        else:
+            raise AssertionError("Expected ValueError for invalid max_positions")
+
 
 class TestRiskGovernance:
     def setup_method(self) -> None:
@@ -212,3 +228,18 @@ class TestPaperTrader:
         results = await self.trader.process_signals(signals, prices, session)
         assert len(results) == 1
         mock_manage.assert_called_once()
+
+    @patch("nse_momentum_lab.services.paper.engine.PaperTrader._enter_position")
+    async def test_process_signals_rolls_back_on_error(self, mock_enter: MagicMock) -> None:
+        mock_enter.side_effect = RuntimeError("boom")
+        session = AsyncMock()
+        signals = [{"signal_id": 1, "symbol_id": 100, "state": "NEW", "position_size": 5000}]
+
+        try:
+            await self.trader.process_signals(signals, {}, session)
+        except RuntimeError as exc:
+            assert str(exc) == "boom"
+        else:
+            raise AssertionError("Expected RuntimeError from _enter_position")
+
+        session.rollback.assert_awaited_once()

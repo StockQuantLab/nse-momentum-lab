@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     PrimaryKeyConstraint,
+    String,
     Text,
     UniqueConstraint,
     func,
@@ -21,6 +22,10 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 numeric = Annotated[Numeric, 12, 4]
+SESSION_ID_LEN = 128
+EXPERIMENT_ID_LEN = 64
+HASH_ID_LEN = 64
+BROKER_ID_LEN = 64
 
 
 class Base(DeclarativeBase):
@@ -290,20 +295,73 @@ class ExpArtifact(Base):
     run: Mapped[ExpRun] = relationship("ExpRun", back_populates="artifacts")
 
 
+class PaperSession(Base):
+    __tablename__ = "paper_session"
+    __table_args__ = (
+        Index("idx_paper_session_status_trade_date", "status", "trade_date"),
+        Index("idx_paper_session_strategy_trade_date", "strategy_name", "trade_date"),
+        {"schema": "nseml"},
+    )
+
+    session_id: Mapped[str] = mapped_column(String(SESSION_ID_LEN), primary_key=True)
+    trade_date: Mapped[date | None] = mapped_column(Date)
+    strategy_name: Mapped[str] = mapped_column(Text, nullable=False)
+    experiment_id: Mapped[str | None] = mapped_column(String(EXPERIMENT_ID_LEN))
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    symbols: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    strategy_params: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    risk_config: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    signals: Mapped[list[Signal]] = relationship("Signal", back_populates="paper_session")
+    session_signals: Mapped[list[PaperSessionSignal]] = relationship(
+        "PaperSessionSignal", back_populates="paper_session"
+    )
+    order_events: Mapped[list[PaperOrderEvent]] = relationship(
+        "PaperOrderEvent", back_populates="paper_session"
+    )
+    bar_checkpoints: Mapped[list[PaperBarCheckpoint]] = relationship(
+        "PaperBarCheckpoint", back_populates="paper_session"
+    )
+    feed_state: Mapped[PaperFeedState | None] = relationship(
+        "PaperFeedState", back_populates="paper_session", uselist=False
+    )
+
+
 class Signal(Base):
     __tablename__ = "signal"
     __table_args__ = (
         ForeignKeyConstraint(["symbol_id"], ["nseml.ref_symbol.symbol_id"], ondelete="CASCADE"),
+        Index("idx_signal_session_state", "session_id", "state"),
         Index("idx_signal_state_date", "state", "planned_entry_date"),
+        Index(
+            "idx_signal_session_state_entry_date",
+            "session_id",
+            "state",
+            "planned_entry_date",
+        ),
         {"schema": "nseml"},
     )
 
     signal_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str | None] = mapped_column(
+        String(SESSION_ID_LEN), ForeignKey("nseml.paper_session.session_id", ondelete="SET NULL")
+    )
     symbol_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("nseml.ref_symbol.symbol_id"), nullable=False
     )
     asof_date: Mapped[date] = mapped_column(Date, nullable=False)
-    strategy_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    strategy_hash: Mapped[str] = mapped_column(String(HASH_ID_LEN), nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     entry_mode: Mapped[str] = mapped_column(Text, nullable=False)
     planned_entry_date: Mapped[date | None] = mapped_column(Date)
@@ -312,16 +370,25 @@ class Signal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     orders: Mapped[list[PaperOrder]] = relationship("PaperOrder", back_populates="signal")
+    paper_session: Mapped[PaperSession | None] = relationship(
+        "PaperSession", back_populates="signals"
+    )
 
 
 class PaperOrder(Base):
     __tablename__ = "paper_order"
     __table_args__ = (
         ForeignKeyConstraint(["signal_id"], ["nseml.signal.signal_id"], ondelete="CASCADE"),
+        Index("idx_paper_order_session_created", "session_id", "created_at"),
+        Index("idx_paper_order_broker_order_id", "broker_order_id"),
         {"schema": "nseml"},
     )
 
     order_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str | None] = mapped_column(
+        String(SESSION_ID_LEN), ForeignKey("nseml.paper_session.session_id", ondelete="SET NULL")
+    )
+    broker_order_id: Mapped[str | None] = mapped_column(String(BROKER_ID_LEN))
     signal_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("nseml.signal.signal_id"), nullable=False
     )
@@ -330,6 +397,8 @@ class PaperOrder(Base):
     order_type: Mapped[str] = mapped_column(Text, nullable=False)
     limit_price: Mapped[numeric | None] = mapped_column(Numeric(12, 4))
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    broker_status: Mapped[str | None] = mapped_column(Text)
+    broker_payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     signal: Mapped[Signal] = relationship("Signal", back_populates="orders")
@@ -340,18 +409,27 @@ class PaperFill(Base):
     __tablename__ = "paper_fill"
     __table_args__ = (
         ForeignKeyConstraint(["order_id"], ["nseml.paper_order.order_id"], ondelete="CASCADE"),
+        Index("idx_paper_fill_session_time", "session_id", "fill_time"),
+        Index("idx_paper_fill_broker_trade_id", "broker_trade_id"),
+        Index("idx_paper_fill_broker_order_id", "broker_order_id"),
         {"schema": "nseml"},
     )
 
     fill_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str | None] = mapped_column(
+        String(SESSION_ID_LEN), ForeignKey("nseml.paper_session.session_id", ondelete="SET NULL")
+    )
+    broker_trade_id: Mapped[str | None] = mapped_column(String(BROKER_ID_LEN))
+    broker_order_id: Mapped[str | None] = mapped_column(String(BROKER_ID_LEN))
     order_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("nseml.paper_order.order_id"), nullable=False
     )
-    fill_time: Mapped[date] = mapped_column(DateTime(timezone=True), nullable=False)
+    fill_time: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     fill_price: Mapped[numeric] = mapped_column(Numeric(12, 4), nullable=False)
     qty: Mapped[numeric] = mapped_column(Numeric(12, 4), nullable=False)
     fees: Mapped[numeric | None] = mapped_column(Numeric(10, 4))
     slippage_bps: Mapped[numeric | None] = mapped_column(Numeric(8, 4))
+    broker_payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
 
     order: Mapped[PaperOrder] = relationship("PaperOrder", back_populates="fills")
 
@@ -360,14 +438,18 @@ class PaperPosition(Base):
     __tablename__ = "paper_position"
     __table_args__ = (
         ForeignKeyConstraint(["symbol_id"], ["nseml.ref_symbol.symbol_id"], ondelete="CASCADE"),
+        Index("idx_paper_position_session_open", "session_id", "closed_at"),
         {"schema": "nseml"},
     )
 
     position_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str | None] = mapped_column(
+        String(SESSION_ID_LEN), ForeignKey("nseml.paper_session.session_id", ondelete="SET NULL")
+    )
     symbol_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("nseml.ref_symbol.symbol_id"), nullable=False
     )
-    opened_at: Mapped[date] = mapped_column(DateTime(timezone=True), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     avg_entry: Mapped[numeric] = mapped_column(Numeric(12, 4), nullable=False)
     avg_exit: Mapped[numeric | None] = mapped_column(Numeric(12, 4))
@@ -375,6 +457,166 @@ class PaperPosition(Base):
     pnl: Mapped[numeric | None] = mapped_column(Numeric(14, 4))
     state: Mapped[str] = mapped_column(Text, nullable=False)
     metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+
+
+class PaperSessionSignal(Base):
+    __tablename__ = "paper_session_signal"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id"], ["nseml.paper_session.session_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(["signal_id"], ["nseml.signal.signal_id"], ondelete="CASCADE"),
+        Index("idx_paper_session_signal_session_rank", "session_id", "rank"),
+        Index("idx_paper_session_signal_session_status", "session_id", "decision_status"),
+        UniqueConstraint(
+            "session_id",
+            "signal_id",
+            name="uq_paper_session_signal_session_signal",
+        ),
+        {"schema": "nseml"},
+    )
+
+    paper_session_signal_id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    session_id: Mapped[str] = mapped_column(
+        String(SESSION_ID_LEN),
+        ForeignKey("nseml.paper_session.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    signal_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("nseml.signal.signal_id", ondelete="CASCADE"), nullable=False
+    )
+    symbol_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("nseml.ref_symbol.symbol_id"), nullable=False
+    )
+    asof_date: Mapped[date] = mapped_column(Date, nullable=False)
+    rank: Mapped[int | None] = mapped_column(Integer)
+    selection_score: Mapped[numeric | None] = mapped_column(Numeric(12, 4))
+    decision_status: Mapped[str] = mapped_column(Text, nullable=False)
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    paper_session: Mapped[PaperSession] = relationship(
+        "PaperSession", back_populates="session_signals"
+    )
+
+
+class PaperOrderEvent(Base):
+    __tablename__ = "paper_order_event"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id"], ["nseml.paper_session.session_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(["order_id"], ["nseml.paper_order.order_id"], ondelete="SET NULL"),
+        ForeignKeyConstraint(["signal_id"], ["nseml.signal.signal_id"], ondelete="SET NULL"),
+        Index("idx_paper_order_event_session_created", "session_id", "created_at"),
+        Index("idx_paper_order_event_session_type", "session_id", "event_type"),
+        Index("idx_paper_order_event_broker_order_id", "broker_order_id"),
+        {"schema": "nseml"},
+    )
+
+    event_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        String(SESSION_ID_LEN),
+        ForeignKey("nseml.paper_session.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    order_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("nseml.paper_order.order_id", ondelete="SET NULL")
+    )
+    signal_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("nseml.signal.signal_id", ondelete="SET NULL")
+    )
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    event_status: Mapped[str] = mapped_column(Text, nullable=False)
+    broker_order_id: Mapped[str | None] = mapped_column(String(BROKER_ID_LEN))
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    paper_session: Mapped[PaperSession] = relationship(
+        "PaperSession", back_populates="order_events"
+    )
+
+
+class PaperFeedState(Base):
+    __tablename__ = "paper_feed_state"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id"], ["nseml.paper_session.session_id"], ondelete="CASCADE"
+        ),
+        Index("idx_paper_feed_state_session_status", "session_id", "status"),
+        {"schema": "nseml"},
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        String(SESSION_ID_LEN),
+        ForeignKey("nseml.paper_session.session_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    is_stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    subscription_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_quote_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_tick_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_bar_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    metadata_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    paper_session: Mapped[PaperSession] = relationship("PaperSession", back_populates="feed_state")
+
+
+class PaperBarCheckpoint(Base):
+    __tablename__ = "paper_bar_checkpoint"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["session_id"], ["nseml.paper_session.session_id"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(["symbol_id"], ["nseml.ref_symbol.symbol_id"], ondelete="CASCADE"),
+        UniqueConstraint(
+            "session_id",
+            "symbol_id",
+            "bar_interval",
+            "bar_start",
+            name="uq_paper_bar_checkpoint",
+        ),
+        Index("idx_paper_bar_checkpoint_session_time", "session_id", "bar_start"),
+        {"schema": "nseml"},
+    )
+
+    checkpoint_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        String(SESSION_ID_LEN),
+        ForeignKey("nseml.paper_session.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    symbol_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("nseml.ref_symbol.symbol_id", ondelete="CASCADE"), nullable=False
+    )
+    bar_interval: Mapped[str] = mapped_column(Text, nullable=False, default="5m")
+    bar_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    bar_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    paper_session: Mapped[PaperSession] = relationship(
+        "PaperSession", back_populates="bar_checkpoints"
+    )
 
 
 class JobRun(Base):

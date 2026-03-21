@@ -55,6 +55,17 @@ class Settings(BaseSettings):
     minio_port: int = 9003  # Changed from 9000 to avoid conflicts
     minio_console_port: int = 9004  # Changed from 9001 to avoid conflicts
 
+    # Kite Connect v4 settings.
+    # Keep secrets in Doppler or the process environment; never persist them in .env files.
+    kite_api_key: str | None = None
+    kite_api_secret: str | None = None
+    kite_access_token: str | None = None
+    kite_redirect_url: str | None = None
+    kite_ws_max_tokens: int = 3000
+    kite_quote_batch_size: int = 500
+    kite_login_url: str = "https://kite.zerodha.com/connect/login?v=3"
+    kite_api_root: str = "https://api.kite.trade"
+
     # Data lake contract (DuckDB + Parquet)
     data_lake_mode: str = "local"  # local|minio
     data_lake_local_dir: str = "data/parquet"
@@ -113,6 +124,9 @@ class Settings(BaseSettings):
         if self.database_url:
             return _mask_password(self.database_url)
         return "Not configured"
+
+    def has_kite_credentials(self) -> bool:
+        return bool(self.kite_api_key and self.kite_access_token)
 
 
 def get_settings() -> Settings:

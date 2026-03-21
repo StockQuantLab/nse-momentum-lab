@@ -194,11 +194,36 @@ CREATE INDEX IF NOT EXISTS idx_exp_run_strategy_dataset ON exp_run(strategy_hash
 -- Paper trading
 -- ----------------
 
+CREATE TABLE IF NOT EXISTS paper_session (
+  session_id varchar(128) PRIMARY KEY,
+  trade_date date,
+  strategy_name text NOT NULL,
+  experiment_id varchar(64),
+  mode text NOT NULL,
+  status text NOT NULL,
+  symbols jsonb NOT NULL DEFAULT '[]'::jsonb,
+  strategy_params jsonb NOT NULL DEFAULT '{}'::jsonb,
+  risk_config jsonb NOT NULL DEFAULT '{}'::jsonb,
+  notes text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  finished_at timestamptz,
+  archived_at timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_session_status_trade_date
+  ON paper_session(status, trade_date);
+
+CREATE INDEX IF NOT EXISTS idx_paper_session_strategy_trade_date
+  ON paper_session(strategy_name, trade_date);
+
 CREATE TABLE IF NOT EXISTS signal (
   signal_id bigserial PRIMARY KEY,
+  session_id varchar(128) REFERENCES paper_session(session_id) ON DELETE SET NULL,
   symbol_id bigint NOT NULL REFERENCES ref_symbol(symbol_id) ON DELETE CASCADE,
   asof_date date NOT NULL,
-  strategy_hash text NOT NULL,
+  strategy_hash varchar(64) NOT NULL,
   state text NOT NULL,
   entry_mode text NOT NULL, -- open|close
   planned_entry_date date,
@@ -207,31 +232,64 @@ CREATE TABLE IF NOT EXISTS signal (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE signal ADD COLUMN IF NOT EXISTS session_id varchar(128);
+CREATE INDEX IF NOT EXISTS idx_signal_session_state ON signal(session_id, state);
 CREATE INDEX IF NOT EXISTS idx_signal_state_date ON signal(state, planned_entry_date);
+CREATE INDEX IF NOT EXISTS idx_signal_session_state_entry_date
+  ON signal(session_id, state, planned_entry_date);
 
 CREATE TABLE IF NOT EXISTS paper_order (
   order_id bigserial PRIMARY KEY,
+  session_id varchar(128) REFERENCES paper_session(session_id) ON DELETE SET NULL,
+  broker_order_id varchar(64),
   signal_id bigint NOT NULL REFERENCES signal(signal_id) ON DELETE CASCADE,
   side text NOT NULL, -- BUY|SELL
   qty numeric NOT NULL,
   order_type text NOT NULL,
   limit_price numeric,
   status text NOT NULL,
+  broker_status text,
+  broker_payload_json jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE paper_order ADD COLUMN IF NOT EXISTS session_id varchar(128);
+ALTER TABLE paper_order ADD COLUMN IF NOT EXISTS broker_order_id varchar(64);
+ALTER TABLE paper_order ADD COLUMN IF NOT EXISTS broker_status text;
+ALTER TABLE paper_order ADD COLUMN IF NOT EXISTS broker_payload_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_paper_order_session_created
+  ON paper_order(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_paper_order_broker_order_id
+  ON paper_order(broker_order_id);
+
 CREATE TABLE IF NOT EXISTS paper_fill (
   fill_id bigserial PRIMARY KEY,
+  session_id varchar(128) REFERENCES paper_session(session_id) ON DELETE SET NULL,
+  broker_trade_id varchar(64),
+  broker_order_id varchar(64),
   order_id bigint NOT NULL REFERENCES paper_order(order_id) ON DELETE CASCADE,
   fill_time timestamptz NOT NULL,
   fill_price numeric NOT NULL,
   qty numeric NOT NULL,
   fees numeric,
-  slippage_bps numeric
+  slippage_bps numeric,
+  broker_payload_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
+
+ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS session_id varchar(128);
+ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS broker_trade_id varchar(64);
+ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS broker_order_id varchar(64);
+ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS broker_payload_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_paper_fill_session_time
+  ON paper_fill(session_id, fill_time);
+CREATE INDEX IF NOT EXISTS idx_paper_fill_broker_trade_id
+  ON paper_fill(broker_trade_id);
+CREATE INDEX IF NOT EXISTS idx_paper_fill_broker_order_id
+  ON paper_fill(broker_order_id);
 
 CREATE TABLE IF NOT EXISTS paper_position (
   position_id bigserial PRIMARY KEY,
+  session_id varchar(128) REFERENCES paper_session(session_id) ON DELETE SET NULL,
   symbol_id bigint NOT NULL REFERENCES ref_symbol(symbol_id) ON DELETE CASCADE,
   opened_at timestamptz NOT NULL,
   closed_at timestamptz,
@@ -242,6 +300,124 @@ CREATE TABLE IF NOT EXISTS paper_position (
   state text NOT NULL,
   metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb
 );
+
+ALTER TABLE paper_position ADD COLUMN IF NOT EXISTS session_id varchar(128);
+CREATE INDEX IF NOT EXISTS idx_paper_position_session_open
+  ON paper_position(session_id, closed_at);
+
+CREATE TABLE IF NOT EXISTS paper_session_signal (
+  paper_session_signal_id bigserial PRIMARY KEY,
+  session_id varchar(128) NOT NULL REFERENCES paper_session(session_id) ON DELETE CASCADE,
+  signal_id bigint NOT NULL REFERENCES signal(signal_id) ON DELETE CASCADE,
+  symbol_id bigint NOT NULL REFERENCES ref_symbol(symbol_id) ON DELETE CASCADE,
+  asof_date date NOT NULL,
+  rank integer,
+  selection_score numeric,
+  decision_status text NOT NULL,
+  decision_reason text,
+  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(session_id, signal_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_session_signal_session_rank
+  ON paper_session_signal(session_id, rank);
+
+CREATE INDEX IF NOT EXISTS idx_paper_session_signal_session_status
+  ON paper_session_signal(session_id, decision_status);
+
+CREATE TABLE IF NOT EXISTS paper_order_event (
+  event_id bigserial PRIMARY KEY,
+  session_id varchar(128) NOT NULL REFERENCES paper_session(session_id) ON DELETE CASCADE,
+  order_id bigint REFERENCES paper_order(order_id) ON DELETE SET NULL,
+  signal_id bigint REFERENCES signal(signal_id) ON DELETE SET NULL,
+  event_type text NOT NULL,
+  event_status text NOT NULL,
+  broker_order_id varchar(64),
+  payload_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+ALTER TABLE paper_order_event ADD COLUMN IF NOT EXISTS broker_order_id varchar(64);
+CREATE INDEX IF NOT EXISTS idx_paper_order_event_session_created
+  ON paper_order_event(session_id, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_paper_order_event_session_type
+  ON paper_order_event(session_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_paper_order_event_broker_order_id
+  ON paper_order_event(broker_order_id);
+
+CREATE TABLE IF NOT EXISTS paper_feed_state (
+  session_id varchar(128) PRIMARY KEY REFERENCES paper_session(session_id) ON DELETE CASCADE,
+  source text NOT NULL,
+  mode text NOT NULL,
+  status text NOT NULL,
+  is_stale boolean NOT NULL DEFAULT false,
+  subscription_count integer NOT NULL DEFAULT 0,
+  heartbeat_at timestamptz,
+  last_quote_at timestamptz,
+  last_tick_at timestamptz,
+  last_bar_at timestamptz,
+  metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_feed_state_session_status
+  ON paper_feed_state(session_id, status);
+
+CREATE TABLE IF NOT EXISTS paper_bar_checkpoint (
+  checkpoint_id bigserial PRIMARY KEY,
+  session_id varchar(128) NOT NULL REFERENCES paper_session(session_id) ON DELETE CASCADE,
+  symbol_id bigint NOT NULL REFERENCES ref_symbol(symbol_id) ON DELETE CASCADE,
+  bar_interval text NOT NULL DEFAULT '5m',
+  bar_start timestamptz NOT NULL,
+  bar_end timestamptz,
+  payload_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+  processed boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(session_id, symbol_id, bar_interval, bar_start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_bar_checkpoint_session_time
+  ON paper_bar_checkpoint(session_id, bar_start);
+
+ALTER TABLE signal ADD COLUMN IF NOT EXISTS session_id varchar(128);
+ALTER TABLE paper_order ADD COLUMN IF NOT EXISTS session_id varchar(128);
+ALTER TABLE paper_order ADD COLUMN IF NOT EXISTS broker_order_id varchar(64);
+ALTER TABLE paper_order ADD COLUMN IF NOT EXISTS broker_status text;
+ALTER TABLE paper_order ADD COLUMN IF NOT EXISTS broker_payload_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS session_id varchar(128);
+ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS broker_trade_id varchar(64);
+ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS broker_order_id varchar(64);
+ALTER TABLE paper_fill ADD COLUMN IF NOT EXISTS broker_payload_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE paper_order_event ADD COLUMN IF NOT EXISTS broker_order_id varchar(64);
+ALTER TABLE paper_position ADD COLUMN IF NOT EXISTS session_id varchar(128);
+ALTER TABLE paper_session
+  ALTER COLUMN session_id TYPE varchar(128),
+  ALTER COLUMN experiment_id TYPE varchar(64);
+ALTER TABLE signal
+  ALTER COLUMN session_id TYPE varchar(128),
+  ALTER COLUMN strategy_hash TYPE varchar(64);
+ALTER TABLE paper_order
+  ALTER COLUMN session_id TYPE varchar(128),
+  ALTER COLUMN broker_order_id TYPE varchar(64);
+ALTER TABLE paper_fill
+  ALTER COLUMN session_id TYPE varchar(128),
+  ALTER COLUMN broker_trade_id TYPE varchar(64),
+  ALTER COLUMN broker_order_id TYPE varchar(64);
+ALTER TABLE paper_position
+  ALTER COLUMN session_id TYPE varchar(128);
+ALTER TABLE paper_session_signal
+  ALTER COLUMN session_id TYPE varchar(128);
+ALTER TABLE paper_order_event
+  ALTER COLUMN session_id TYPE varchar(128),
+  ALTER COLUMN broker_order_id TYPE varchar(64);
+ALTER TABLE paper_feed_state
+  ALTER COLUMN session_id TYPE varchar(128);
+ALTER TABLE paper_bar_checkpoint
+  ALTER COLUMN session_id TYPE varchar(128);
 
 -- -----------------------------
 -- Job runs + backtest trade log
@@ -267,6 +443,11 @@ CREATE TABLE IF NOT EXISTS job_run (
   code_hash text
 );
 
+ALTER TABLE job_run ADD COLUMN IF NOT EXISTS job_kind text NOT NULL DEFAULT 'GENERIC';
+ALTER TABLE job_run ADD COLUMN IF NOT EXISTS partition_scope jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE job_run ADD COLUMN IF NOT EXISTS metrics_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE job_run ADD COLUMN IF NOT EXISTS error_json jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE job_run ADD COLUMN IF NOT EXISTS code_hash text;
 CREATE INDEX IF NOT EXISTS idx_job_run_name_date ON job_run(job_name, asof_date);
 CREATE INDEX IF NOT EXISTS idx_job_run_status_date ON job_run(status, asof_date);
 CREATE INDEX IF NOT EXISTS idx_job_run_kind ON job_run(job_kind);

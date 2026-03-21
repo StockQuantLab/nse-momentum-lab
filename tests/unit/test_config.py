@@ -32,6 +32,11 @@ class TestSettings:
             assert settings.minio_host == "127.0.0.1"
             assert settings.minio_port == 9003  # Updated from 9000 to avoid conflicts
             assert settings.minio_console_port == 9004  # Updated from 9001 to avoid conflicts
+            assert settings.kite_api_key is None
+            assert settings.kite_api_secret is None
+            assert settings.kite_access_token is None
+            assert settings.kite_ws_max_tokens == 3000
+            assert settings.kite_quote_batch_size == 500
 
     def test_database_url_from_postgres_vars(self) -> None:
         with patch.dict(
@@ -187,6 +192,26 @@ class TestSettings:
                 err = str(e)
                 assert "MINIO_ACCESS_KEY" in err
                 assert "MINIO_SECRET_KEY" in err
+
+    def test_kite_settings_are_optional(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://user:pass@localhost:5432/db",
+                "MINIO_ENDPOINT": "http://localhost:9000",
+                "MINIO_ACCESS_KEY": "minio",
+                "MINIO_SECRET_KEY": "minio123",
+                "KITE_API_KEY": "kite-key",
+                "KITE_API_SECRET": "kite-secret",
+                "KITE_ACCESS_TOKEN": "kite-token",
+            },
+            clear=True,
+        ):
+            settings = Settings()
+            assert settings.kite_api_key == "kite-key"
+            assert settings.kite_api_secret == "kite-secret"
+            assert settings.kite_access_token == "kite-token"
+            assert settings.has_kite_credentials() is True
 
 
 class TestGetSettings:

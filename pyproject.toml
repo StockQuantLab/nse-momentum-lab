@@ -50,6 +50,8 @@ nseml-market-monitor = "nse_momentum_lab.cli.market_monitor:main"
 nseml-backtest = "nse_momentum_lab.cli.backtest:main"
 nseml-backtest-status = "nse_momentum_lab.cli.backtest_status:main"
 nseml-backtest-batch = "nse_momentum_lab.cli.backtest_batch:main"
+nseml-paper = "nse_momentum_lab.cli.paper:main"
+nseml-kite-paper = "nse_momentum_lab.cli.paper:main"
 
 [build-system]
 requires = ["hatchling"]
