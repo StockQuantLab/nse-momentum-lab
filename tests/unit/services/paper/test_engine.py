@@ -103,6 +103,21 @@ class TestRiskGovernance:
         assert can_enter is False
         assert "Position size exceeds limit" in reason
 
+    def test_can_enter_position_daily_loss_limit(self) -> None:
+        self.risk._daily_loss = -6_000.0
+        self.risk._total_equity = 100_000.0
+        self.risk._peak_equity = 100_000.0
+        can_enter, reason = self.risk.can_enter_position(1000)
+        assert can_enter is False
+        assert "Daily loss limit reached" in reason
+
+    def test_can_enter_position_max_positions_limit(self) -> None:
+        self.risk._total_equity = 100_000.0
+        self.risk._peak_equity = 100_000.0
+        can_enter, reason = self.risk.can_enter_position(1000, open_positions_count=10)
+        assert can_enter is False
+        assert "Max positions reached" in reason
+
     def test_can_enter_position_ok(self) -> None:
         self.risk._total_equity = 100_000.0
         self.risk._peak_equity = 100_000.0

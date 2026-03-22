@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nse_momentum_lab.db.models import (
@@ -16,6 +16,7 @@ from nse_momentum_lab.db.models import (
     PaperSession,
     PaperSessionSignal,
     Signal,
+    WalkForwardFold,
 )
 
 OPEN_SIGNAL_STATES = {"NEW", "QUALIFIED", "ALERTED", "ENTERED", "MANAGED"}
@@ -785,6 +786,34 @@ async def create_or_update_paper_session(
     return existing
 
 
+async def update_paper_session(
+    db_session: AsyncSession,
+    *,
+    session_id: str,
+    symbols: list[str] | None = None,
+    strategy_params: dict[str, Any] | None = None,
+    risk_config: dict[str, Any] | None = None,
+    notes: str | None = None,
+) -> PaperSession | None:
+    row = await get_paper_session(db_session, session_id)
+    if row is None:
+        return None
+
+    row.updated_at = _utc_now()
+    if symbols is not None:
+        row.symbols = symbols
+    if strategy_params is not None:
+        row.strategy_params = strategy_params
+    if risk_config is not None:
+        row.risk_config = risk_config
+    if notes is not None:
+        row.notes = notes
+
+    await db_session.commit()
+    await db_session.refresh(row)
+    return row
+
+
 async def set_paper_session_status(
     db_session: AsyncSession,
     *,
@@ -859,3 +888,300 @@ async def get_paper_session_summary(
         },
         "feed_state": _serialize_paper_feed_state(feed_state) if feed_state else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# WalkForwardFold helpers
+# ---------------------------------------------------------------------------
+
+
+def _serialize_walk_forward_fold(row: WalkForwardFold) -> dict[str, Any]:
+    return {
+        "fold_id": row.fold_id,
+        "wf_session_id": row.wf_session_id,
+        "fold_index": row.fold_index,
+        "train_start": row.train_start.isoformat() if row.train_start else None,
+        "train_end": row.train_end.isoformat() if row.train_end else None,
+        "test_start": row.test_start.isoformat() if row.test_start else None,
+        "test_end": row.test_end.isoformat() if row.test_end else None,
+        "exp_id": row.exp_id,
+        "status": row.status,
+        "total_return_pct": float(row.total_return_pct) if row.total_return_pct is not None else None,
+        "max_drawdown_pct": float(row.max_drawdown_pct) if row.max_drawdown_pct is not None else None,
+        "profit_factor": float(row.profit_factor) if row.profit_factor is not None else None,
+        "total_trades": row.total_trades,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+async def insert_walk_forward_fold(
+    db_session: AsyncSession,
+    *,
+    wf_session_id: str,
+    fold_index: int,
+    train_start: date,
+    train_end: date,
+    test_start: date,
+    test_end: date,
+    exp_id: str | None = None,
+    status: str | None = None,
+    total_return_pct: float | None = None,
+    max_drawdown_pct: float | None = None,
+    profit_factor: float | None = None,
+    total_trades: int | None = None,
+) -> WalkForwardFold:
+    row = WalkForwardFold(
+        wf_session_id=wf_session_id,
+        fold_index=fold_index,
+        train_start=train_start,
+        train_end=train_end,
+        test_start=test_start,
+        test_end=test_end,
+        exp_id=exp_id,
+        status=status,
+        total_return_pct=total_return_pct,
+        max_drawdown_pct=max_drawdown_pct,
+        profit_factor=profit_factor,
+        total_trades=total_trades,
+        created_at=_utc_now(),
+    )
+    db_session.add(row)
+    await db_session.flush()
+    return row
+
+
+async def list_walk_forward_folds(
+    db_session: AsyncSession,
+    wf_session_id: str,
+) -> list[dict[str, Any]]:
+    result = await db_session.execute(
+        select(WalkForwardFold)
+        .where(WalkForwardFold.wf_session_id == wf_session_id)
+        .order_by(WalkForwardFold.fold_index.asc())
+    )
+    rows = result.scalars().all()
+    return [_serialize_walk_forward_fold(row) for row in rows]
+
+
+async def reset_walk_forward_folds(
+    db_session: AsyncSession,
+    wf_session_id: str,
+) -> None:
+    await db_session.execute(
+        delete(WalkForwardFold).where(WalkForwardFold.wf_session_id == wf_session_id)
+    )
+    await db_session.flush()
+
+
+async def get_latest_passed_walk_forward(
+    db_session: AsyncSession,
+    strategy_name: str,
+) -> dict[str, Any] | None:
+    """Return the most recent COMPLETED walk_forward session for a strategy."""
+    result = await db_session.execute(
+        select(PaperSession)
+        .where(
+            PaperSession.strategy_name == strategy_name,
+            PaperSession.mode == "walk_forward",
+            PaperSession.status == "COMPLETED",
+        )
+        .order_by(PaperSession.created_at.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    return _serialize_paper_session(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Flatten liquidation
+# ---------------------------------------------------------------------------
+
+
+async def flatten_open_positions(
+    db_session: AsyncSession,
+    session_id: str,
+    *,
+    exit_note: str = "FLATTEN",
+) -> list[dict[str, Any]]:
+    """Close all open positions at last-mark price (or avg_entry as a zero-PnL fallback)."""
+    result = await db_session.execute(
+        select(PaperPosition).where(
+            PaperPosition.session_id == session_id,
+            PaperPosition.closed_at.is_(None),
+        )
+    )
+    open_positions = result.scalars().all()
+    closed: list[dict[str, Any]] = []
+    now = _utc_now()
+
+    for position in open_positions:
+        metadata = dict(position.metadata_json or {})
+        signal_id: int | None = metadata.get("signal_id")
+        exit_price = float(metadata.get("last_mark_price") or position.avg_entry)
+        pnl = (exit_price - float(position.avg_entry)) * float(position.qty)
+
+        await db_session.execute(
+            update(PaperPosition)
+            .where(PaperPosition.position_id == position.position_id)
+            .values(closed_at=now, avg_exit=exit_price, pnl=pnl, state="EXITED")
+        )
+
+        order = PaperOrder(
+            session_id=session_id,
+            broker_order_id=None,
+            signal_id=signal_id,
+            side="SELL",
+            qty=position.qty,
+            order_type="MARKET",
+            limit_price=None,
+            status="FILLED",
+            broker_status=None,
+            broker_payload_json={},
+            created_at=now,
+        )
+        db_session.add(order)
+        await db_session.flush()
+
+        fill = PaperFill(
+            session_id=session_id,
+            order_id=order.order_id,
+            fill_time=now,
+            fill_price=exit_price,
+            qty=position.qty,
+            fees=round(exit_price * float(position.qty) * 0.001, 4),
+            slippage_bps=0,
+        )
+        db_session.add(fill)
+        await db_session.flush()
+
+        if signal_id is not None:
+            await db_session.execute(
+                update(Signal).where(Signal.signal_id == signal_id).values(state="EXITED")
+            )
+
+        event = PaperOrderEvent(
+            session_id=session_id,
+            order_id=order.order_id,
+            signal_id=signal_id,
+            event_type="POSITION_FLATTENED",
+            event_status="FILLED",
+            payload_json={
+                "exit_price": exit_price,
+                "pnl": pnl,
+                "note": exit_note,
+                "position_id": position.position_id,
+            },
+            created_at=now,
+        )
+        db_session.add(event)
+        closed.append(
+            {
+                "position_id": position.position_id,
+                "symbol_id": position.symbol_id,
+                "exit_price": exit_price,
+                "pnl": pnl,
+            }
+        )
+
+    await db_session.commit()
+    return closed
+
+
+# ---------------------------------------------------------------------------
+# Signal state transitions: QUALIFY / ALERT
+# ---------------------------------------------------------------------------
+
+
+async def qualify_session_signals(
+    db_session: AsyncSession,
+    session_id: str,
+    *,
+    max_rank: int | None = None,
+    min_score: float | None = None,
+) -> list[dict[str, Any]]:
+    """Promote top-ranked NEW signals to QUALIFIED and write audit events."""
+    result = await db_session.execute(
+        select(Signal).where(
+            Signal.session_id == session_id,
+            Signal.state == "NEW",
+        )
+    )
+    signals = result.scalars().all()
+
+    qualified: list[dict[str, Any]] = []
+    for signal in signals:
+        pss_result = await db_session.execute(
+            select(PaperSessionSignal).where(
+                PaperSessionSignal.session_id == session_id,
+                PaperSessionSignal.signal_id == signal.signal_id,
+            )
+        )
+        pss = pss_result.scalar_one_or_none()
+        rank = pss.rank if pss else None
+        score = float(pss.selection_score) if pss and pss.selection_score is not None else None
+
+        if max_rank is not None and (rank is None or rank > max_rank):
+            continue
+        if min_score is not None and (score is None or score < min_score):
+            continue
+
+        signal.state = "QUALIFIED"
+        if pss is not None:
+            pss.decision_status = "QUALIFIED"
+        db_session.add(
+            PaperOrderEvent(
+                session_id=session_id,
+                signal_id=signal.signal_id,
+                event_type="SIGNAL_QUALIFIED",
+                event_status="QUALIFIED",
+                payload_json={"rank": rank, "selection_score": score},
+                created_at=_utc_now(),
+            )
+        )
+        qualified.append(_serialize_signal(signal))
+
+    await db_session.commit()
+    return qualified
+
+
+async def alert_session_signals(
+    db_session: AsyncSession,
+    session_id: str,
+    signal_ids: list[int],
+) -> list[dict[str, Any]]:
+    """Promote specific QUALIFIED signals to ALERTED."""
+    result = await db_session.execute(
+        select(Signal).where(
+            Signal.session_id == session_id,
+            Signal.state == "QUALIFIED",
+            Signal.signal_id.in_(signal_ids),
+        )
+    )
+    signals = result.scalars().all()
+
+    alerted: list[dict[str, Any]] = []
+    for signal in signals:
+        signal.state = "ALERTED"
+        pss_result = await db_session.execute(
+            select(PaperSessionSignal).where(
+                PaperSessionSignal.session_id == session_id,
+                PaperSessionSignal.signal_id == signal.signal_id,
+            )
+        )
+        pss = pss_result.scalar_one_or_none()
+        if pss is not None:
+            pss.decision_status = "ALERTED"
+        db_session.add(
+            PaperOrderEvent(
+                session_id=session_id,
+                signal_id=signal.signal_id,
+                event_type="SIGNAL_ALERTED",
+                event_status="ALERTED",
+                payload_json={},
+                created_at=_utc_now(),
+            )
+        )
+        alerted.append(_serialize_signal(signal))
+
+    await db_session.commit()
+    return alerted

@@ -14,8 +14,10 @@ import logging
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date, timedelta
+from typing import Any
 
 from nse_momentum_lab.services.backtest.strategy_registry import resolve_strategy
+from nse_momentum_lab.services.backtest.signal_models import BacktestSignal
 from nse_momentum_lab.services.backtest.vectorbt_engine import (
     VectorBTConfig,
     VectorBTEngine,
@@ -46,6 +48,11 @@ class WalkForwardFramework:
     """Strategy-agnostic walk-forward framework.
 
     Supports anchored and rolling walk-forward analysis.
+
+    Note: the window generators operate on calendar dates, not exchange-trading
+    calendars. On a trading-day dataset this is usually close enough for research
+    validation, but the actual number of sessions in a fold can vary with weekends
+    and holidays.
     """
 
     DEFAULT_TRAIN_YEARS = 3
@@ -69,6 +76,18 @@ class WalkForwardFramework:
     def strategy_name(self) -> str:
         return self._strategy.name if self._strategy else "unknown"
 
+    @staticmethod
+    def _signal_date(signal: Any) -> date | None:
+        if isinstance(signal, BacktestSignal):
+            return signal.signal_date
+        if isinstance(signal, tuple) and signal:
+            candidate = signal[0]
+            return candidate if isinstance(candidate, date) else None
+        if isinstance(signal, dict):
+            candidate = signal.get("signal_date") or signal.get("date")
+            return candidate if isinstance(candidate, date) else None
+        return getattr(signal, "signal_date", None)
+
     def generate_windows(
         self,
         data_start: date,
@@ -85,11 +104,13 @@ class WalkForwardFramework:
         Yields:
             WalkForwardWindow for each fold
         """
-        current_test_start = data_start + timedelta(days=self.train_years * 365)
+        train_window_days = self.train_years * 365
+        test_window_days = self.test_months * 30
+        current_test_start = data_start + timedelta(days=train_window_days)
 
-        while current_test_start + timedelta(days=self.test_months * 30) <= data_end:
+        while current_test_start + timedelta(days=test_window_days) <= data_end:
             test_end = (
-                current_test_start + timedelta(days=self.test_months * 30) - timedelta(days=1)
+                current_test_start + timedelta(days=test_window_days) - timedelta(days=1)
             )
             train_end = current_test_start - timedelta(days=1)
 
@@ -116,6 +137,8 @@ class WalkForwardFramework:
         """Generate rolling walk-forward windows.
 
         Both train and test windows slide forward maintaining constant sizes.
+        The day counts are calendar-day approximations applied to trading-day
+        datasets.
 
         Args:
             data_start: Start date of the data
@@ -162,6 +185,9 @@ class WalkForwardFramework:
     ) -> list[WalkForwardResult]:
         """Run anchored walk-forward analysis.
 
+        Research utility. The production CLI path uses DuckDBBacktestRunner
+        for fold execution and only borrows window generation from this module.
+
         Args:
             strategy_name: Name of the strategy to use
             signals: List of signals from candidate generation
@@ -179,8 +205,18 @@ class WalkForwardFramework:
         engine = VectorBTEngine(config) if config else None
 
         for window in self.generate_windows(data_start, data_end):
-            train_signals = [s for s in signals if window.train_start <= s[0] <= window.train_end]
-            test_signals = [s for s in signals if window.test_start <= s[0] <= window.test_end]
+            train_signals = [
+                s
+                for s in signals
+                if (signal_date := self._signal_date(s)) is not None
+                and window.train_start <= signal_date <= window.train_end
+            ]
+            test_signals = [
+                s
+                for s in signals
+                if (signal_date := self._signal_date(s)) is not None
+                and window.test_start <= signal_date <= window.test_end
+            ]
 
             if engine:
                 train_result = engine.run_backtest(
@@ -224,7 +260,8 @@ class WalkForwardFramework:
             logger.info(
                 f"Walk-forward window {window.train_start}->{window.train_end} "
                 f"(train), {window.test_start}->{window.test_end} (test): "
-                f"train trades={len(train_result.trades)}, test trades={len(test_result.trades)}"
+                f"train trades={len(train_result.trades) if train_result else 0}, "
+                f"test trades={len(test_result.trades) if test_result else 0}"
             )
 
         return results
@@ -243,6 +280,9 @@ class WalkForwardFramework:
         config: VectorBTConfig | None = None,
     ) -> list[WalkForwardResult]:
         """Run rolling walk-forward analysis.
+
+        Research utility. The production CLI path uses DuckDBBacktestRunner
+        for fold execution and only borrows window generation from this module.
 
         Args:
             strategy_name: Name of the strategy to use
@@ -270,8 +310,18 @@ class WalkForwardFramework:
             test_days,
             roll_interval_days,
         ):
-            train_signals = [s for s in signals if window.train_start <= s[0] <= window.train_end]
-            test_signals = [s for s in signals if window.test_start <= s[0] <= window.test_end]
+            train_signals = [
+                s
+                for s in signals
+                if (signal_date := self._signal_date(s)) is not None
+                and window.train_start <= signal_date <= window.train_end
+            ]
+            test_signals = [
+                s
+                for s in signals
+                if (signal_date := self._signal_date(s)) is not None
+                and window.test_start <= signal_date <= window.test_end
+            ]
 
             if engine:
                 train_result = engine.run_backtest(
@@ -316,7 +366,8 @@ class WalkForwardFramework:
             logger.info(
                 f"Rolling walk-forward window {window.train_start}->{window.train_end} "
                 f"(train), {window.test_start}->{window.test_end} (test): "
-                f"train trades={len(train_result.trades)}, test trades={len(test_result.trades)}"
+                f"train trades={len(train_result.trades) if train_result else 0}, "
+                f"test trades={len(test_result.trades) if test_result else 0}"
             )
 
         return results

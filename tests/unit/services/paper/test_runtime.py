@@ -141,7 +141,7 @@ class TestPaperRuntimeScaffold:
         assert mock_reset_queue.await_count == 1
         assert mock_upsert_signal.await_count == 2
         assert mock_upsert_session_signal.await_count == 2
-        assert mock_create.await_count == 2
+        assert mock_create.await_count == 1
 
     @patch(
         "nse_momentum_lab.services.paper.runtime.get_paper_session_summary", new_callable=AsyncMock

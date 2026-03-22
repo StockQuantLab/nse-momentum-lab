@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import inspect
 import json
 import logging
 from dataclasses import dataclass, field
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from nse_momentum_lab.db.market_db import get_backtest_db
-from nse_momentum_lab.db.models import MdOhlcvAdj, RefSymbol
+from nse_momentum_lab.db.models import MdOhlcvAdj, PaperPosition, RefSymbol
 from nse_momentum_lab.db.paper import (
     create_or_update_paper_session,
     get_paper_feed_state,
@@ -75,6 +76,8 @@ class PaperRuntimeScaffold:
 
     def __init__(self, *, feed_batch_size: int = 3000) -> None:
         self.feed_batch_size = feed_batch_size
+        self._traders: dict[str, PaperTrader] = {}
+        self._last_risk_reset_date: dict[str, date] = {}
 
     @staticmethod
     def _safe_json(value: Any) -> dict[str, Any]:
@@ -169,13 +172,20 @@ class PaperRuntimeScaffold:
             normalized.append(row)
         return normalized
 
-    async def _load_queue_from_experiment(
+    async def _fetch_queue_from_experiment(
         self,
         db_session: Any,
         plan: PaperRuntimePlan,
     ) -> dict[str, Any]:
         if not plan.experiment_id or plan.trade_date is None:
-            return {"queue_size": 0, "actionable_queue_size": 0, "symbols": []}
+            return {
+                "rows": [],
+                "queue_size": 0,
+                "actionable_queue_size": 0,
+                "symbols": [],
+                "ref_symbols": {},
+                "missing_symbols": [],
+            }
 
         backtest_db = get_backtest_db(read_only=True)
         diagnostics_df = backtest_db.get_experiment_execution_diagnostics(plan.experiment_id)
@@ -211,17 +221,43 @@ class PaperRuntimeScaffold:
 
         missing_symbols = sorted(set(symbols) - set(ref_symbols))
         if missing_symbols:
-            raise ValueError(
-                "RefSymbol rows missing for experiment queue symbols: "
-                + ", ".join(missing_symbols[:10])
+            logger.warning(
+                "Skipping %d missing ref symbols for experiment %s: %s",
+                len(missing_symbols),
+                plan.experiment_id,
+                ", ".join(missing_symbols[:10]),
             )
 
+        return {
+            "rows": rows,
+            "queue_size": len(rows),
+            "actionable_queue_size": sum(
+                1
+                for row in rows
+                if str(row.get("status") or "ARCHIVED").strip().lower()
+                in ACTIONABLE_BACKTEST_STATUSES
+                and str(row.get("symbol") or "").strip().upper() in ref_symbols
+            ),
+            "symbols": sorted(ref_symbols),
+            "ref_symbols": ref_symbols,
+            "missing_symbols": missing_symbols,
+        }
+
+    async def _persist_queue_from_experiment(
+        self,
+        db_session: Any,
+        plan: PaperRuntimePlan,
+        queue: dict[str, Any],
+    ) -> None:
         await reset_session_signal_queue(db_session, plan.session_id)
 
-        actionable = 0
-        for row in rows:
+        ref_symbols = cast(dict[str, Any], queue.get("ref_symbols", {}))
+        for row in cast(list[dict[str, Any]], queue.get("rows", [])):
             symbol = str(row.get("symbol") or "").strip().upper()
-            ref_symbol = ref_symbols[symbol]
+            ref_symbol = ref_symbols.get(symbol)
+            if ref_symbol is None:
+                continue
+
             metadata_json = self._build_signal_metadata(plan, row)
             signal_state = self._signal_state_from_backtest_status(
                 str(row.get("status") or "ARCHIVED")
@@ -258,14 +294,6 @@ class PaperRuntimeScaffold:
                 decision_reason=str(row.get("reason") or "") or None,
                 metadata_json=metadata_json,
             )
-            if signal_state == "NEW":
-                actionable += 1
-
-        return {
-            "queue_size": len(rows),
-            "actionable_queue_size": actionable,
-            "symbols": symbols,
-        }
 
     async def _load_eod_prices(
         self,
@@ -348,10 +376,50 @@ class PaperRuntimeScaffold:
                 price_date: {
                     "close": float(last_price),
                     "close_adj": float(last_price),
-                    "value_traded_inr": 0.0,
+                    "value_traded_inr": None,
                 }
             }
         return prices
+
+    def _get_trader(self, session_id: str, risk_config: dict[str, Any] | None) -> PaperTrader:
+        trader = self._traders.get(session_id)
+        if trader is None:
+            trader = PaperTrader(risk_config=self._risk_config_from_dict(risk_config))
+            self._traders[session_id] = trader
+        return trader
+
+    async def _sync_trader_state(
+        self,
+        db_session: Any,
+        session_id: str,
+        trader: PaperTrader,
+        cycle_date: date,
+    ) -> None:
+        last_reset_date = self._last_risk_reset_date.get(session_id)
+        if last_reset_date != cycle_date:
+            trader.reset_daily()
+            self._last_risk_reset_date[session_id] = cycle_date
+
+        try:
+            result = await db_session.execute(
+                select(PaperPosition).where(
+                    PaperPosition.session_id == session_id,
+                    PaperPosition.closed_at.is_(None),
+                )
+            )
+            positions = result.scalars().all()
+            if inspect.isawaitable(positions):
+                positions = await positions
+        except Exception:
+            logger.debug(
+                "Skipping trader position hydration for session %s",
+                session_id,
+                exc_info=True,
+            )
+            return
+
+        if isinstance(positions, list):
+            trader.hydrate_positions(positions, session_id)
 
     async def prepare_session(
         self,
@@ -365,38 +433,37 @@ class PaperRuntimeScaffold:
         queue_stats = {"queue_size": 0, "actionable_queue_size": 0}
 
         async with sessionmaker() as db_session:
-            await create_or_update_paper_session(
-                db_session,
-                session_id=plan.session_id,
-                trade_date=plan.trade_date,
-                strategy_name=plan.strategy_name,
-                mode=plan.mode,
-                status=status,
-                experiment_id=plan.experiment_id,
-                symbols=plan.symbols,
-                strategy_params=plan.strategy_params,
-                risk_config=plan.risk_config,
-                notes=plan.notes,
-            )
             if plan.experiment_id and plan.trade_date:
-                queue_stats = await self._load_queue_from_experiment(db_session, plan)
-                queue_symbols = cast(list[str], queue_stats.get("symbols", []))
-                if queue_symbols:
-                    effective_symbols = list(queue_symbols)
-                    await create_or_update_paper_session(
-                        db_session,
-                        session_id=plan.session_id,
-                        trade_date=plan.trade_date,
-                        strategy_name=plan.strategy_name,
-                        mode=plan.mode,
-                        status=status,
-                        experiment_id=plan.experiment_id,
-                        symbols=effective_symbols,
-                        strategy_params=plan.strategy_params,
-                        risk_config=plan.risk_config,
-                        notes=plan.notes,
-                    )
+                queue_stats = await self._fetch_queue_from_experiment(db_session, plan)
+                effective_symbols = list(cast(list[str], queue_stats.get("symbols", [])))
+                await create_or_update_paper_session(
+                    db_session,
+                    session_id=plan.session_id,
+                    trade_date=plan.trade_date,
+                    strategy_name=plan.strategy_name,
+                    mode=plan.mode,
+                    status=status,
+                    experiment_id=plan.experiment_id,
+                    symbols=effective_symbols,
+                    strategy_params=plan.strategy_params,
+                    risk_config=plan.risk_config,
+                    notes=plan.notes,
+                )
+                await self._persist_queue_from_experiment(db_session, plan, queue_stats)
             else:
+                await create_or_update_paper_session(
+                    db_session,
+                    session_id=plan.session_id,
+                    trade_date=plan.trade_date,
+                    strategy_name=plan.strategy_name,
+                    mode=plan.mode,
+                    status=status,
+                    experiment_id=plan.experiment_id,
+                    symbols=plan.symbols,
+                    strategy_params=plan.strategy_params,
+                    risk_config=plan.risk_config,
+                    notes=plan.notes,
+                )
                 synced_signals = await sync_paper_session_signals_from_signals(
                     db_session,
                     plan.session_id,
@@ -511,14 +578,24 @@ class PaperRuntimeScaffold:
                 await list_session_signals(
                     db_session,
                     session_id,
-                    states={"NEW", "QUALIFIED", "ALERTED"},
+                    states={"NEW", "QUALIFIED", "ALERTED", "ENTERED"},
                 )
             )
-            prices = await self._load_eod_prices(db_session, signals)
-            trader = PaperTrader(
-                risk_config=self._risk_config_from_dict(summary["session"].get("risk_config"))
-            )
-            results = await trader.process_signals(signals, prices, db_session, session_id)
+            cycle_date = self._coerce_date(summary["session"].get("trade_date"))
+            if cycle_date is None:
+                cycle_date = next(
+                    (
+                        signal.get("planned_entry_date")
+                        for signal in signals
+                        if signal.get("planned_entry_date") is not None
+                    ),
+                    _utc_today(),
+                )
+            replay_signals = [{**signal, "planned_entry_date": cycle_date} for signal in signals]
+            trader = self._get_trader(session_id, summary["session"].get("risk_config"))
+            await self._sync_trader_state(db_session, session_id, trader, cycle_date)
+            prices = await self._load_eod_prices(db_session, replay_signals)
+            results = await trader.process_signals(replay_signals, prices, db_session, session_id)
             refreshed_summary = await get_paper_session_summary(db_session, session_id)
 
         return {
@@ -540,22 +617,21 @@ class PaperRuntimeScaffold:
             if summary is None:
                 raise ValueError(f"Paper session {session_id} not found")
 
+            today = self._coerce_date(summary["session"].get("trade_date")) or _utc_today()
             signals = self._normalize_runtime_signals(
                 await list_session_signals(
                     db_session,
                     session_id,
-                    states={"NEW", "QUALIFIED", "ALERTED"},
+                    states={"NEW", "QUALIFIED", "ALERTED", "ENTERED"},
                 )
             )
-            today = self._coerce_date(summary["session"].get("trade_date")) or _utc_today()
             live_signals = [{**signal, "planned_entry_date": today} for signal in signals]
+            trader = self._get_trader(session_id, summary["session"].get("risk_config"))
+            await self._sync_trader_state(db_session, session_id, trader, today)
             prices = await self._load_live_prices(
                 db_session,
                 live_signals,
                 kite_client=kite_client,
-            )
-            trader = PaperTrader(
-                risk_config=self._risk_config_from_dict(summary["session"].get("risk_config"))
             )
             results = await trader.process_signals(live_signals, prices, db_session, session_id)
             refreshed_summary = await get_paper_session_summary(db_session, session_id)

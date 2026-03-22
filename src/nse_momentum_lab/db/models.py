@@ -336,6 +336,9 @@ class PaperSession(Base):
     feed_state: Mapped[PaperFeedState | None] = relationship(
         "PaperFeedState", back_populates="paper_session", uselist=False
     )
+    walk_forward_folds: Mapped[list[WalkForwardFold]] = relationship(
+        "WalkForwardFold", back_populates="paper_session"
+    )
 
 
 class Signal(Base):
@@ -865,3 +868,42 @@ class RptBtFailureDaily(Base):
     avg_r: Mapped[numeric | None] = mapped_column(Numeric(10, 6))
     median_r: Mapped[numeric | None] = mapped_column(Numeric(10, 6))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class WalkForwardFold(Base):
+    """Per-fold results for a walk-forward paper session."""
+
+    __tablename__ = "walk_forward_fold"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["wf_session_id"], ["nseml.paper_session.session_id"], ondelete="CASCADE"
+        ),
+        UniqueConstraint(
+            "wf_session_id", "fold_index", name="uq_walk_forward_fold_session_index"
+        ),
+        Index("idx_walk_forward_fold_session", "wf_session_id"),
+        {"schema": "nseml"},
+    )
+
+    fold_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    wf_session_id: Mapped[str] = mapped_column(
+        String(SESSION_ID_LEN),
+        ForeignKey("nseml.paper_session.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    fold_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    train_start: Mapped[date] = mapped_column(Date, nullable=False)
+    train_end: Mapped[date] = mapped_column(Date, nullable=False)
+    test_start: Mapped[date] = mapped_column(Date, nullable=False)
+    test_end: Mapped[date] = mapped_column(Date, nullable=False)
+    exp_id: Mapped[str | None] = mapped_column(String(EXPERIMENT_ID_LEN))
+    status: Mapped[str | None] = mapped_column(Text)
+    total_return_pct: Mapped[numeric | None] = mapped_column(Numeric(10, 4))
+    max_drawdown_pct: Mapped[numeric | None] = mapped_column(Numeric(10, 4))
+    profit_factor: Mapped[numeric | None] = mapped_column(Numeric(10, 4))
+    total_trades: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    paper_session: Mapped[PaperSession] = relationship(
+        "PaperSession", back_populates="walk_forward_folds"
+    )

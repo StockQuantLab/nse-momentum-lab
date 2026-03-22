@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import date
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from nse_momentum_lab.cli.paper import build_parser, main
+from nse_momentum_lab.cli.paper import _evaluate_walk_forward, _summarize_folds, build_parser, main
 
 
 class TestPaperCLI:
@@ -10,11 +12,13 @@ class TestPaperCLI:
         parser = build_parser()
         commands = sorted(parser._subparsers._group_actions[0].choices.keys())  # type: ignore[attr-defined]
         assert commands == [
+            "alert",
             "archive",
             "flatten",
             "live",
             "pause",
             "prepare",
+            "qualify",
             "replay-day",
             "resume",
             "status",
@@ -60,6 +64,37 @@ class TestPaperCLI:
                 assert exc.code == 2
             else:
                 raise AssertionError("Expected parser failure for end date before start date")
+
+    def test_walk_forward_decision_requires_performance(self) -> None:
+        passing_summary = _summarize_folds(
+            [
+                {
+                    "status": "completed",
+                    "total_return_pct": 1.5,
+                    "max_drawdown_pct": 4.0,
+                    "total_trades": 10,
+                },
+                {
+                    "status": "completed",
+                    "total_return_pct": 2.0,
+                    "max_drawdown_pct": 3.5,
+                    "total_trades": 12,
+                },
+            ]
+        )
+        failing_summary = _summarize_folds(
+            [
+                {
+                    "status": "completed",
+                    "total_return_pct": -1.0,
+                    "max_drawdown_pct": 20.0,
+                    "total_trades": 10,
+                }
+            ]
+        )
+
+        assert _evaluate_walk_forward(passing_summary)["status"] == "PASS"
+        assert _evaluate_walk_forward(failing_summary)["status"] == "FAIL"
 
     @patch("nse_momentum_lab.cli.paper.create_or_update_paper_session", new_callable=AsyncMock)
     @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
@@ -207,3 +242,70 @@ class TestPaperCLI:
 
         mock_prepare.assert_awaited_once()
         mock_execute.assert_awaited_once()
+
+    @patch("nse_momentum_lab.cli.paper.set_paper_session_status", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper.update_paper_session", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper.insert_walk_forward_fold", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper.reset_walk_forward_folds", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper.create_or_update_paper_session", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper.DuckDBBacktestRunner")
+    @patch("nse_momentum_lab.cli.paper.WalkForwardFramework")
+    @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
+    def test_walk_forward_resets_existing_fold_rows_before_rerun(
+        self,
+        mock_sm: MagicMock,
+        mock_framework_cls: MagicMock,
+        mock_runner_cls: MagicMock,
+        mock_create: AsyncMock,
+        mock_reset_folds: AsyncMock,
+        mock_insert_fold: AsyncMock,
+        mock_update_session: AsyncMock,
+        mock_set_status: AsyncMock,
+    ) -> None:
+        mock_session = AsyncMock()
+        mock_session.commit = AsyncMock()
+        mock_context = MagicMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_context.__aexit__ = AsyncMock()
+        mock_sm.return_value.return_value = mock_context
+
+        mock_framework = MagicMock()
+        mock_framework.generate_rolling_windows.return_value = [
+            SimpleNamespace(
+                train_start=date(2025, 4, 1),
+                train_end=date(2025, 12, 8),
+                test_start=date(2025, 12, 9),
+                test_end=date(2026, 2, 9),
+            )
+        ]
+        mock_framework_cls.return_value = mock_framework
+
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = "exp-1"
+        mock_runner.results_db.get_experiment.return_value = {
+            "status": "completed",
+            "total_return_pct": 2.5,
+            "max_drawdown_pct": 3.0,
+            "profit_factor": 1.4,
+            "total_trades": 11,
+        }
+        mock_runner_cls.return_value = mock_runner
+
+        with patch(
+            "sys.argv",
+            [
+                "nseml-paper",
+                "walk-forward",
+                "--start-date",
+                "2025-04-01",
+                "--end-date",
+                "2026-03-09",
+                "--max-folds",
+                "1",
+            ],
+        ):
+            main()
+
+        mock_reset_folds.assert_awaited_once_with(mock_session, "wf-indian_2lynch-2025-04-01-2026-03-09")
+        mock_insert_fold.assert_awaited_once()
+        mock_set_status.assert_awaited()

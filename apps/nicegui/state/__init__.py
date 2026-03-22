@@ -21,13 +21,13 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import polars as pl
 import time
-from sqlalchemy import select
+from sqlalchemy import and_, func, select
 
 if TYPE_CHECKING:
     pass
 
 from nse_momentum_lab.db import get_sessionmaker
-from nse_momentum_lab.db.models import PaperPosition
+from nse_momentum_lab.db.models import MdOhlcvAdj, PaperPosition, RefSymbol
 from nse_momentum_lab.db.paper import (
     get_paper_session_summary,
     list_paper_fills,
@@ -35,6 +35,7 @@ from nse_momentum_lab.db.paper import (
     list_paper_orders,
     list_paper_session_signals,
     list_paper_sessions,
+    list_walk_forward_folds,
 )
 from nse_momentum_lab.db.market_db import get_backtest_db, get_market_db, MarketDataDB
 
@@ -300,7 +301,7 @@ def _strategy_display_name(row: dict) -> str:
     if "params_json" in row and row.get("params_json") is not None:
         try:
             params = _json.loads(row["params_json"])
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
     threshold = params.get("breakout_threshold")
     if threshold is not None and name not in ("Indian2LYNCH",):
@@ -322,7 +323,7 @@ def _run_window_display(row: dict) -> str:
 
     try:
         params = _json.loads(row["params_json"])
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return fallback
 
     start_date = params.get("start_date")
@@ -354,7 +355,7 @@ def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
         if created_val is not None:
             try:
                 created = f" | {created_val.strftime('%b %d %H:%M')}"
-            except AttributeError, TypeError:
+            except (AttributeError, TypeError):
                 created = f" | {str(created_val)[:16]}"
 
         label = f"{strategy} | {window} | {trades:,} trades | Ret {ret:.1f}%{created}"
@@ -456,22 +457,83 @@ async def aget_paper_positions(
         query = query.order_by(PaperPosition.opened_at.desc())
         result = await session.execute(query)
         rows = result.scalars().all()
+
+        symbol_ids = sorted({row.symbol_id for row in rows})
+        symbol_map: dict[int, str] = {}
+        if symbol_ids:
+            symbol_result = await session.execute(
+                select(RefSymbol.symbol_id, RefSymbol.symbol).where(RefSymbol.symbol_id.in_(symbol_ids))
+            )
+            symbol_map = {
+                symbol_id: str(symbol).strip()
+                for symbol_id, symbol in symbol_result.all()
+                if symbol is not None and str(symbol).strip()
+            }
+
+        open_symbol_ids = sorted(
+            {row.symbol_id for row in rows if row.closed_at is None and row.symbol_id is not None}
+        )
+        latest_close_map: dict[int, float] = {}
+        if open_symbol_ids:
+            latest_dates = (
+                select(
+                    MdOhlcvAdj.symbol_id.label("symbol_id"),
+                    func.max(MdOhlcvAdj.trading_date).label("max_date"),
+                )
+                .where(MdOhlcvAdj.symbol_id.in_(open_symbol_ids))
+                .group_by(MdOhlcvAdj.symbol_id)
+                .subquery()
+            )
+            close_result = await session.execute(
+                select(MdOhlcvAdj.symbol_id, MdOhlcvAdj.close_adj).join(
+                    latest_dates,
+                    and_(
+                        MdOhlcvAdj.symbol_id == latest_dates.c.symbol_id,
+                        MdOhlcvAdj.trading_date == latest_dates.c.max_date,
+                    ),
+                )
+            )
+            latest_close_map = {
+                symbol_id: float(close_adj)
+                for symbol_id, close_adj in close_result.all()
+                if close_adj is not None
+            }
+
         return [
             {
                 "position_id": row.position_id,
                 "session_id": row.session_id,
                 "symbol_id": row.symbol_id,
+                "symbol": symbol_map.get(row.symbol_id),
                 "opened_at": row.opened_at.isoformat() if row.opened_at else None,
                 "closed_at": row.closed_at.isoformat() if row.closed_at else None,
                 "avg_entry": float(row.avg_entry) if row.avg_entry is not None else None,
                 "avg_exit": float(row.avg_exit) if row.avg_exit is not None else None,
                 "qty": float(row.qty) if row.qty is not None else None,
                 "pnl": float(row.pnl) if row.pnl is not None else None,
+                "market_price": latest_close_map.get(row.symbol_id),
+                "unrealized_pnl": (
+                    (
+                        latest_close_map.get(row.symbol_id) - float(row.avg_entry)
+                    )
+                    * float(row.qty)
+                    if row.closed_at is None
+                    and latest_close_map.get(row.symbol_id) is not None
+                    and row.avg_entry is not None
+                    and row.qty is not None
+                    else None
+                ),
                 "state": row.state,
                 "metadata_json": row.metadata_json or {},
             }
             for row in rows
         ]
+
+
+async def aget_walk_forward_folds(session_id: str) -> list[dict]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return await list_walk_forward_folds(session, session_id)
 
 
 _experiment_callbacks: list = []

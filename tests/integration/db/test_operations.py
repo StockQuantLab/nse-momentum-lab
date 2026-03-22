@@ -187,29 +187,32 @@ class TestJobRunOperations:
 
     async def test_idempotency_key_unique(self, db_session, clean_db):
         """Test that idempotency keys are unique."""
+        from uuid import uuid7
+
         from sqlalchemy.exc import IntegrityError
+
+        unique_key = f"unique_key_{uuid7().hex}"
 
         await insert_job_run_raw(
             db_session,
             job_name="test_job",
             asof_date=date(2024, 1, 15),
-            idempotency_key="unique_key_123",
+            idempotency_key=unique_key,
             status="COMPLETED",
             started_at=datetime.now(UTC),
         )
         await db_session.commit()
 
-        # Try to insert duplicate idempotency key
-        await insert_job_run_raw(
-            db_session,
-            job_name="test_job",
-            asof_date=date(2024, 1, 15),
-            idempotency_key="unique_key_123",  # Duplicate key
-            status="RUNNING",
-            started_at=datetime.now(UTC),
-        )
-
+        # Try to insert duplicate idempotency key — error may fire at execute or commit
         with pytest.raises(IntegrityError):
+            await insert_job_run_raw(
+                db_session,
+                job_name="test_job",
+                asof_date=date(2024, 1, 15),
+                idempotency_key=unique_key,  # Duplicate key
+                status="RUNNING",
+                started_at=datetime.now(UTC),
+            )
             await db_session.commit()
 
     async def test_update_job_status(self, db_session, clean_db):
@@ -254,8 +257,20 @@ class TestScanOperations:
         """Test inserting scan run with results."""
         symbols = setup_test_data
 
+        # scan_run requires a scan_definition parent row; upsert to survive reruns
+        result = await db_session.execute(
+            text(
+                "INSERT INTO nseml.scan_definition (name, version, config_json) "
+                "VALUES ('test_strategy', '1.0', '{}') "
+                "ON CONFLICT (name, version) DO UPDATE SET config_json = EXCLUDED.config_json "
+                "RETURNING scan_def_id"
+            )
+        )
+        scan_def_id = result.scalar_one()
+        await db_session.commit()
+
         scan_run = ScanRun(
-            scan_def_id=1,
+            scan_def_id=scan_def_id,
             asof_date=date(2024, 1, 15),
             dataset_hash="abcd1234",
             status="COMPLETED",

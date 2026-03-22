@@ -36,6 +36,7 @@ from apps.nicegui.state import (
     aget_paper_session_signals,
     aget_paper_session_summary,
     aget_paper_sessions,
+    aget_walk_forward_folds,
 )
 
 
@@ -44,7 +45,7 @@ def _fmt_float(value: Any, digits: int = 2) -> str:
         return "-"
     try:
         return f"{float(value):,.{digits}f}"
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return str(value)
 
 
@@ -132,16 +133,64 @@ def _position_rows(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "position_id": row.get("position_id"),
+            "symbol": row.get("symbol") or f"ID {row.get('symbol_id')}",
             "symbol_id": row.get("symbol_id"),
             "qty": _fmt_float(row.get("qty")),
             "avg_entry": _fmt_float(row.get("avg_entry")),
             "avg_exit": _fmt_float(row.get("avg_exit")),
             "pnl": _fmt_float(row.get("pnl")),
+            "market_price": _fmt_float(row.get("market_price")),
+            "unrealized_pnl": _fmt_float(row.get("unrealized_pnl")),
             "state": row.get("state"),
             "opened_at": _fmt_ts(row.get("opened_at")),
             "closed_at": _fmt_ts(row.get("closed_at")),
         }
         for row in positions
+    ]
+
+
+def _walk_forward_rows(strategy_params: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not strategy_params:
+        return []
+    walk_forward = strategy_params.get("walk_forward")
+    if not isinstance(walk_forward, dict):
+        return []
+    folds = walk_forward.get("folds")
+    if not isinstance(folds, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for idx, fold in enumerate(folds, start=1):
+        if not isinstance(fold, dict):
+            continue
+        rows.append(
+            {
+                "fold": idx,
+                "train": f"{fold.get('train_start') or '-'} -> {fold.get('train_end') or '-'}",
+                "test": f"{fold.get('test_start') or '-'} -> {fold.get('test_end') or '-'}",
+                "status": fold.get("status") or "-",
+                "return_pct": _fmt_float(fold.get("total_return_pct")),
+                "drawdown_pct": _fmt_float(fold.get("max_drawdown_pct")),
+                "trades": fold.get("total_trades") or 0,
+                "exp_id": str(fold.get("exp_id") or "")[:12],
+            }
+        )
+    return rows
+
+
+def _walk_forward_rows_from_db(db_folds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Format DB-sourced WalkForwardFold rows for the paginated table."""
+    return [
+        {
+            "fold": fold.get("fold_index"),
+            "train": f"{fold.get('train_start') or '-'} -> {fold.get('train_end') or '-'}",
+            "test": f"{fold.get('test_start') or '-'} -> {fold.get('test_end') or '-'}",
+            "status": fold.get("status") or "-",
+            "return_pct": _fmt_float(fold.get("total_return_pct")),
+            "drawdown_pct": _fmt_float(fold.get("max_drawdown_pct")),
+            "trades": fold.get("total_trades") or 0,
+            "exp_id": str(fold.get("exp_id") or "")[:12],
+        }
+        for fold in db_folds
     ]
 
 
@@ -176,20 +225,6 @@ async def paper_ledger_page() -> None:
                 "experiment/date, execute replay or live once, and monitor feed, queue, orders, fills, and positions here."
             ).style(f"color: {THEME['text_muted']};")
 
-        with ui.column().classes("kpi-card p-5 mb-6"):
-            ui.label("Commands").classes("text-lg font-semibold mb-3").style(
-                f"color: {THEME['text_primary']};"
-            )
-            for command in [
-                "doppler run -- uv run nseml-paper walk-forward --strategy indian_2lynch --start-date 2025-04-01 --end-date 2026-03-09",
-                "doppler run -- uv run nseml-paper replay-day --trade-date 2026-03-09 --experiment-id <EXP_ID> --execute",
-                "doppler run -- uv run nseml-paper live --trade-date 2026-03-23 --experiment-id <EXP_ID> --execute",
-                "doppler run -- uv run nseml-paper stream --trade-date 2026-03-23 --experiment-id <EXP_ID>",
-            ]:
-                ui.label(command).classes("font-mono text-sm px-3 py-2 rounded mb-2").style(
-                    f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
-                )
-
         try:
             sessions = await aget_paper_sessions(limit=50)
         except Exception as exc:
@@ -218,21 +253,163 @@ async def paper_ledger_page() -> None:
         option_map = {
             _session_label(session): session["session_id"] for session in ordered_sessions
         }
-        current = {"label": next(iter(option_map)), "session_id": ordered_sessions[0]["session_id"]}
+        current = {
+            "label": next(iter(option_map)),
+            "session_id": ordered_sessions[0]["session_id"],
+            "auto_refresh": False,
+        }
 
+        async def handle_session_change(event) -> None:
+            current["label"] = str(event.value)
+            current["session_id"] = option_map[current["label"]]
+            await render_session(current["session_id"])
+
+        with ui.row().classes("items-center gap-3 mb-6"):
+            ui.select(
+                options=list(option_map.keys()),
+                value=current["label"],
+                label="Paper Session",
+                on_change=handle_session_change,
+            ).classes("min-w-[420px]")
+            ui.button(
+                "Refresh",
+                icon="refresh",
+                on_click=lambda: asyncio.create_task(render_session(current["session_id"])),
+            ).props("outline")
+            ui.label("Auto-refresh every 30s when active").classes("text-sm").style(
+                f"color: {THEME['text_muted']};"
+            )
+
+        commands_card = ui.column().classes("kpi-card p-5 mb-6")
+        wf_card = ui.column().classes("kpi-card p-5 mb-6")
         content = ui.column().classes("w-full")
+
+        def render_dynamic_panels(
+            session: dict[str, Any], db_folds: list[dict[str, Any]] | None = None
+        ) -> None:
+            strategy = str(session.get("strategy_name") or "indian_2lynch")
+            trade_date = str(session.get("trade_date") or "<TRADE_DATE>")
+            exp_id = str(session.get("experiment_id") or "<EXP_ID>")
+
+            commands_card.clear()
+            with commands_card:
+                ui.label("Commands").classes("text-lg font-semibold mb-3").style(
+                    f"color: {THEME['text_primary']};"
+                )
+                for command in [
+                    (
+                        "doppler run -- uv run nseml-paper walk-forward "
+                        f"--strategy {strategy} --start-date 2025-04-01 --end-date 2026-03-09"
+                    ),
+                    (
+                        "doppler run -- uv run nseml-paper replay-day "
+                        f"--trade-date {trade_date} --experiment-id {exp_id} --execute"
+                    ),
+                    (
+                        "doppler run -- uv run nseml-paper live "
+                        f"--trade-date {trade_date} --experiment-id {exp_id} --execute"
+                    ),
+                    (
+                        "doppler run -- uv run nseml-paper stream "
+                        f"--trade-date {trade_date} --experiment-id {exp_id}"
+                    ),
+                ]:
+                    ui.label(command).classes("font-mono text-sm px-3 py-2 rounded mb-2").style(
+                        f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
+                    )
+
+            wf_card.clear()
+            with wf_card:
+                ui.label("Walk-Forward").classes("text-lg font-semibold mb-3").style(
+                    f"color: {THEME['text_primary']};"
+                )
+                strategy_params = session.get("strategy_params") or {}
+                walk_forward = strategy_params.get("walk_forward")
+                if not isinstance(walk_forward, dict):
+                    empty_state(
+                        "No walk-forward report",
+                        "This session has no persisted walk-forward summary yet.",
+                        icon="query_stats",
+                    )
+                    return
+
+                decision = walk_forward.get("decision") or {}
+                summary = walk_forward.get("summary") or {}
+                kpi_grid(
+                    [
+                        dict(
+                            title="Decision",
+                            value=str(decision.get("status") or "-"),
+                            subtitle=str(decision.get("reason") or "-"),
+                            icon="flag",
+                            color=_status_color(decision.get("status")),
+                        ),
+                        dict(
+                            title="Folds",
+                            value=int(summary.get("folds_total") or 0),
+                            subtitle=f"Completed {int(summary.get('folds_completed') or 0)}",
+                            icon="view_week",
+                            color=COLORS["info"],
+                        ),
+                        dict(
+                            title="Avg Return",
+                            value=_fmt_float(summary.get("avg_return_pct")),
+                            subtitle=f"Median {_fmt_float(summary.get('median_return_pct'))}%",
+                            icon="trending_up",
+                            color=COLORS["success"],
+                        ),
+                        dict(
+                            title="Worst DD",
+                            value=_fmt_float(summary.get("worst_drawdown_pct")),
+                            subtitle=f"Profitable {summary.get('folds_profitable') or 0}",
+                            icon="trending_down",
+                            color=COLORS["warning"],
+                        ),
+                    ],
+                    columns=4,
+                )
+
+                wf_rows = (
+                    _walk_forward_rows_from_db(db_folds)
+                    if db_folds
+                    else _walk_forward_rows(strategy_params)
+                )
+                if wf_rows:
+                    paginated_table(
+                        rows=wf_rows,
+                        columns=[
+                            {"name": "fold", "label": "Fold", "field": "fold"},
+                            {"name": "train", "label": "Train", "field": "train"},
+                            {"name": "test", "label": "Test", "field": "test"},
+                            {"name": "status", "label": "Status", "field": "status"},
+                            {"name": "return_pct", "label": "Return", "field": "return_pct"},
+                            {"name": "drawdown_pct", "label": "Drawdown", "field": "drawdown_pct"},
+                            {"name": "trades", "label": "Trades", "field": "trades"},
+                            {"name": "exp_id", "label": "Exp", "field": "exp_id"},
+                        ],
+                        page_size=8,
+                    )
+                else:
+                    empty_state(
+                        "No fold rows",
+                        "The persisted walk-forward payload does not contain per-fold results.",
+                        icon="table_rows",
+                    )
 
         async def render_session(session_id: str) -> None:
             content.clear()
             with content:
                 try:
-                    summary, signals, orders, fills, events, positions = await asyncio.gather(
-                        aget_paper_session_summary(session_id),
-                        aget_paper_session_signals(session_id),
-                        aget_paper_session_orders(session_id, limit=100),
-                        aget_paper_session_fills(session_id, limit=100),
-                        aget_paper_session_events(session_id, limit=100),
-                        aget_paper_positions(session_id, open_only=False),
+                    summary, signals, orders, fills, events, positions, db_folds = (
+                        await asyncio.gather(
+                            aget_paper_session_summary(session_id),
+                            aget_paper_session_signals(session_id),
+                            aget_paper_session_orders(session_id, limit=100),
+                            aget_paper_session_fills(session_id, limit=100),
+                            aget_paper_session_events(session_id, limit=100),
+                            aget_paper_positions(session_id, open_only=False),
+                            aget_walk_forward_folds(session_id),
+                        )
                     )
                 except Exception as exc:
                     info_box(f"Could not load session data for {session_id}: {exc}", color="red")
@@ -251,6 +428,23 @@ async def paper_ledger_page() -> None:
                 feed_state = summary.get("feed_state") or {}
                 session_color = _status_color(session.get("status"))
                 feed_color = _status_color(feed_state.get("status"))
+                current["auto_refresh"] = str(session.get("status") or "").upper() in {
+                    "ACTIVE",
+                    "RUNNING",
+                }
+                render_dynamic_panels(session, db_folds=db_folds)
+
+                realized_pnl = sum(
+                    float(row.get("pnl") or 0.0)
+                    for row in positions
+                    if row.get("pnl") is not None
+                )
+                unrealized_pnl = sum(
+                    float(row.get("unrealized_pnl") or 0.0)
+                    for row in positions
+                    if row.get("unrealized_pnl") is not None
+                )
+                total_pnl = realized_pnl + unrealized_pnl
 
                 kpi_grid(
                     [
@@ -291,6 +485,33 @@ async def paper_ledger_page() -> None:
                         ),
                     ],
                     columns=5,
+                )
+
+                kpi_grid(
+                    [
+                        dict(
+                            title="Realized P&L",
+                            value=_fmt_float(realized_pnl),
+                            subtitle="Closed positions",
+                            icon="account_balance_wallet",
+                            color=COLORS["success"] if realized_pnl >= 0 else COLORS["error"],
+                        ),
+                        dict(
+                            title="Unrealized P&L",
+                            value=_fmt_float(unrealized_pnl),
+                            subtitle="Open positions MTM",
+                            icon="show_chart",
+                            color=COLORS["warning"] if unrealized_pnl >= 0 else COLORS["error"],
+                        ),
+                        dict(
+                            title="Total P&L",
+                            value=_fmt_float(total_pnl),
+                            subtitle="Realized + unrealized",
+                            icon="query_stats",
+                            color=COLORS["info"] if total_pnl >= 0 else COLORS["error"],
+                        ),
+                    ],
+                    columns=3,
                 )
 
                 with ui.grid(columns=2).classes("w-full gap-4 mb-6"):
@@ -387,10 +608,11 @@ async def paper_ledger_page() -> None:
                                 columns=[
                                     {"name": "position_id", "label": "ID", "field": "position_id"},
                                     {
-                                        "name": "symbol_id",
-                                        "label": "Symbol ID",
-                                        "field": "symbol_id",
+                                        "name": "symbol",
+                                        "label": "Symbol",
+                                        "field": "symbol",
                                     },
+                                    {"name": "symbol_id", "label": "Symbol ID", "field": "symbol_id"},
                                     {"name": "qty", "label": "Qty", "field": "qty"},
                                     {
                                         "name": "avg_entry",
@@ -399,6 +621,16 @@ async def paper_ledger_page() -> None:
                                     },
                                     {"name": "avg_exit", "label": "Avg Exit", "field": "avg_exit"},
                                     {"name": "pnl", "label": "PnL", "field": "pnl"},
+                                    {
+                                        "name": "market_price",
+                                        "label": "Mkt Px",
+                                        "field": "market_price",
+                                    },
+                                    {
+                                        "name": "unrealized_pnl",
+                                        "label": "Unrlzd PnL",
+                                        "field": "unrealized_pnl",
+                                    },
                                     {"name": "state", "label": "State", "field": "state"},
                                 ],
                                 page_size=8,
@@ -511,26 +743,10 @@ async def paper_ledger_page() -> None:
                                 icon="event_note",
                             )
 
-        async def handle_session_change(event) -> None:
-            current["label"] = str(event.value)
-            current["session_id"] = option_map[current["label"]]
+        async def auto_refresh() -> None:
+            if not current["auto_refresh"]:
+                return
             await render_session(current["session_id"])
 
-        with ui.row().classes("items-center gap-3 mb-6"):
-            ui.select(
-                options=list(option_map.keys()),
-                value=current["label"],
-                label="Paper Session",
-                on_change=handle_session_change,
-            ).classes("min-w-[420px]")
-            ui.button(
-                "Refresh",
-                icon="refresh",
-                on_click=lambda: asyncio.create_task(render_session(current["session_id"])),
-            ).props("outline")
-            ui.label("Auto-refresh every 15s").classes("text-sm").style(
-                f"color: {THEME['text_muted']};"
-            )
-
         await render_session(current["session_id"])
-        ui.timer(15.0, lambda: asyncio.create_task(render_session(current["session_id"])))
+        ui.timer(30.0, lambda: asyncio.create_task(auto_refresh()))

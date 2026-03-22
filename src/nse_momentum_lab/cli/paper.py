@@ -16,10 +16,17 @@ from uuid import uuid4
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db import get_sessionmaker
 from nse_momentum_lab.db.paper import (
+    alert_session_signals,
     create_or_update_paper_session,
+    flatten_open_positions,
+    get_latest_passed_walk_forward,
     get_paper_session_summary,
+    insert_walk_forward_fold,
     list_paper_sessions,
+    qualify_session_signals,
+    reset_walk_forward_folds,
     set_paper_session_status,
+    update_paper_session,
 )
 from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
     BacktestParams,
@@ -78,6 +85,28 @@ def _session_to_json(session: Any) -> dict[str, Any]:
     if isinstance(session, dict):
         return session
     return asdict(session)
+
+
+async def _warn_if_session_exists(
+    db_session: Any,
+    session_id: str,
+    *,
+    command: str,
+    auto_generated: bool,
+) -> None:
+    if not auto_generated:
+        return
+    try:
+        existing = await get_paper_session_summary(db_session, session_id)
+    except Exception:
+        logger.debug("Skipping session reuse check for %s=%s", command, session_id, exc_info=True)
+        return
+    if existing is not None:
+        logger.warning(
+            "%s is reusing existing session_id=%s; pass --session-id to avoid overwriting it.",
+            command,
+            session_id,
+        )
 
 
 def _build_runtime_plan(
@@ -142,10 +171,46 @@ def _summarize_folds(folds: list[dict[str, Any]]) -> dict[str, Any]:
         "folds_total": len(folds),
         "folds_completed": len(completed),
         "folds_profitable": len(profitable),
+        "folds_profitable_ratio": round(len(profitable) / len(returns), 4) if returns else None,
         "avg_return_pct": round(mean(returns), 4) if returns else None,
         "median_return_pct": round(median(returns), 4) if returns else None,
         "worst_drawdown_pct": round(max(drawdowns), 4) if drawdowns else None,
         "total_trades": sum(trades),
+    }
+
+
+def _evaluate_walk_forward(summary: dict[str, Any]) -> dict[str, Any]:
+    min_avg_return_pct = 0.0
+    min_profitable_ratio = 0.5
+    max_drawdown_pct = 15.0
+
+    folds_total = int(summary.get("folds_total") or 0)
+    folds_completed = int(summary.get("folds_completed") or 0)
+    folds_profitable_ratio = summary.get("folds_profitable_ratio")
+    avg_return_pct = summary.get("avg_return_pct")
+    worst_drawdown_pct = summary.get("worst_drawdown_pct")
+
+    reasons = []
+    if folds_total <= 0:
+        reasons.append("no_folds")
+    if folds_completed != folds_total:
+        reasons.append("incomplete_folds")
+    if avg_return_pct is None or avg_return_pct <= min_avg_return_pct:
+        reasons.append("non_positive_average_return")
+    if folds_profitable_ratio is None or folds_profitable_ratio < min_profitable_ratio:
+        reasons.append("insufficient_profitable_folds")
+    if worst_drawdown_pct is None or worst_drawdown_pct >= max_drawdown_pct:
+        reasons.append("excessive_drawdown")
+
+    passed = not reasons
+    return {
+        "status": "PASS" if passed else "FAIL",
+        "reason": "all_thresholds_met" if passed else ",".join(reasons),
+        "thresholds": {
+            "min_avg_return_pct": min_avg_return_pct,
+            "min_profitable_ratio": min_profitable_ratio,
+            "max_drawdown_pct": max_drawdown_pct,
+        },
     }
 
 
@@ -156,8 +221,15 @@ async def _cmd_prepare(args: argparse.Namespace) -> None:
         args.trade_date.isoformat() if args.trade_date else "na",
         args.mode,
     )
+    auto_generated = args.session_id is None
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
+        await _warn_if_session_exists(
+            db_session,
+            session_id,
+            command="prepare",
+            auto_generated=auto_generated,
+        )
         row = await create_or_update_paper_session(
             db_session,
             session_id=session_id,
@@ -211,17 +283,110 @@ async def _cmd_stop(args: argparse.Namespace) -> None:
 
 
 async def _cmd_flatten(args: argparse.Namespace) -> None:
-    await _transition_session(args, "STOPPING")
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        closed = await flatten_open_positions(db_session, args.session_id)
+        await set_paper_session_status(
+            db_session,
+            session_id=args.session_id,
+            status="STOPPING",
+            notes=args.notes,
+        )
+    print(
+        json.dumps(
+            {
+                "session_id": args.session_id,
+                "flattened_positions": len(closed),
+                "positions": closed,
+                "status": "STOPPING",
+            },
+            default=str,
+            indent=2,
+        )
+    )
 
 
 async def _cmd_archive(args: argparse.Namespace) -> None:
     await _transition_session(args, "ARCHIVED")
 
 
+async def _cmd_qualify(args: argparse.Namespace) -> None:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        qualified = await qualify_session_signals(
+            db_session,
+            args.session_id,
+            max_rank=getattr(args, "max_rank", None),
+            min_score=getattr(args, "min_score", None),
+        )
+    print(
+        json.dumps(
+            {"session_id": args.session_id, "qualified": len(qualified), "signals": qualified},
+            default=str,
+            indent=2,
+        )
+    )
+
+
+async def _cmd_alert(args: argparse.Namespace) -> None:
+    signal_ids = (
+        [int(x.strip()) for x in args.signal_ids.split(",") if x.strip()]
+        if args.signal_ids
+        else []
+    )
+    if not signal_ids:
+        raise SystemExit("--signal-ids is required (comma-separated list of signal IDs)")
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        alerted = await alert_session_signals(db_session, args.session_id, signal_ids)
+    print(
+        json.dumps(
+            {"session_id": args.session_id, "alerted": len(alerted), "signals": alerted},
+            default=str,
+            indent=2,
+        )
+    )
+
+
+async def _check_walk_forward_gate(
+    db_session: Any,
+    strategy_name: str,
+    *,
+    bypass: bool = False,
+) -> None:
+    """Raise SystemExit if no passing walk-forward session exists for the strategy."""
+    if bypass:
+        logger.warning(
+            "Walk-forward promotion gate bypassed for strategy=%s", strategy_name
+        )
+        return
+    latest_wf = await get_latest_passed_walk_forward(db_session, strategy_name)
+    if latest_wf is None:
+        raise SystemExit(
+            f"No passing walk-forward session found for strategy '{strategy_name}'. "
+            "Run 'nseml-paper walk-forward' first, or pass --skip-gate to bypass."
+        )
+    logger.info(
+        "Walk-forward gate passed: session_id=%s finished_at=%s",
+        latest_wf["session_id"],
+        latest_wf.get("finished_at"),
+    )
+
+
 async def _cmd_replay_day(args: argparse.Namespace) -> None:
     plan = _build_runtime_plan(args, mode="replay", feed_source="duckdb")
     runtime = PaperRuntimeScaffold(feed_batch_size=get_settings().kite_ws_max_tokens)
     sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        await _warn_if_session_exists(
+            db_session,
+            plan.session_id,
+            command="replay-day",
+            auto_generated=args.session_id is None,
+        )
+        await _check_walk_forward_gate(
+            db_session, plan.strategy_name, bypass=getattr(args, "skip_gate", False)
+        )
     result = await runtime.prepare_session(sessionmaker, plan, status="RUNNING")
     execution = None
     if getattr(args, "execute", False):
@@ -246,6 +411,16 @@ async def _cmd_live(args: argparse.Namespace) -> None:
     runtime = PaperRuntimeScaffold(feed_batch_size=settings.kite_ws_max_tokens)
     sessionmaker = get_sessionmaker()
     status = "ACTIVE" if settings.has_kite_credentials() else "PLANNING"
+    async with sessionmaker() as db_session:
+        await _warn_if_session_exists(
+            db_session,
+            plan.session_id,
+            command="live",
+            auto_generated=args.session_id is None,
+        )
+        await _check_walk_forward_gate(
+            db_session, plan.strategy_name, bypass=getattr(args, "skip_gate", False)
+        )
     result = await runtime.prepare_session(sessionmaker, plan, status=status)
     execution = None
     if getattr(args, "execute", False):
@@ -320,6 +495,12 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
     summary: dict[str, Any] | None = None
     decision: dict[str, Any] | None = None
     async with sessionmaker() as db_session:
+        await _warn_if_session_exists(
+            db_session,
+            session_id,
+            command="walk-forward",
+            auto_generated=args.session_id is None,
+        )
         await create_or_update_paper_session(
             db_session,
             session_id=session_id,
@@ -340,7 +521,8 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
         )
 
         try:
-            for window in windows:
+            await reset_walk_forward_folds(db_session, session_id)
+            for fold_index, window in enumerate(windows, start=1):
                 fold_params = dict(base_params)
                 fold_params["start_date"] = window.test_start.isoformat()
                 fold_params["end_date"] = window.test_end.isoformat()
@@ -350,36 +532,50 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
                     snapshot=args.snapshot,
                 )
                 exp = runner.results_db.get_experiment(exp_id) or {}
-                folds.append(
-                    {
-                        "train_start": window.train_start.isoformat(),
-                        "train_end": window.train_end.isoformat(),
-                        "test_start": window.test_start.isoformat(),
-                        "test_end": window.test_end.isoformat(),
-                        "exp_id": exp_id,
-                        "status": exp.get("status"),
-                        "total_return_pct": exp.get("total_return_pct"),
-                        "max_drawdown_pct": exp.get("max_drawdown_pct"),
-                        "profit_factor": exp.get("profit_factor"),
-                        "total_trades": exp.get("total_trades"),
-                    }
+                fold: dict[str, Any] = {
+                    "train_start": window.train_start.isoformat(),
+                    "train_end": window.train_end.isoformat(),
+                    "test_start": window.test_start.isoformat(),
+                    "test_end": window.test_end.isoformat(),
+                    "exp_id": exp_id,
+                    "status": exp.get("status"),
+                    "total_return_pct": exp.get("total_return_pct"),
+                    "max_drawdown_pct": exp.get("max_drawdown_pct"),
+                    "profit_factor": exp.get("profit_factor"),
+                    "total_trades": exp.get("total_trades"),
+                }
+                folds.append(fold)
+                await insert_walk_forward_fold(
+                    db_session,
+                    wf_session_id=session_id,
+                    fold_index=fold_index,
+                    train_start=window.train_start,
+                    train_end=window.train_end,
+                    test_start=window.test_start,
+                    test_end=window.test_end,
+                    exp_id=exp_id,
+                    status=fold["status"],
+                    total_return_pct=fold["total_return_pct"],
+                    max_drawdown_pct=fold["max_drawdown_pct"],
+                    profit_factor=fold["profit_factor"],
+                    total_trades=fold["total_trades"],
                 )
+                await db_session.commit()
 
             summary = _summarize_folds(folds)
-            decision = {
-                "status": (
-                    "PASS"
-                    if summary["folds_total"] > 0
-                    and summary["folds_completed"] == summary["folds_total"]
-                    else "FAIL"
-                ),
-                "reason": (
-                    "all_folds_completed"
-                    if summary["folds_total"] > 0
-                    and summary["folds_completed"] == summary["folds_total"]
-                    else "incomplete_or_empty_walk_forward"
-                ),
-            }
+            decision = _evaluate_walk_forward(summary)
+            await update_paper_session(
+                db_session,
+                session_id=session_id,
+                strategy_params={
+                    **base_params,
+                    "walk_forward": {
+                        "summary": summary,
+                        "decision": decision,
+                        "folds": folds,
+                    },
+                },
+            )
             await set_paper_session_status(
                 db_session,
                 session_id=session_id,
@@ -464,6 +660,9 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--feed-mode", default="full", choices=["ltp", "quote", "full"])
     replay.add_argument("--instrument-tokens", default="")
     replay.add_argument("--execute", action="store_true", help="Execute the replay queue once")
+    replay.add_argument(
+        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
+    )
     replay.set_defaults(handler=_cmd_replay_day)
 
     live = sub.add_parser("live", help="Bootstrap a live Kite-backed paper session")
@@ -479,6 +678,9 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--instrument-tokens", default="")
     live.add_argument("--execute", action="store_true", help="Execute live paper entries once")
     live.add_argument("--run", action="store_true", help="Start the live Kite websocket loop")
+    live.add_argument(
+        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
+    )
     live.set_defaults(handler=_cmd_live)
 
     stream = sub.add_parser("stream", help="Start the live Kite websocket loop")
@@ -494,6 +696,9 @@ def build_parser() -> argparse.ArgumentParser:
     stream.add_argument("--instrument-tokens", default="")
     stream.add_argument(
         "--execute", action="store_true", help="Execute live paper entries once before streaming"
+    )
+    stream.add_argument(
+        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
     )
     stream.set_defaults(handler=_cmd_stream)
 
@@ -513,7 +718,7 @@ def build_parser() -> argparse.ArgumentParser:
     stop.add_argument("--complete", action="store_true")
     stop.set_defaults(handler=_cmd_stop)
 
-    flatten = sub.add_parser("flatten", help="Request a session flatten")
+    flatten = sub.add_parser("flatten", help="Liquidate all open positions and stop session")
     flatten.add_argument("--session-id", required=True)
     flatten.add_argument("--notes", default=None)
     flatten.set_defaults(handler=_cmd_flatten)
@@ -522,6 +727,23 @@ def build_parser() -> argparse.ArgumentParser:
     archive.add_argument("--session-id", required=True)
     archive.add_argument("--notes", default=None)
     archive.set_defaults(handler=_cmd_archive)
+
+    qualify = sub.add_parser("qualify", help="Promote top-ranked NEW signals to QUALIFIED")
+    qualify.add_argument("--session-id", required=True)
+    qualify.add_argument(
+        "--max-rank", type=int, default=None, help="Only qualify signals with rank <= N"
+    )
+    qualify.add_argument(
+        "--min-score", type=float, default=None, help="Only qualify signals with score >= N"
+    )
+    qualify.set_defaults(handler=_cmd_qualify)
+
+    alert = sub.add_parser("alert", help="Promote QUALIFIED signals to ALERTED")
+    alert.add_argument("--session-id", required=True)
+    alert.add_argument(
+        "--signal-ids", required=True, help="Comma-separated list of signal IDs to alert"
+    )
+    alert.set_defaults(handler=_cmd_alert)
 
     return parser
 
