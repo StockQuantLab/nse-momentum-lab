@@ -109,9 +109,7 @@ class WalkForwardFramework:
         current_test_start = data_start + timedelta(days=train_window_days)
 
         while current_test_start + timedelta(days=test_window_days) <= data_end:
-            test_end = (
-                current_test_start + timedelta(days=test_window_days) - timedelta(days=1)
-            )
+            test_end = current_test_start + timedelta(days=test_window_days) - timedelta(days=1)
             train_end = current_test_start - timedelta(days=1)
 
             if train_end <= data_start:

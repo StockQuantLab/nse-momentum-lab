@@ -45,7 +45,7 @@ def _fmt_float(value: Any, digits: int = 2) -> str:
         return "-"
     try:
         return f"{float(value):,.{digits}f}"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return str(value)
 
 
@@ -400,16 +400,22 @@ async def paper_ledger_page() -> None:
             content.clear()
             with content:
                 try:
-                    summary, signals, orders, fills, events, positions, db_folds = (
-                        await asyncio.gather(
-                            aget_paper_session_summary(session_id),
-                            aget_paper_session_signals(session_id),
-                            aget_paper_session_orders(session_id, limit=100),
-                            aget_paper_session_fills(session_id, limit=100),
-                            aget_paper_session_events(session_id, limit=100),
-                            aget_paper_positions(session_id, open_only=False),
-                            aget_walk_forward_folds(session_id),
-                        )
+                    (
+                        summary,
+                        signals,
+                        orders,
+                        fills,
+                        events,
+                        positions,
+                        db_folds,
+                    ) = await asyncio.gather(
+                        aget_paper_session_summary(session_id),
+                        aget_paper_session_signals(session_id),
+                        aget_paper_session_orders(session_id, limit=100),
+                        aget_paper_session_fills(session_id, limit=100),
+                        aget_paper_session_events(session_id, limit=100),
+                        aget_paper_positions(session_id, open_only=False),
+                        aget_walk_forward_folds(session_id),
                     )
                 except Exception as exc:
                     info_box(f"Could not load session data for {session_id}: {exc}", color="red")
@@ -435,9 +441,7 @@ async def paper_ledger_page() -> None:
                 render_dynamic_panels(session, db_folds=db_folds)
 
                 realized_pnl = sum(
-                    float(row.get("pnl") or 0.0)
-                    for row in positions
-                    if row.get("pnl") is not None
+                    float(row.get("pnl") or 0.0) for row in positions if row.get("pnl") is not None
                 )
                 unrealized_pnl = sum(
                     float(row.get("unrealized_pnl") or 0.0)
@@ -612,7 +616,11 @@ async def paper_ledger_page() -> None:
                                         "label": "Symbol",
                                         "field": "symbol",
                                     },
-                                    {"name": "symbol_id", "label": "Symbol ID", "field": "symbol_id"},
+                                    {
+                                        "name": "symbol_id",
+                                        "label": "Symbol ID",
+                                        "field": "symbol_id",
+                                    },
                                     {"name": "qty", "label": "Qty", "field": "qty"},
                                     {
                                         "name": "avg_entry",

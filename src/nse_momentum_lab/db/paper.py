@@ -906,8 +906,12 @@ def _serialize_walk_forward_fold(row: WalkForwardFold) -> dict[str, Any]:
         "test_end": row.test_end.isoformat() if row.test_end else None,
         "exp_id": row.exp_id,
         "status": row.status,
-        "total_return_pct": float(row.total_return_pct) if row.total_return_pct is not None else None,
-        "max_drawdown_pct": float(row.max_drawdown_pct) if row.max_drawdown_pct is not None else None,
+        "total_return_pct": float(row.total_return_pct)
+        if row.total_return_pct is not None
+        else None,
+        "max_drawdown_pct": float(row.max_drawdown_pct)
+        if row.max_drawdown_pct is not None
+        else None,
         "profit_factor": float(row.profit_factor) if row.profit_factor is not None else None,
         "total_trades": row.total_trades,
         "created_at": row.created_at.isoformat() if row.created_at else None,

@@ -914,7 +914,7 @@ def format_value(value: float, fmt: str = "{:.2f}") -> str:
     """
     try:
         num_val = float(value)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return str(value), "value-neutral"
 
     formatted = fmt.format(num_val)
@@ -1082,7 +1082,7 @@ def paginated_table(
                         try:
                             if not ui.context.client.has_socket_connection:
                                 return
-                        except (AttributeError, RuntimeError):
+                        except AttributeError, RuntimeError:
                             return
                         result = on_row_click(row_payload)
                         if inspect.isawaitable(result):

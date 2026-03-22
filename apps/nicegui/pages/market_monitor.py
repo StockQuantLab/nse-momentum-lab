@@ -66,7 +66,7 @@ def _num(value: object, decimals: int = 0) -> str:
         return "-"
     try:
         num = float(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "-"
     if decimals == 0:
         return f"{round(num):,}"

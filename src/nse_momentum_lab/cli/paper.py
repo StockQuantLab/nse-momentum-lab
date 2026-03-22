@@ -330,9 +330,7 @@ async def _cmd_qualify(args: argparse.Namespace) -> None:
 
 async def _cmd_alert(args: argparse.Namespace) -> None:
     signal_ids = (
-        [int(x.strip()) for x in args.signal_ids.split(",") if x.strip()]
-        if args.signal_ids
-        else []
+        [int(x.strip()) for x in args.signal_ids.split(",") if x.strip()] if args.signal_ids else []
     )
     if not signal_ids:
         raise SystemExit("--signal-ids is required (comma-separated list of signal IDs)")
@@ -356,9 +354,7 @@ async def _check_walk_forward_gate(
 ) -> None:
     """Raise SystemExit if no passing walk-forward session exists for the strategy."""
     if bypass:
-        logger.warning(
-            "Walk-forward promotion gate bypassed for strategy=%s", strategy_name
-        )
+        logger.warning("Walk-forward promotion gate bypassed for strategy=%s", strategy_name)
         return
     latest_wf = await get_latest_passed_walk_forward(db_session, strategy_name)
     if latest_wf is None:

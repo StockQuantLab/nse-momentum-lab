@@ -301,7 +301,7 @@ def _strategy_display_name(row: dict) -> str:
     if "params_json" in row and row.get("params_json") is not None:
         try:
             params = _json.loads(row["params_json"])
-        except (ValueError, TypeError):
+        except ValueError, TypeError:
             pass
     threshold = params.get("breakout_threshold")
     if threshold is not None and name not in ("Indian2LYNCH",):
@@ -323,7 +323,7 @@ def _run_window_display(row: dict) -> str:
 
     try:
         params = _json.loads(row["params_json"])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return fallback
 
     start_date = params.get("start_date")
@@ -355,7 +355,7 @@ def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
         if created_val is not None:
             try:
                 created = f" | {created_val.strftime('%b %d %H:%M')}"
-            except (AttributeError, TypeError):
+            except AttributeError, TypeError:
                 created = f" | {str(created_val)[:16]}"
 
         label = f"{strategy} | {window} | {trades:,} trades | Ret {ret:.1f}%{created}"
@@ -462,7 +462,9 @@ async def aget_paper_positions(
         symbol_map: dict[int, str] = {}
         if symbol_ids:
             symbol_result = await session.execute(
-                select(RefSymbol.symbol_id, RefSymbol.symbol).where(RefSymbol.symbol_id.in_(symbol_ids))
+                select(RefSymbol.symbol_id, RefSymbol.symbol).where(
+                    RefSymbol.symbol_id.in_(symbol_ids)
+                )
             )
             symbol_map = {
                 symbol_id: str(symbol).strip()
@@ -513,10 +515,7 @@ async def aget_paper_positions(
                 "pnl": float(row.pnl) if row.pnl is not None else None,
                 "market_price": latest_close_map.get(row.symbol_id),
                 "unrealized_pnl": (
-                    (
-                        latest_close_map.get(row.symbol_id) - float(row.avg_entry)
-                    )
-                    * float(row.qty)
+                    (latest_close_map.get(row.symbol_id) - float(row.avg_entry)) * float(row.qty)
                     if row.closed_at is None
                     and latest_close_map.get(row.symbol_id) is not None
                     and row.avg_entry is not None

@@ -878,9 +878,7 @@ class WalkForwardFold(Base):
         ForeignKeyConstraint(
             ["wf_session_id"], ["nseml.paper_session.session_id"], ondelete="CASCADE"
         ),
-        UniqueConstraint(
-            "wf_session_id", "fold_index", name="uq_walk_forward_fold_session_index"
-        ),
+        UniqueConstraint("wf_session_id", "fold_index", name="uq_walk_forward_fold_session_index"),
         Index("idx_walk_forward_fold_session", "wf_session_id"),
         {"schema": "nseml"},
     )
