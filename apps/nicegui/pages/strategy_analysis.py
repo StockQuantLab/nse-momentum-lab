@@ -37,7 +37,7 @@ def _strategy_display_name(row: dict) -> str:
     if "params_json" in row and row.get("params_json") is not None:
         try:
             params = json.loads(row["params_json"])
-        except ValueError, TypeError:
+        except (ValueError, TypeError):
             pass
     threshold = params.get("breakout_threshold")
     # Show threshold for all strategies except Indian2LYNCH (which is always 4%)

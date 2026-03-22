@@ -234,7 +234,7 @@ async def backtest_page() -> None:
             }
             try:
                 exp_params = json.loads(exp.get("params_json") or "{}")
-            except TypeError, ValueError:
+            except (TypeError, ValueError):
                 exp_params = {}
 
             def _is_missing(value: object) -> bool:
@@ -259,7 +259,7 @@ async def backtest_page() -> None:
                     if isinstance(value, str):
                         return float(value)
                     return float(value)
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     return None
 
             def _safe_value(value):
@@ -365,7 +365,7 @@ async def backtest_page() -> None:
                         mapped = raw_trade_lookup.get(int(trade_row_id))
                         if mapped is not None:
                             return mapped
-                    except TypeError, ValueError:
+                    except (TypeError, ValueError):
                         pass
 
                 symbol = row_payload.get("symbol")
