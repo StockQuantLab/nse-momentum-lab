@@ -42,6 +42,13 @@ class EntryTimeframe(StrEnum):
     DAILY = "daily"
 
 
+class IngestionDataset(StrEnum):
+    """Dataset identifiers used by the Kite ingestion workflow."""
+
+    DAILY = "daily"
+    FIVE_MIN = "5min"
+
+
 # Exit time defaults for different exit reasons
 # Maps exit reason categories to their typical exit times
 EXIT_TIME_OPEN = time(9, 15)  # Market open

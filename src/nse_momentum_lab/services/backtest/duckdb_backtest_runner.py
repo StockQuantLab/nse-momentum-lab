@@ -309,6 +309,9 @@ class DuckDBBacktestRunner:
                 ) from exc
         self._active_strategy: StrategyDefinition | None = None
         self._progress_writer: BufferedProgressWriter | None = None
+        self._feat_daily_ready = False
+        self._dataset_snapshot_cache: dict[str, object] | None = None
+        self._liquid_symbols_cache: dict[tuple[int, int, int, int], list[str]] = {}
 
     @classmethod
     def _assert_no_conflicting_backtest_runtime(cls) -> None:
@@ -772,7 +775,7 @@ class DuckDBBacktestRunner:
                 "logic_fingerprint": self._build_backtest_logic_fingerprint(),
             },
         )
-        dataset_snapshot = self.db.get_dataset_snapshot()
+        dataset_snapshot = self._get_dataset_snapshot()
         dataset_hash = str(dataset_snapshot["dataset_hash"])
         exp_id = self.build_experiment_id(params_hash, dataset_hash, code_hash)
         strategy_hash = build_strategy_hash(strategy_name, params_hash)
@@ -996,6 +999,8 @@ class DuckDBBacktestRunner:
             raise ValueError(f"{field_name} must be in YYYY-MM-DD format") from exc
 
     def _ensure_feat_daily_available(self) -> None:
+        if self._feat_daily_ready:
+            return
         try:
             self.db.con.execute("SELECT 1 FROM feat_daily LIMIT 1").fetchone()
         except Exception as exc:
@@ -1005,6 +1010,12 @@ class DuckDBBacktestRunner:
                     "Run `doppler run -- uv run nseml-build-features` once before backtesting."
                 ) from exc
             self.db.build_feat_daily_table()
+        self._feat_daily_ready = True
+
+    def _get_dataset_snapshot(self) -> dict[str, object]:
+        if self._dataset_snapshot_cache is None:
+            self._dataset_snapshot_cache = self.db.get_dataset_snapshot()
+        return self._dataset_snapshot_cache
 
     def _emit_progress(
         self,
@@ -1085,6 +1096,15 @@ class DuckDBBacktestRunner:
         by future performance.
         """
         effective_start_year, effective_end_year = self._effective_year_range(params)
+        cache_key = (
+            effective_start_year,
+            effective_end_year,
+            int(params.min_price),
+            int(params.universe_size),
+        )
+        cached = self._liquid_symbols_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         # Use the backtest date range for liquidity ranking to avoid look-ahead bias
         # For very short backtests, extend the window to get a more stable ranking
@@ -1109,7 +1129,9 @@ class DuckDBBacktestRunner:
                 params.universe_size,
             ],
         ).fetchdf()
-        return result["symbol"].to_list()
+        symbols = result["symbol"].to_list()
+        self._liquid_symbols_cache[cache_key] = symbols
+        return symbols
 
     def _effective_year_range(self, params: BacktestParams) -> tuple[int, int]:
         window_start = self._parse_optional_iso_date(params.start_date, "start_date")

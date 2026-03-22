@@ -2,6 +2,11 @@
 
 This repo uses **phidata** to orchestrate repeatable research workflows and provide a local “research assistant” chat interface.
 
+Current operator-facing workflows that agents should understand:
+- Kite token exchange and ingestion now live under installable CLI entrypoints: `nseml-kite-token` and `nseml-kite-ingest`
+- Paper trading is session-based and gated by completed walk-forward checks
+- The NiceGUI `/paper_ledger` page is the operator view for walk-forward results, replay sessions, live sessions, watchlist state, and recent activity
+
 Important constraint:
 - **LLMs never compute price series, indicators, or trades.**
 - All trading math is deterministic Python code and is fully auditable.
@@ -118,7 +123,7 @@ Common commands:
 playwright-cli open http://localhost:8501
 
 # Navigate to a page
-playwright-cli goto http://localhost:8501/Scans
+playwright-cli goto http://localhost:8501/scans
 
 # Get element references for interaction
 playwright-cli snapshot
@@ -140,17 +145,15 @@ The dashboard runs on port 8501 by default.
 
 **Available pages:**
 - `/` - Home
-- `/Chat` - Chat
-- `/Pipeline_Status` - Pipeline Status
-- `/Scans` - Scans
-- `/Experiments` - Experiments
-- `/Paper_Ledger` - Paper Ledger
-- `/Daily_Summary` - Daily Summary
-- `/Data_Quality` - Data Quality
-- `/Run_Pipeline` - Run Pipeline
-- `/Compare_Experiments` - Compare Experiments
-- `/Strategy_Analysis` - Strategy Analysis
-- `/Trade_Analytics` - Trade Analytics
+- `/backtest` - Backtest Results
+- `/compare` - Compare Experiments
+- `/strategy` - Strategy Analysis
+- `/scans` - Scans
+- `/data_quality` - Data Quality
+- `/pipeline` - Run Pipeline
+- `/paper_ledger` - Paper Ledger
+- `/daily_summary` - Daily Summary
+- `/market_monitor` - Market Monitor
 
 **Known issues (non-critical):**
 - Theme warnings about empty color values in sidebar config - cosmetic only

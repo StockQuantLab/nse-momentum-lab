@@ -107,14 +107,14 @@ async def home_page() -> None:
             f"color: {THEME['text_primary']};"
         )
 
-        if experiments_df.empty:
+        if experiments_df.is_empty():
             with ui.column().classes("kpi-card p-6"):
                 ui.label("No experiments found").style(f"color: {THEME['text_secondary']};")
                 ui.label("Run: doppler run -- uv run nseml-backtest").classes(
                     "text-sm font-mono mt-2"
                 ).style(f"color: {THEME['text_muted']};")
         else:
-            latest = experiments_df.iloc[0]
+            latest = experiments_df.row(0, named=True)
             ret_val = float(latest.get("total_return_pct", 0))
             kpi_grid(
                 [

@@ -34,7 +34,7 @@ async def compare_page() -> None:
     with page_layout("Compare", "compare_arrows"):
         experiments_df = get_experiments()
 
-        if experiments_df.empty:
+        if experiments_df.is_empty():
             empty_state(
                 "No experiments to compare",
                 "Run at least 2 backtests to compare experiments.",

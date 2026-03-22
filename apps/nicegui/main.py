@@ -8,6 +8,7 @@ Run: doppler run -- uv run nseml-dashboard
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import warnings
 import logging
@@ -56,18 +57,36 @@ def main() -> None:
     warnings.filterwarnings("ignore", message=".*urllib3.*")
     warnings.filterwarnings("ignore", message=".*chardet.*")
     warnings.filterwarnings("ignore", message=".*charset_normalizer.*")
+    if sys.platform == "win32":
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="'asyncio.WindowsSelectorEventLoopPolicy' is deprecated and slated for removal in Python 3.16",
+                category=DeprecationWarning,
+            )
+            warnings.filterwarnings(
+                "ignore",
+                message="'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16",
+                category=DeprecationWarning,
+            )
+            policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
+            if policy_cls is not None:
+                asyncio.set_event_loop_policy(policy_cls())
 
     # Suppress Windows asyncio ConnectionResetError noise during cleanup.
     # Setting level above CRITICAL silences all asyncio log messages.
     logging.getLogger("asyncio").setLevel(logging.CRITICAL + 1)
 
-    ui.run(
-        title="NSE Momentum Lab",
-        port=8501,
-        reload=False,
-        show=False,
-        dark=False,
-    )
+    try:
+        ui.run(
+            title="NSE Momentum Lab",
+            port=8501,
+            reload=False,
+            show=False,
+            dark=False,
+        )
+    except KeyboardInterrupt:
+        print("Dashboard stopped.")
 
 
 if __name__ in {"__main__", "__mp_main__"}:

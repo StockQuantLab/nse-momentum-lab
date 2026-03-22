@@ -51,6 +51,8 @@ nseml-backtest-status = "nse_momentum_lab.cli.backtest_status:main"
 nseml-backtest-batch = "nse_momentum_lab.cli.backtest_batch:main"
 nseml-paper = "nse_momentum_lab.cli.paper:main"
 nseml-kite-paper = "nse_momentum_lab.cli.paper:main"
+nseml-kite-token = "nse_momentum_lab.cli.kite_token:main"
+nseml-kite-ingest = "nse_momentum_lab.cli.kite_ingest:main"
 
 [build-system]
 requires = ["hatchling"]

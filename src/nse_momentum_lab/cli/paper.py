@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import json
 import logging
+import sys
 from dataclasses import asdict
 from datetime import UTC, date, datetime
 from statistics import mean, median
@@ -522,6 +523,8 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
                 fold_params = dict(base_params)
                 fold_params["start_date"] = window.test_start.isoformat()
                 fold_params["end_date"] = window.test_end.isoformat()
+                fold_params["start_year"] = window.test_start.year
+                fold_params["end_year"] = window.test_end.year
                 exp_id = runner.run(
                     BacktestParams(**fold_params),
                     force=args.force,
@@ -744,6 +747,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_async_handler(handler: Any, args: argparse.Namespace) -> None:
+    if sys.platform == "win32":
+        selector_loop_cls = getattr(asyncio, "SelectorEventLoop", None)
+        if selector_loop_cls is None:
+            raise RuntimeError("asyncio.SelectorEventLoop is not available on this platform")
+        with asyncio.Runner(loop_factory=selector_loop_cls) as runner:
+            runner.run(handler(args))
+        return
+    asyncio.run(handler(args))
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -754,6 +768,6 @@ def main() -> None:
         raise SystemExit("No command specified")
 
     if inspect.iscoroutinefunction(handler):
-        asyncio.run(handler(args))
+        _run_async_handler(handler, args)
     else:
         handler(args)

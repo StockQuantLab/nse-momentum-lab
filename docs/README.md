@@ -4,10 +4,11 @@
 
 **Phase 1 Complete** ✅
 - Local-first EOD pipeline with market data ingestion
+- Kite daily + 5-minute ingestion restored under installable package entrypoints
 - Corporate action adjustment (splits/bonus/rights)
 - Feature computation + 4% breakout + 2LYNCH scan engine
 - Backtest engine with experiment registry
-- Paper trading ledger + risk governance
+- Walk-forward promotion gate + paper trading ledger + risk governance
 - Daily summary + failure analysis rollups
 - FastAPI read APIs + NiceGUI dashboard
 - Pre-commit hooks for linting and testing
@@ -26,6 +27,7 @@
 - **[Quick Start](guides/QUICK_START.md)** - Fast path to running the system
 - **[README](../README.md)** - Project overview and installation
 - **[Zerodha Data Setup](guides/ZERODHA_DATA_SETUP.md)** - Ingesting market data
+- **[Kite Ingestion Plan](architecture/KITE_INGESTION_PLAN.md)** - Restored Kite token, ingestion, and DQ workflow
 
 ### Technical Documentation
 - **[Technical Design](TECHNICAL_DESIGN.md)** - Implementation details
@@ -42,6 +44,7 @@
 - **[Dashboard Architecture](adr/ADR-011-dashboard-architecture.md)** - NiceGUI dashboard design
 - **[Viewing Results](guides/VIEWING_RESULTS.md)** - Where to find scan results
 - **[Command Reference](reference/COMMANDS.md)** - All CLI commands
+- **[Paper Trading And Walk-Forward Plan](architecture/PAPER_TRADING_WALK_FORWARD_PLAN.md)** - Operational paper workflow
 
 ### Reference
 - **[Command Reference](reference/COMMANDS.md)** - Complete command listing
@@ -94,3 +97,5 @@ nse-momentum-lab/
 
 ### Developer Docs
 - [Agents Design](dev/AGENTS.md)
+- [Kite Ingestion Plan](architecture/KITE_INGESTION_PLAN.md)
+- [Paper Trading And Walk-Forward Plan](architecture/PAPER_TRADING_WALK_FORWARD_PLAN.md)
