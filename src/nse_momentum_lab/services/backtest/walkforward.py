@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
-from nse_momentum_lab.services.backtest.strategy_registry import resolve_strategy
 from nse_momentum_lab.services.backtest.signal_models import BacktestSignal
+from nse_momentum_lab.services.backtest.strategy_registry import resolve_strategy
 from nse_momentum_lab.services.backtest.vectorbt_engine import (
     VectorBTConfig,
     VectorBTEngine,
