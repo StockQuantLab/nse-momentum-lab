@@ -1,4 +1,4 @@
-# Indian Market 2LYNCH Strategy Adaptation
+# NSE 2LYNCH Strategy Adaptation
 
 **Status**: IMPLEMENTED AND VALIDATED (840.67% over 10 years)
 **Last Updated**: 2026-02-28

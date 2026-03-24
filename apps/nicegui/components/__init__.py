@@ -102,6 +102,7 @@ NAV_ITEMS = [
     {"label": "Scans", "icon": "radar", "path": "/scans"},
     {"label": "Data Quality", "icon": "verified", "path": "/data_quality"},
     {"label": "Pipeline", "icon": "engineering", "path": "/pipeline"},
+    {"label": "Walk Forward", "icon": "view_week", "path": "/walk_forward"},
     {"label": "Paper Ledger", "icon": "receipt_long", "path": "/paper_ledger"},
     {"label": "Daily Summary", "icon": "today", "path": "/daily_summary"},
     {"label": "Market Monitor", "icon": "monitoring", "path": "/market_monitor"},
@@ -1386,6 +1387,7 @@ document.addEventListener('keydown', (e) => {
             'r': () => window.location.href = '/scans',
             'd': () => window.location.href = '/data_quality',
             'p': () => window.location.href = '/pipeline',
+            'w': () => window.location.href = '/walk_forward',
             'l': () => window.location.href = '/paper_ledger',
             'y': () => window.location.href = '/daily_summary',
         };
@@ -1435,6 +1437,7 @@ def shortcuts_dialog():
                 ("Alt+R", "SCANS"),
                 ("Alt+D", "DATA QUALITY"),
                 ("Alt+P", "PIPELINE"),
+                ("Alt+W", "WALK FORWARD"),
                 ("Alt+L", "PAPER LEDGER"),
                 ("Alt+Y", "DAILY SUMMARY"),
                 ("?", "HELP"),

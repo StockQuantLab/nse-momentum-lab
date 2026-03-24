@@ -145,22 +145,13 @@ def _build_2lynch_candidate_query(
 
 
 _STRATEGY_REGISTRY: dict[str, StrategyDefinition] = {
-    "indian2lynch": StrategyDefinition(
-        name="Indian2LYNCH",
-        version="1.0.0",
-        description="India momentum burst strategy using proven 4% breakout + filter stack.",
-        family="indian_2lynch",
-        direction=PositionSide.LONG,
-        strategy_label=lambda year: f"Indian2LYNCH_{year}",
-        build_candidate_query=_build_2lynch_candidate_query,
-    ),
     "2lynchbreakout": StrategyDefinition(
         name="2LYNCHBreakout",
         version="1.1.0",
         description=(
             "2LYNCH breakout with configurable threshold (long). "
-            "Identical filter stack to Indian2LYNCH (H, N, 2, Y, C, L — 5/6 required); "
-            "threshold is the only variable. At 4% matches Indian2LYNCH baseline."
+            "Identical filter stack to the legacy 4% breakout baseline (H, N, 2, Y, C, L — 5/6 required); "
+            "threshold is the only variable."
         ),
         family="threshold_breakout",
         direction=PositionSide.LONG,

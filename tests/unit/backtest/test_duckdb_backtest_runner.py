@@ -174,7 +174,7 @@ def test_market_db_persists_trade_filter_count() -> None:
         exp_id = "exp_trade_filters"
         db.save_experiment(
             exp_id=exp_id,
-            strategy_name="Indian2LYNCH",
+            strategy_name="thresholdbreakout",
             params_json="{}",
             start_year=2020,
             end_year=2020,
@@ -214,7 +214,7 @@ def test_delete_experiment_removes_trades_and_yearly_metrics() -> None:
         exp_id = "exp_delete_test"
         db.save_experiment(
             exp_id=exp_id,
-            strategy_name="Indian2LYNCH",
+            strategy_name="thresholdbreakout",
             params_json="{}",
             start_year=2021,
             end_year=2021,

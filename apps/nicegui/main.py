@@ -20,7 +20,7 @@ if str(_root) not in sys.path:
 if str(_root / "src") not in sys.path:
     sys.path.insert(0, str(_root / "src"))
 
-from nicegui import ui
+from nicegui import app, ui
 
 # Import pages with full paths
 from apps.nicegui.pages.home import home_page
@@ -31,9 +31,11 @@ from apps.nicegui.pages.strategy_analysis import strategy_page
 from apps.nicegui.pages.scans import scans_page
 from apps.nicegui.pages.data_quality import data_quality_page
 from apps.nicegui.pages.pipeline import pipeline_page
+from apps.nicegui.pages.walk_forward import walk_forward_page
 from apps.nicegui.pages.paper_ledger import paper_ledger_page
 from apps.nicegui.pages.daily_summary import daily_summary_page
 from apps.nicegui.pages.market_monitor import market_monitor_page
+from apps.nicegui.state import shutdown_dashboard_resources
 
 
 # Each page function calls page_layout() itself — no wrapper needed.
@@ -45,9 +47,15 @@ ui.page("/strategy")(strategy_page)
 ui.page("/scans")(scans_page)
 ui.page("/data_quality")(data_quality_page)
 ui.page("/pipeline")(pipeline_page)
+ui.page("/walk_forward")(walk_forward_page)
 ui.page("/paper_ledger")(paper_ledger_page)
 ui.page("/daily_summary")(daily_summary_page)
 ui.page("/market_monitor")(market_monitor_page)
+
+
+@app.on_shutdown
+def _cleanup_dashboard_resources() -> None:
+    shutdown_dashboard_resources()
 
 
 def main() -> None:
@@ -87,6 +95,8 @@ def main() -> None:
         )
     except KeyboardInterrupt:
         print("Dashboard stopped.")
+    finally:
+        shutdown_dashboard_resources()
 
 
 if __name__ in {"__main__", "__mp_main__"}:

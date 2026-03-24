@@ -5,7 +5,11 @@ This repo uses **phidata** to orchestrate repeatable research workflows and prov
 Current operator-facing workflows that agents should understand:
 - Kite token exchange and ingestion now live under installable CLI entrypoints: `nseml-kite-token` and `nseml-kite-ingest`
 - Paper trading is session-based and gated by completed walk-forward checks
-- The NiceGUI `/paper_ledger` page is the operator view for walk-forward results, replay sessions, live sessions, watchlist state, and recent activity
+- The NiceGUI `/walk_forward` page is the operator view for validation history, fold results, reruns, and promotion-gate review
+- The NiceGUI `/paper_ledger` page is the operator view for replay sessions, live sessions, watchlist state, and recent activity
+- Canonical breakout strategy name for paper/backtest flows is `thresholdbreakout`; `2lynchbreakout` remains the legacy alias for historical sessions.
+- Use `nseml-paper cleanup-walk-forward --yes` before rerunning a fresh validation window when you need to wipe stale walk-forward sessions.
+- Walk-forward windows are built from actual trading sessions, not calendar-day approximations, and the replay/live gate also checks trade-date coverage plus experiment lineage when an experiment is supplied.
 
 Important constraint:
 - **LLMs never compute price series, indicators, or trades.**
@@ -151,6 +155,7 @@ The dashboard runs on port 8501 by default.
 - `/scans` - Scans
 - `/data_quality` - Data Quality
 - `/pipeline` - Run Pipeline
+- `/walk_forward` - Walk Forward
 - `/paper_ledger` - Paper Ledger
 - `/daily_summary` - Daily Summary
 - `/market_monitor` - Market Monitor

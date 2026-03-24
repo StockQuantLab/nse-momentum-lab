@@ -1,4 +1,4 @@
-"""Parameterized backtest for Indian 2LYNCH strategy.
+"""Parameterized backtest for the 2LYNCH breakout strategy.
 
 Usage:
     python backtest_2lynch.py                    # Defaults: 100 stocks, Rs.10+, 4/6 filters
@@ -205,7 +205,7 @@ def run_single_backtest(
 
     engine = VectorBTEngine(config=vbt_config)
     result = engine.run_backtest(
-        strategy_name=f"2LYNCH_{len(symbols)}stocks_{min_filters}filters",
+        strategy_name=f"thresholdbreakout_{len(symbols)}stocks_{min_filters}filters",
         signals=vbt_signals,
         price_data=price_data,
         value_traded_inr=value_traded_inr,
@@ -237,7 +237,7 @@ def run_single_backtest(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Backtest Indian 2LYNCH momentum strategy",
+        description="Backtest 2LYNCH breakout momentum strategy",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -286,7 +286,7 @@ def main():
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
     print("\n" + "=" * 80)
-    print("INDIAN 2LYNCH BACKTEST")
+    print("2LYNCH BREAKOUT BACKTEST")
     print("=" * 80)
 
     db = get_market_db()

@@ -207,7 +207,7 @@ def run_trade_backtest(
 
         engine = VectorBTEngine(config=vbt_config)
         result = engine.run_backtest(
-            strategy_name=f"Indian2LYNCH_{year}",
+            strategy_name=f"2LYNCHBreakout_{year}",
             signals=vbt_signals,
             price_data=price_data,
             value_traded_inr=value_traded_inr,

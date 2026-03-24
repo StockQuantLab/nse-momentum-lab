@@ -200,7 +200,7 @@ doppler run -- uv run python -c "import asyncio; from datetime import date; from
 
 ### Backtesting
 
-#### Run production baseline (Indian2LYNCH, 4%, 60-min FEE)
+#### Run production baseline (2LYNCHBreakout, 4%, 60-min FEE)
 ```bash
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
   --universe-size 2000 \
@@ -212,14 +212,14 @@ Experiment ID: `429c79ac45b65086`
 
 #### Run 2LYNCHBreakout (configurable threshold, LONG)
 ```bash
-# 4% — should match Indian2LYNCH baseline
+# 4% — should match the canonical 4% breakout baseline
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
-  --strategy 2lynchbreakout --breakout-threshold 0.04 \
+  --strategy thresholdbreakout --breakout-threshold 0.04 \
   --universe-size 2000 --start-year 2015 --end-year 2025
 
 # 2% breakout
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
-  --strategy 2lynchbreakout --breakout-threshold 0.02 \
+  --strategy thresholdbreakout --breakout-threshold 0.02 \
   --universe-size 2000 --start-year 2015 --end-year 2025
 ```
 
@@ -244,7 +244,7 @@ doppler run -- uv run python -m nse_momentum_lab.cli.backtest --list-strategies
 #### Run single year (fast sanity check)
 ```bash
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
-  --strategy 2lynchbreakout --start-year 2023 --end-year 2023 \
+  --strategy thresholdbreakout --start-year 2023 --end-year 2023 \
   --universe-size 500
 ```
 

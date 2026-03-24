@@ -16,7 +16,7 @@ if str(_apps_root) not in sys.path:
 
 from nicegui import ui
 
-from apps.nicegui.components import page_layout, info_box, THEME
+from apps.nicegui.components import page_layout, info_box, THEME, empty_state
 
 
 def scans_page() -> None:
@@ -24,20 +24,17 @@ def scans_page() -> None:
     with page_layout("Scans", "radar"):
         info_box("Scans detect 4% breakouts with 2LYNCH filter confirmation.")
 
-        with ui.column().classes("kpi-card p-8"):
-            ui.label("Scan Results").classes("text-xl font-semibold mb-4").style(
-                f"color: {THEME['text_primary']};"
-            )
-            ui.label("This page requires the API to be running for scan results.").classes(
-                "mb-4"
-            ).style(f"color: {THEME['text_secondary']};")
+        empty_state(
+            "API Required",
+            "Scan results require the API server to be running. Start the API server to see live momentum scan results.",
+            action_label="Copy API Command",
+            action_callback=lambda: ui.run_javascript(
+                "navigator.clipboard.writeText('doppler run -- uv run nseml-api');"
+            ),
+            icon="radar",
+        )
 
-            ui.label("Start the API server: doppler run -- uv run nseml-api").classes(
-                "font-mono text-sm px-3 py-2 rounded"
-            ).style(
-                f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
-            )
-
-            ui.label("Direct DuckDB scan results coming soon.").classes("text-sm mt-4").style(
+        with ui.column().classes("items-center mt-8"):
+            ui.label("Direct DuckDB scan results coming soon.").classes("text-sm").style(
                 f"color: {THEME['text_muted']};"
             )

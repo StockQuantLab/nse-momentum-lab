@@ -441,7 +441,7 @@ Fire-and-forget task with race condition — the job ID lookup after `create_tas
 | `db/market_db.py` | HIGH | Primary DuckDB layer — no dedicated test |
 | `services/scan/duckdb_features.py` | HIGH | DuckDBFeatureEngine — no tests |
 | `services/scan/duckdb_signal_generator.py` | HIGH | Core signal generation — no tests |
-| `services/scan/indian_2lynch_signal_generator.py` | HIGH | Production signal generator — no tests |
+| `services/scan/legacy_2lynch_signal_generator.py` | HIGH | Legacy signal generator — no tests |
 | `services/risk/position_sizing.py` | HIGH | Position sizing logic — no tests |
 | `services/backtest/optimizer.py` | MEDIUM | ParameterGrid, ParameterOptimizer — no tests |
 | `services/backtest/sensitivity.py` | MEDIUM | SensitivityResult — no tests |

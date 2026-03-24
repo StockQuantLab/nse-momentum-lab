@@ -1,4 +1,4 @@
-"""Backtest for Indian 2LYNCH strategy with 500 liquid stocks.
+"""Backtest for the 2LYNCH breakout strategy with 500 liquid stocks.
 
 Uses parquet data directly without integration test overhead.
 """
@@ -46,7 +46,7 @@ def run_backtest_500():
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
     print("\n" + "=" * 80)
-    print("INDIAN 2LYNCH BACKTEST - 500 Liquid Stocks")
+    print("2LYNCH BREAKOUT BACKTEST - 500 Liquid Stocks")
     print("=" * 80)
 
     db = get_market_db()
@@ -79,7 +79,7 @@ def run_backtest_500():
         print(f"CONFIG: {config_name}")
         print(f"{'=' * 80}")
 
-        # Build SQL query with Indian market thresholds
+        # Build SQL query with NSE market thresholds
         query = f"""
         WITH numbered_daily AS (
             SELECT
@@ -286,7 +286,7 @@ def run_backtest_500():
 
         engine = VectorBTEngine(config=vbt_config)
         result = engine.run_backtest(
-            strategy_name=f"Indian2LYNCH_500_{config_name}",
+            strategy_name=f"2LYNCHBreakout_500_{config_name}",
             signals=vbt_signals,
             price_data=price_data,
             value_traded_inr=value_traded_inr,

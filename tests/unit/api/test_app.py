@@ -223,7 +223,7 @@ class TestAPIApp:
         mock_list.return_value = [
             {
                 "session_id": "paper-1",
-                "strategy_name": "indian_2lynch",
+                "strategy_name": "thresholdbreakout",
                 "mode": "replay",
                 "status": "PLANNING",
             }

@@ -5,7 +5,6 @@ This module contains strategy-specific derived features built on top of
 core feature sets. These features do NOT pollute the core tables.
 
 Strategy families:
-- indian_2lynch: 2LYNCH-specific filters and young breakout counters
 - threshold_breakout: Configurable threshold breakout counters
 - threshold_breakdown: Configurable threshold breakdown counters
 - episodic_pivot: Gap-based pivot qualifiers

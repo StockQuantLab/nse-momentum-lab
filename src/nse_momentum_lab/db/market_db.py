@@ -17,6 +17,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
+from datetime import date, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -35,6 +36,7 @@ BACKTEST_DASHBOARD_DUCKDB_FILE = DATA_DIR / "backtest_dashboard.duckdb"
 # Bump when feat_daily SQL logic changes.
 FEAT_DAILY_QUERY_VERSION = "feat_daily_v2lynch_ti65_2026_03_14_breakdown"
 MARKET_MONITOR_QUERY_VERSION = "market_monitor_v3_2026_03_20_ma40_t2108"
+MARKET_MONITOR_INCREMENTAL_LOOKBACK_SESSIONS = 130
 
 
 @dataclass(frozen=True)
@@ -1048,7 +1050,11 @@ class MarketDataDB:
         create_legacy_feat_daily_view(self.con)
         logger.info("Created backward-compatible feat_daily view")
 
-    def build_feat_daily_core(self, force: bool = False) -> int:
+    def build_feat_daily_core(
+        self,
+        force: bool = False,
+        dataset_hash: str | None = None,
+    ) -> int:
         """Build feat_daily_core materialized table.
 
         This is the new modular feature store approach.
@@ -1056,7 +1062,7 @@ class MarketDataDB:
         """
         from nse_momentum_lab.features.daily_core import build_feat_daily_core
 
-        return build_feat_daily_core(self.con, force=force)
+        return build_feat_daily_core(self.con, force=force, dataset_hash=dataset_hash)
 
     def build_feat_intraday_core(self, force: bool = False) -> int:
         """Build feat_intraday_core materialized table.
@@ -1245,73 +1251,13 @@ class MarketDataDB:
             logger.warning("Unexpected error checking table '%s': %s", table, e)
             return False
 
-    def build_market_monitor_table(self, force: bool = False) -> int:
-        """Materialize the Market Monitor daily breadth table."""
-        if self._read_only:
-            logger.info("Skipping market_monitor_daily build in read-only mode.")
-            return 0
-
-        snapshot = self.get_dataset_snapshot()
-        dataset_hash = str(snapshot["dataset_hash"])
-
-        if not self._table_exists("feat_daily_core"):
-            logger.info("feat_daily_core is missing; building it before market_monitor_daily.")
-            self.build_feat_daily_core(force=force)
-
-        if not force and self._table_exists("market_monitor_daily"):
-            row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
-            n = int(row[0]) if row and row[0] is not None else 0
-            state = self._get_materialization_state("market_monitor_daily")
-            if (
-                n > 0
-                and state is not None
-                and state["dataset_hash"] == dataset_hash
-                and state["query_version"] == MARKET_MONITOR_QUERY_VERSION
-            ):
-                logger.info("market_monitor_daily is up-to-date (%d rows).", n)
-                return n
-
-        self.con.execute("""
-            CREATE TABLE IF NOT EXISTS market_monitor_daily (
-                trading_date        DATE PRIMARY KEY,
-                universe_size       INTEGER,
-                up_4pct_count       INTEGER,
-                down_4pct_count     INTEGER,
-                up_4pct_pct         DOUBLE,
-                down_4pct_pct       DOUBLE,
-                ratio_5d            DOUBLE,
-                ratio_10d           DOUBLE,
-                pct_above_ma40      DOUBLE,
-                t2108_equivalent_pct DOUBLE,
-                pct_below_ma40      DOUBLE,
-                up_25q_count        INTEGER,
-                down_25q_count      INTEGER,
-                up_25q_pct          DOUBLE,
-                down_25q_pct        DOUBLE,
-                up_25m_count        INTEGER,
-                down_25m_count      INTEGER,
-                up_50m_count        INTEGER,
-                down_50m_count      INTEGER,
-                up_13_34_count      INTEGER,
-                down_13_34_count    INTEGER,
-                pct_above_ma20      DOUBLE,
-                pct_below_ma20      DOUBLE,
-                primary_regime      VARCHAR,
-                tactical_regime     VARCHAR,
-                aggression_score    DOUBLE,
-                posture_label       VARCHAR,
-                alert_flags_json    VARCHAR DEFAULT '[]'
-            )
-        """)
-
-        if not self._table_exists("feat_daily_core"):
-            logger.warning("feat_daily_core is missing; created empty market_monitor_daily table.")
-            row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
-            return int(row[0] or 0) if row else 0
-
-        self.con.execute("DROP TABLE IF EXISTS market_monitor_daily")
-        self.con.execute("""
-            CREATE TABLE market_monitor_daily AS
+    def _market_monitor_select_sql(
+        self,
+        *,
+        source_filter_sql: str = "",
+        output_filter_sql: str = "",
+    ) -> str:
+        return f"""
             WITH symbol_base AS (
                 SELECT
                     symbol,
@@ -1350,6 +1296,7 @@ class MarketDataDB:
                         PARTITION BY symbol ORDER BY trading_date ROWS BETWEEN 33 PRECEDING AND CURRENT ROW
                     ) AS high_34
                 FROM feat_daily_core
+                {source_filter_sql}
             ),
             eligible AS (
                 SELECT
@@ -1508,8 +1455,97 @@ class MarketDataDB:
                 posture_label,
                 alert_flags_json
             FROM classified
+            {output_filter_sql}
             ORDER BY trading_date
+        """
+
+    def _market_monitor_incremental_lookback_date(self, rebuild_start_date: date) -> date:
+        row = self.con.execute(
+            """
+            WITH recent_sessions AS (
+                SELECT DISTINCT trading_date
+                FROM feat_daily_core
+                WHERE trading_date < ?
+                ORDER BY trading_date DESC
+                LIMIT ?
+            )
+            SELECT MIN(trading_date) FROM recent_sessions
+            """,
+            [rebuild_start_date, MARKET_MONITOR_INCREMENTAL_LOOKBACK_SESSIONS],
+        ).fetchone()
+        if row and row[0] is not None:
+            return row[0]
+        return rebuild_start_date
+
+    def build_market_monitor_table(self, force: bool = False) -> int:
+        """Materialize the Market Monitor daily breadth table."""
+        if self._read_only:
+            logger.info("Skipping market_monitor_daily build in read-only mode.")
+            return 0
+
+        snapshot = self.get_dataset_snapshot()
+        dataset_hash = str(snapshot["dataset_hash"])
+
+        self.build_feat_daily_core(force=force, dataset_hash=dataset_hash)
+
+        if not force and self._table_exists("market_monitor_daily"):
+            row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
+            n = int(row[0]) if row and row[0] is not None else 0
+            state = self._get_materialization_state("market_monitor_daily")
+            if (
+                n > 0
+                and state is not None
+                and state["dataset_hash"] == dataset_hash
+                and state["query_version"] == MARKET_MONITOR_QUERY_VERSION
+            ):
+                logger.info("market_monitor_daily is up-to-date (%d rows).", n)
+                return n
+
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS market_monitor_daily (
+                trading_date        DATE PRIMARY KEY,
+                universe_size       INTEGER,
+                up_4pct_count       INTEGER,
+                down_4pct_count     INTEGER,
+                up_4pct_pct         DOUBLE,
+                down_4pct_pct       DOUBLE,
+                ratio_5d            DOUBLE,
+                ratio_10d           DOUBLE,
+                pct_above_ma40      DOUBLE,
+                t2108_equivalent_pct DOUBLE,
+                pct_below_ma40      DOUBLE,
+                up_25q_count        INTEGER,
+                down_25q_count      INTEGER,
+                up_25q_pct          DOUBLE,
+                down_25q_pct        DOUBLE,
+                up_25m_count        INTEGER,
+                down_25m_count      INTEGER,
+                up_50m_count        INTEGER,
+                down_50m_count      INTEGER,
+                up_13_34_count      INTEGER,
+                down_13_34_count    INTEGER,
+                pct_above_ma20      DOUBLE,
+                pct_below_ma20      DOUBLE,
+                primary_regime      VARCHAR,
+                tactical_regime     VARCHAR,
+                aggression_score    DOUBLE,
+                posture_label       VARCHAR,
+                alert_flags_json    VARCHAR DEFAULT '[]'
+            )
         """)
+
+        if not self._table_exists("feat_daily_core"):
+            logger.warning("feat_daily_core is missing; created empty market_monitor_daily table.")
+            row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
+            return int(row[0] or 0) if row else 0
+
+        self.con.execute("DROP TABLE IF EXISTS market_monitor_daily")
+        self.con.execute(
+            f"""
+            CREATE TABLE market_monitor_daily AS
+            {self._market_monitor_select_sql()}
+            """
+        )
         row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
         n = int(row[0]) if row and row[0] is not None else 0
         self._upsert_materialization_state(
@@ -1520,6 +1556,91 @@ class MarketDataDB:
         )
         self.register_dataset_snapshot(snapshot)
         logger.info("market_monitor_daily built: %d rows", n)
+        return n
+
+    def build_market_monitor_incremental(
+        self,
+        since_date: date | None = None,
+        *,
+        force: bool = False,
+    ) -> int:
+        """Incrementally update market_monitor_daily from a specified date.
+
+        Args:
+            since_date: Inclusive date to rebuild from. If None, rebuilds only dates
+                after the latest existing row.
+            force: Force feat_daily_core refresh before updating market monitor.
+
+        Returns:
+            Number of rows in the table after update.
+        """
+        if self._read_only:
+            logger.info("Skipping market_monitor_daily incremental build in read-only mode.")
+            return 0
+
+        if not self._table_exists("market_monitor_daily"):
+            logger.info("market_monitor_daily does not exist; running full build.")
+            return self.build_market_monitor_table(force=force)
+
+        snapshot = self.get_dataset_snapshot()
+        dataset_hash = str(snapshot["dataset_hash"])
+        self.build_feat_daily_core(force=force, dataset_hash=dataset_hash)
+
+        # Determine the first trading date that needs to be rebuilt.
+        if since_date is None:
+            max_date_result = self.con.execute(
+                "SELECT MAX(trading_date) AS max_date FROM market_monitor_daily"
+            ).fetchone()
+            if not max_date_result or max_date_result[0] is None:
+                logger.info("market_monitor_daily is empty; running full build.")
+                return self.build_market_monitor_table(force=force)
+            rebuild_start_date = max_date_result[0] + timedelta(days=1)
+        else:
+            rebuild_start_date = since_date
+
+        if not self._table_exists("feat_daily_core"):
+            logger.info("feat_daily_core is missing; building it first.")
+            self.build_feat_daily_core(force=force, dataset_hash=dataset_hash)
+
+        lookback_date = self._market_monitor_incremental_lookback_date(rebuild_start_date)
+        logger.info(
+            "Incremental market_monitor_daily build: rebuild from %s using %d-session context back to %s",
+            rebuild_start_date,
+            MARKET_MONITOR_INCREMENTAL_LOOKBACK_SESSIONS,
+            lookback_date,
+        )
+
+        self.con.execute(
+            """
+            DELETE FROM market_monitor_daily
+            WHERE trading_date >= ?
+            """,
+            [rebuild_start_date],
+        )
+        self.con.execute(
+            f"""
+            INSERT INTO market_monitor_daily
+            {
+                self._market_monitor_select_sql(
+                    source_filter_sql="WHERE trading_date >= ?",
+                    output_filter_sql="WHERE trading_date >= ?",
+                )
+            }
+            """,
+            [lookback_date, rebuild_start_date],
+        )
+
+        row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
+        n = int(row[0]) if row and row[0] is not None else 0
+
+        self._upsert_materialization_state(
+            table_name="market_monitor_daily",
+            dataset_hash=dataset_hash,
+            query_version=MARKET_MONITOR_QUERY_VERSION,
+            row_count=n,
+        )
+        self.register_dataset_snapshot(snapshot)
+        logger.info("market_monitor_daily incremental update complete: %d rows", n)
         return n
 
     def get_market_monitor_latest(self) -> pl.DataFrame:

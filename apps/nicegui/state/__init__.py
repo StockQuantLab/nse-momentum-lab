@@ -38,7 +38,13 @@ from nse_momentum_lab.db.paper import (
     list_paper_sessions,
     list_walk_forward_folds,
 )
-from nse_momentum_lab.db.market_db import get_backtest_db, get_market_db, MarketDataDB
+from nse_momentum_lab.db.market_db import (
+    MarketDataDB,
+    close_backtest_db,
+    close_market_db,
+    get_backtest_db,
+    get_market_db,
+)
 
 # Singleton DB connection - created once at server startup.
 # Read-only so the dashboard can coexist with a running backtest writer
@@ -68,11 +74,32 @@ STATUS_CACHE_TTL = 300  # seconds  (5 minutes - heavier query, cache longer)
 
 # Optional: use a fast "lite" status for initial page load
 _USE_LITE_STATUS_ON_FIRST_LOAD = True
+_dashboard_resources_closed = False
 
 
 def get_db() -> MarketDataDB:
     """Get the singleton DuckDB connection."""
     return db
+
+
+def shutdown_dashboard_resources() -> None:
+    """Release process-lifetime resources so the dashboard can exit cleanly."""
+    global _dashboard_resources_closed
+    if _dashboard_resources_closed:
+        return
+    _dashboard_resources_closed = True
+
+    for executor in (_executor, _pg_executor):
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+    for closer in (close_market_db, close_backtest_db):
+        try:
+            closer()
+        except Exception:
+            pass
 
 
 def _run_pg_coro_sync(coro_factory: Callable[[], Awaitable[object]]) -> object:
@@ -321,7 +348,11 @@ def _strategy_display_name(row: dict) -> str:
         except ValueError, TypeError:
             pass
     threshold = params.get("breakout_threshold")
-    if threshold is not None and name not in ("Indian2LYNCH",):
+    if threshold is not None and name not in (
+        "2LYNCHBreakout",
+        "thresholdbreakout",
+        "threshold_breakout",
+    ):
         pct = round(float(threshold) * 100)
         return f"{name} {pct}%"
     return name

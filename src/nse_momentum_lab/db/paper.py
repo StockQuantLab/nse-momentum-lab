@@ -982,6 +982,17 @@ async def get_latest_passed_walk_forward(
     strategy_name: str,
 ) -> dict[str, Any] | None:
     """Return the most recent COMPLETED walk_forward session for a strategy."""
+    sessions = await list_passed_walk_forward_sessions(db_session, strategy_name, limit=1)
+    return sessions[0] if sessions else None
+
+
+async def list_passed_walk_forward_sessions(
+    db_session: AsyncSession,
+    strategy_name: str,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return recent COMPLETED walk_forward sessions for a strategy."""
     result = await db_session.execute(
         select(PaperSession)
         .where(
@@ -990,10 +1001,36 @@ async def get_latest_passed_walk_forward(
             PaperSession.status == "COMPLETED",
         )
         .order_by(PaperSession.created_at.desc())
-        .limit(1)
+        .limit(limit)
     )
-    row = result.scalar_one_or_none()
-    return _serialize_paper_session(row) if row else None
+    rows = result.scalars().all()
+    return [_serialize_paper_session(row) for row in rows]
+
+
+async def delete_walk_forward_sessions(
+    db_session: AsyncSession,
+    *,
+    strategy_name: str | None = None,
+    before_date: date | None = None,
+    after_date: date | None = None,
+) -> dict[str, Any]:
+    """Delete walk-forward sessions and return a summary of the removed rows."""
+    query = select(PaperSession.session_id).where(PaperSession.mode == "walk_forward")
+    if strategy_name:
+        query = query.where(PaperSession.strategy_name == strategy_name)
+    if before_date is not None:
+        query = query.where(PaperSession.trade_date < before_date)
+    if after_date is not None:
+        query = query.where(PaperSession.trade_date >= after_date)
+
+    result = await db_session.execute(query.order_by(PaperSession.created_at.desc()))
+    session_ids = [str(session_id) for session_id in result.scalars().all()]
+    if not session_ids:
+        return {"deleted_count": 0, "session_ids": []}
+
+    await db_session.execute(delete(PaperSession).where(PaperSession.session_id.in_(session_ids)))
+    await db_session.commit()
+    return {"deleted_count": len(session_ids), "session_ids": session_ids}
 
 
 # ---------------------------------------------------------------------------

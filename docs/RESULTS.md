@@ -1,7 +1,7 @@
 # Backtest Results
 
 **Production Baseline** - Experiment ID: `429c79ac45b65086`
-<br>Strategy: Indian2LYNCH | Period: 2015-2025 | Status: COMPLETED
+<br>Strategy: thresholdbreakout | Period: 2015-2025 | Status: COMPLETED
 
 ---
 
@@ -9,7 +9,7 @@
 
 | Strategy | Threshold | Dir | Exp ID | Trades | Win% | Ann Ret | Max DD | Calmar | Total Ret |
 |----------|-----------|-----|--------|--------|------|---------|--------|--------|-----------|
-| **Indian2LYNCH** | 4% | LONG | `429c79ac45b65086` | **7,073** | **51.3%** | **193.9%** | **4.44%** | **43.67** | **2,132%** |
+| **thresholdbreakout** | 4% | LONG | `429c79ac45b65086` | **7,073** | **51.3%** | **193.9%** | **4.44%** | **43.67** | **2,132%** |
 | 2LYNCHBreakout | 4% | LONG | `43c8990c27276576` | 7,073 | 51.3% | 193.9% | 4.44% | 43.67 | 2,132% |
 | 2LYNCHBreakout | 2% | LONG | `c002e35f6fc50934` | 18,657 | 45.8% | 338.7% | 5.75% | **58.94** | 3,725% |
 | 2LYNCHBreakdown | 4% | SHORT | `42e92fc9c0dd5f5d` | 4,717 | 38.9% | 61.4% | 36.69% | 1.67 | 675% |
@@ -17,14 +17,14 @@
 | EpisodicPivot | 5% gap | LONG | `8f7387ee18478ecb` | 6 | 66.7% | 0.3% | 0.41% | 0.67 | 3% |
 
 **Notes:**
-- Indian2LYNCH = 2LYNCHBreakout@4% exactly — identical filter stack, confirmed bit-for-bit (2026-03-07)
+- thresholdbreakout@4% = 2LYNCHBreakout@4% exactly — identical filter stack, confirmed bit-for-bit (2026-03-07)
 - 2LYNCHBreakout@2% has better Calmar (58.94) than 4% (43.67) — filter quality, not threshold, drives edge
 - 2LYNCHBreakdown (SHORT) structurally harder in 2015–2025 bull market; 2% more viable than 4%
 - EpisodicPivot: only 6 trades — 5% gap threshold + 60-min FEE window rarely aligns on NSE. Infrastructure confirmed working; needs `min_gap=0.02–0.03` for viable signal count
 
 ---
 
-## Indian2LYNCH — Production Baseline
+## thresholdbreakout — Production Baseline
 
 | Metric                | Value         |
 |-----------------------|---------------|

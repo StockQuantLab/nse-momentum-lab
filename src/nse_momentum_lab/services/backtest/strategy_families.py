@@ -39,7 +39,7 @@ def _build_threshold_breakout_candidate_query(
 ) -> tuple[str, list[object]]:
     """Build candidate query for 2LYNCH threshold breakout strategy (long).
 
-    Uses the identical 2LYNCH filter stack (H, N, 2, Y, C, L) as Indian2LYNCH.
+    Uses the identical 2LYNCH filter stack (H, N, 2, Y, C, L) as the legacy 4% baseline.
     The threshold is a configurable parameter; all other filters are canonical 2LYNCH.
     filter_2 = 'Not Up 2 Days': at least one of the 2 days before the breakout was down.
     """
@@ -422,7 +422,7 @@ THRESHOLD_BREAKOUT_DEFINITION = {
     "name": "2LYNCHBreakout",
     "version": "1.1.0",
     "family": "threshold_breakout",
-    "description": "2LYNCH breakout with configurable threshold (long). Identical filter stack to Indian2LYNCH; threshold is the only variable.",
+    "description": "2LYNCH breakout with configurable threshold (long). Identical filter stack to the legacy 4% baseline; threshold is the only variable.",
     "direction": PositionSide.LONG,
     "default_params": {
         "breakout_threshold": 0.04,

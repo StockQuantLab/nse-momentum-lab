@@ -22,7 +22,7 @@ NSE Momentum Lab strategies are implemented using a **hybrid Python + declarativ
 The 2LYNCH filter stack (H, N, 2, Y, C, L — requiring 5 of 6) is the core edge of this system. All breakout/breakdown strategies in this repo **must** apply the same filter stack. The breakout threshold (4%, 2%, etc.) is a configurable parameter — the filters are non-negotiable.
 
 This means:
-- `2LYNCHBreakout` at `--breakout-threshold 0.04` must produce **identical results** to `Indian2LYNCH`. If they diverge, a filter has drifted — investigate.
+- `thresholdbreakout` at `--breakout-threshold 0.04` must produce **identical results** to the canonical 4% breakout baseline. If they diverge, a filter has drifted — investigate.
 - Any new breakout strategy you add should inherit the same 6-filter SQL from the existing queries.
 - Do not substitute `ret_5d <= 0` for `filter_2`. The correct formula uses `ret_1d_lag1` and `ret_1d_lag2` computed **inline** with `LAG()` — not from `feat_daily`.
 

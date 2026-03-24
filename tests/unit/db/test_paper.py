@@ -3,7 +3,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from nse_momentum_lab.db.paper import alert_session_signals, qualify_session_signals
+from nse_momentum_lab.db.paper import (
+    alert_session_signals,
+    delete_walk_forward_sessions,
+    qualify_session_signals,
+)
 
 
 def _scalar_result(*, all_rows=None, one_row=None) -> MagicMock:
@@ -97,4 +101,22 @@ class TestPaperDBHelpers:
         assert [row["signal_id"] for row in alerted] == [11]
         assert signal.state == "ALERTED"
         assert pss.decision_status == "ALERTED"
+        session.commit.assert_awaited_once()
+
+    async def test_delete_walk_forward_sessions_removes_sessions_by_filter(self) -> None:
+        session = AsyncMock()
+        session.execute.side_effect = [
+            _scalar_result(all_rows=["wf-3", "wf-2", "wf-1"]),
+            _scalar_result(),
+        ]
+
+        result = await delete_walk_forward_sessions(
+            session,
+            strategy_name="thresholdbreakout",
+            before_date=None,
+            after_date=None,
+        )
+
+        assert result == {"deleted_count": 3, "session_ids": ["wf-3", "wf-2", "wf-1"]}
+        assert session.execute.await_count == 2
         session.commit.assert_awaited_once()

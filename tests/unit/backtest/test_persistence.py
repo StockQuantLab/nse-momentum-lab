@@ -42,8 +42,8 @@ class _FakeStore:
 
 
 def test_build_strategy_hash_is_deterministic() -> None:
-    h1 = build_strategy_hash("Indian2LYNCH", "params_hash_1")
-    h2 = build_strategy_hash("Indian2LYNCH", "params_hash_1")
+    h1 = build_strategy_hash("thresholdbreakout", "params_hash_1")
+    h2 = build_strategy_hash("thresholdbreakout", "params_hash_1")
     assert h1 == h2
 
 
@@ -141,7 +141,7 @@ def test_upsert_exp_run_with_artifacts_sync(monkeypatch) -> None:
 
     exp_run_id = upsert_exp_run_with_artifacts_sync(
         exp_hash="exp123",
-        strategy_name="Indian2LYNCH",
+        strategy_name="thresholdbreakout",
         strategy_hash="strat_hash",
         dataset_hash="dataset_hash",
         params_json='{"a":1}',

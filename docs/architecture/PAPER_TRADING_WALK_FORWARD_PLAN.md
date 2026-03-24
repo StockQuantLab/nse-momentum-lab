@@ -213,8 +213,9 @@ Minimum viable behavior:
 Current command examples:
 
 ```text
-doppler run -- uv run nseml-paper walk-forward --strategy indian_2lynch --start-date 2025-04-01 --end-date 2026-03-09
-doppler run -- uv run nseml-paper walk-forward --strategy indian_2lynch --start-date 2026-03-01 --end-date 2026-03-09 --train-days 5 --test-days 3 --roll-interval-days 1
+doppler run -- uv run nseml-paper cleanup-walk-forward --yes
+doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date 2025-04-01 --end-date 2026-03-09
+doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date 2026-03-01 --end-date 2026-03-09 --train-days 5 --test-days 3 --roll-interval-days 1
 doppler run -- uv run nseml-paper replay-day --trade-date 2026-03-09 --experiment-id <EXP_ID> --execute
 doppler run -- uv run nseml-paper live --trade-date 2026-03-23 --experiment-id <EXP_ID> --execute
 doppler run -- uv run nseml-paper stream --trade-date 2026-03-23 --experiment-id <EXP_ID>

@@ -36,7 +36,6 @@ from apps.nicegui.state import (
     aget_paper_session_signals,
     aget_paper_session_summary,
     aget_paper_sessions,
-    aget_walk_forward_folds,
 )
 
 
@@ -145,12 +144,6 @@ def _session_summary_text(
     session: dict[str, Any], counts: dict[str, Any], feed_state: dict[str, Any]
 ) -> str:
     mode = str(session.get("mode") or "").strip().lower()
-    if mode == "walk_forward":
-        return (
-            "This is a historical strategy check. It validates whether the setup was stable "
-            "enough before paper trading. Because this is not a replay or live session, no "
-            "watchlist, orders, fills, positions, or live feed are expected here."
-        )
     if mode == "replay":
         return (
             "This is a replay session. It re-runs a past trading day using local market data so "
@@ -177,8 +170,6 @@ def _strategy_label(strategy_name: Any, strategy_params: dict[str, Any] | None =
         "thresholdbreakout": "2LYNCH Breakout",
         "2lynchbreakdown": "2LYNCH Breakdown",
         "thresholdbreakdown": "2LYNCH Breakdown",
-        "indian2lynch": "Indian 2LYNCH Breakout",
-        "indian_2lynch": "Indian 2LYNCH Breakout",
     }
     strategy = labels.get(normalized, _title_case_words(raw_strategy))
     params = strategy_params or {}
@@ -344,12 +335,13 @@ async def paper_ledger_page() -> None:
                 f"color: {THEME['text_primary']};"
             )
             ui.label(
-                "This page reads live paper-session state from PostgreSQL so Monday testing can be "
-                "observed without leaving the dashboard."
+                "This page reads live paper-session state from PostgreSQL so replay and live "
+                "sessions can be observed without leaving the dashboard."
             ).classes("mb-3").style(f"color: {THEME['text_secondary']};")
             ui.label(
-                "Walk-forward remains the promotion gate. Then load a session from an approved "
-                "experiment/date, execute replay or live once, and monitor feed, queue, orders, fills, and positions here."
+                "Use the separate /walk_forward page for validation history and reruns. "
+                "Load an approved experiment/date here, execute replay or live once, and "
+                "monitor feed, queue, orders, fills, and positions."
             ).style(f"color: {THEME['text_muted']};")
 
         try:
@@ -369,8 +361,21 @@ async def paper_ledger_page() -> None:
             )
             return
 
+        paper_sessions = [
+            session
+            for session in sessions
+            if str(session.get("mode") or "").strip().lower() != "walk_forward"
+        ]
+        if not paper_sessions:
+            empty_state(
+                "No paper sessions yet",
+                "Create a replay or live paper session first. Walk-forward checks now live on the separate validation page.",
+                icon="receipt_long",
+            )
+            return
+
         ordered_sessions = sorted(
-            sessions,
+            paper_sessions,
             key=lambda row: (
                 str(row.get("status") or "") not in {"ACTIVE", "RUNNING", "PAUSED", "PLANNING"},
                 str(row.get("updated_at") or ""),
@@ -408,38 +413,14 @@ async def paper_ledger_page() -> None:
             )
 
         commands_card = ui.column().classes("kpi-card p-5 mb-6")
-        wf_card = ui.column().classes("kpi-card p-5 mb-6")
         content = ui.column().classes("w-full")
 
-        def render_dynamic_panels(
-            session: dict[str, Any], db_folds: list[dict[str, Any]] | None = None
-        ) -> None:
+        def render_dynamic_panels(session: dict[str, Any]) -> None:
             strategy_params = session.get("strategy_params") or {}
-            strategy = str(session.get("strategy_name") or "indian_2lynch")
+            strategy = str(session.get("strategy_name") or "thresholdbreakout")
             strategy_display = _strategy_label(strategy, strategy_params)
             trade_date = str(session.get("trade_date") or "<TRADE_DATE>")
             exp_id = str(session.get("experiment_id") or "<EXP_ID>")
-            train_days = int(strategy_params.get("train_days") or 252)
-            test_days = int(strategy_params.get("test_days") or 63)
-            roll_days = int(strategy_params.get("roll_interval_days") or test_days)
-            base_params = strategy_params.get("base_params")
-            if not isinstance(base_params, dict):
-                base_params = strategy_params
-            params_json = ""
-            try:
-                breakout_threshold = base_params.get("breakout_threshold")
-                if breakout_threshold is not None and abs(float(breakout_threshold) - 0.04) > 1e-9:
-                    params_json = f" --params-json '{{\"breakout_threshold\": {float(breakout_threshold):.2f}}}'"
-            except TypeError, ValueError:
-                params_json = ""
-            wf_rows = (
-                _walk_forward_rows_from_db(db_folds)
-                if db_folds
-                else _walk_forward_rows(strategy_params)
-            )
-            wf_start = wf_rows[0]["train"].split(" -> ")[0] if wf_rows else "2025-04-01"
-            wf_end = wf_rows[-1]["test"].split(" -> ")[-1] if wf_rows else trade_date
-
             commands_card.clear()
             with commands_card:
                 with ui.expansion("Commands", icon="terminal").classes("w-full"):
@@ -447,12 +428,6 @@ async def paper_ledger_page() -> None:
                         f"Suggested commands for the selected session ({strategy_display})."
                     ).classes("text-sm mb-3").style(f"color: {THEME['text_secondary']};")
                     for command in [
-                        (
-                            "doppler run -- uv run nseml-paper walk-forward "
-                            f"--strategy {strategy} --start-date {wf_start} --end-date {wf_end} "
-                            f"--train-days {train_days} --test-days {test_days} "
-                            f"--roll-interval-days {roll_days}{params_json}"
-                        ),
                         (
                             "doppler run -- uv run nseml-paper replay-day "
                             f"--trade-date {trade_date} --experiment-id {exp_id} --execute"
@@ -470,82 +445,6 @@ async def paper_ledger_page() -> None:
                             f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
                         )
 
-            wf_card.clear()
-            with wf_card:
-                ui.label("Walk-Forward").classes("text-lg font-semibold mb-3").style(
-                    f"color: {THEME['text_primary']};"
-                )
-                walk_forward = strategy_params.get("walk_forward")
-                if not isinstance(walk_forward, dict):
-                    empty_state(
-                        "No walk-forward report",
-                        "This session has no persisted walk-forward summary yet.",
-                        icon="query_stats",
-                    )
-                    return
-
-                decision = walk_forward.get("decision") or {}
-                summary = walk_forward.get("summary") or {}
-                kpi_grid(
-                    [
-                        dict(
-                            title="Result",
-                            value=_decision_status_label(decision.get("status")),
-                            subtitle=_decision_reason_label(decision.get("reason")),
-                            icon="flag",
-                            color=_status_color(decision.get("status")),
-                        ),
-                        dict(
-                            title="Test Windows",
-                            value=int(summary.get("folds_total") or 0),
-                            subtitle=f"Completed {int(summary.get('folds_completed') or 0)}",
-                            icon="view_week",
-                            color=COLORS["info"],
-                        ),
-                        dict(
-                            title="Average Return",
-                            value=_fmt_float(summary.get("avg_return_pct")),
-                            subtitle=f"Median {_fmt_float(summary.get('median_return_pct'))}%",
-                            icon="trending_up",
-                            color=COLORS["success"],
-                        ),
-                        dict(
-                            title="Worst Drawdown",
-                            value=_fmt_float(summary.get("worst_drawdown_pct")),
-                            subtitle=f"Profitable {summary.get('folds_profitable') or 0}",
-                            icon="trending_down",
-                            color=COLORS["warning"],
-                        ),
-                    ],
-                    columns=4,
-                )
-
-                if wf_rows:
-                    paginated_table(
-                        rows=wf_rows,
-                        columns=[
-                            {"name": "fold", "label": "Window", "field": "fold"},
-                            {"name": "train", "label": "Training Period", "field": "train"},
-                            {"name": "test", "label": "Test Period", "field": "test"},
-                            {"name": "status", "label": "Status", "field": "status"},
-                            {"name": "return_pct", "label": "Return %", "field": "return_pct"},
-                            {
-                                "name": "drawdown_pct",
-                                "label": "Drawdown %",
-                                "field": "drawdown_pct",
-                            },
-                            {"name": "trades", "label": "Trades", "field": "trades"},
-                            {"name": "exp_id", "label": "Backtest ID", "field": "exp_id"},
-                        ],
-                        page_size=8,
-                    )
-                else:
-                    empty_state(
-                        "No fold rows",
-                        "The persisted walk-forward payload does not contain per-fold results.",
-                        icon="table_rows",
-                    )
-
         async def render_session(session_id: str) -> None:
             content.clear()
             with content:
@@ -557,7 +456,6 @@ async def paper_ledger_page() -> None:
                         fills,
                         events,
                         positions,
-                        db_folds,
                     ) = await asyncio.gather(
                         aget_paper_session_summary(session_id),
                         aget_paper_session_signals(session_id),
@@ -565,7 +463,6 @@ async def paper_ledger_page() -> None:
                         aget_paper_session_fills(session_id, limit=100),
                         aget_paper_session_events(session_id, limit=100),
                         aget_paper_positions(session_id, open_only=False),
-                        aget_walk_forward_folds(session_id),
                     )
                 except Exception as exc:
                     info_box(f"Could not load session data for {session_id}: {exc}", color="red")
@@ -589,7 +486,7 @@ async def paper_ledger_page() -> None:
                     "ACTIVE",
                     "RUNNING",
                 }
-                render_dynamic_panels(session, db_folds=db_folds)
+                render_dynamic_panels(session)
 
                 realized_pnl = sum(
                     float(row.get("pnl") or 0.0) for row in positions if row.get("pnl") is not None

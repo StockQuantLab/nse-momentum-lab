@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from types import MethodType
 
@@ -61,6 +62,12 @@ def test_build_market_monitor_table_uses_feat_daily_core() -> None:
             ('AAA', '2026-03-18', 102.0, 96.0, 95.0, 4.1, 1100000.0, 4200000.0, 0.02, 0.06, 0.78, 0.65, 0.72),
             ('BBB', '2026-03-18',  47.0, 54.0, 55.0, 3.1,  920000.0, 4600000.0, -0.04, -0.08, 0.88, 0.28, 0.22)
         """
+    )
+    db.build_feat_daily_core = MethodType(
+        lambda self, force=False, dataset_hash=None: self.con.execute(
+            "SELECT COUNT(*) FROM feat_daily_core"
+        ).fetchone()[0],
+        db,
     )
 
     row_count = db.build_market_monitor_table(force=True)
@@ -128,6 +135,106 @@ def test_build_feat_daily_core_uses_duckdb_scalar_functions() -> None:
     assert row is not None
     assert row[0] is not None
     assert row[1] is not None
+
+
+def test_build_market_monitor_incremental_matches_full_build() -> None:
+    db = _make_db()
+    db.con.execute(
+        """
+        CREATE TABLE feat_daily_core (
+            symbol VARCHAR,
+            trading_date DATE,
+            close DOUBLE,
+            ma_20 DOUBLE,
+            atr_20 DOUBLE,
+            vol_20 DOUBLE,
+            dollar_vol_20 DOUBLE,
+            ret_1d DOUBLE,
+            ret_5d DOUBLE,
+            atr_compress_ratio DOUBLE,
+            range_percentile_252 DOUBLE
+        )
+        """
+    )
+
+    rows: list[tuple[object, ...]] = []
+    trading_date = date(2025, 1, 1)
+    trading_index = 0
+    while trading_index < 95:
+        if trading_date.weekday() < 5:
+            close_a = 100.0 + trading_index
+            close_b = 220.0 - trading_index
+            rows.extend(
+                [
+                    (
+                        "AAA",
+                        trading_date.isoformat(),
+                        close_a,
+                        close_a - 5.0,
+                        2.0,
+                        1_000_000.0,
+                        5_000_000.0,
+                        0.05 if trading_index % 11 == 0 else 0.01,
+                        0.03,
+                        0.85,
+                        0.75,
+                    ),
+                    (
+                        "BBB",
+                        trading_date.isoformat(),
+                        close_b,
+                        close_b + 5.0,
+                        2.5,
+                        900_000.0,
+                        4_800_000.0,
+                        -0.05 if trading_index % 13 == 0 else -0.01,
+                        -0.02,
+                        0.95,
+                        0.25,
+                    ),
+                ]
+            )
+            trading_index += 1
+        trading_date += timedelta(days=1)
+
+    db.con.executemany(
+        """
+        INSERT INTO feat_daily_core (
+            symbol,
+            trading_date,
+            close,
+            ma_20,
+            atr_20,
+            vol_20,
+            dollar_vol_20,
+            ret_1d,
+            ret_5d,
+            atr_compress_ratio,
+            range_percentile_252
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+    db.build_feat_daily_core = MethodType(
+        lambda self, force=False, dataset_hash=None: self.con.execute(
+            "SELECT COUNT(*) FROM feat_daily_core"
+        ).fetchone()[0],
+        db,
+    )
+
+    db.build_market_monitor_table(force=True)
+    expected = db.con.execute(
+        "SELECT * FROM market_monitor_daily ORDER BY trading_date"
+    ).fetchall()
+
+    rebuild_from = date(2025, 4, 1)
+    db.build_market_monitor_incremental(since_date=rebuild_from)
+    actual = db.con.execute(
+        "SELECT * FROM market_monitor_daily ORDER BY trading_date"
+    ).fetchall()
+
+    assert actual == expected
 
 
 def test_year_table_row_includes_full_breadth_family() -> None:

@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run backtests year-by-year with checkpoint/resume support"
     )
-    parser.add_argument("--strategy", type=str, default="indian_2lynch", help="Strategy name")
+    parser.add_argument("--strategy", type=str, default="thresholdbreakout", help="Strategy name")
     parser.add_argument(
         "--list-strategies", action="store_true", help="List available strategies and exit"
     )

@@ -11,7 +11,7 @@ Supports both:
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
@@ -170,6 +170,44 @@ class WalkForwardFramework:
             )
 
             current_train_start = current_train_start + timedelta(days=roll_interval_days)
+
+    def generate_rolling_windows_from_sessions(
+        self,
+        trading_sessions: Sequence[date],
+        *,
+        train_sessions: int = 252,
+        test_sessions: int = 63,
+        roll_interval_sessions: int = 63,
+    ) -> Iterator[WalkForwardWindow]:
+        """Generate rolling walk-forward windows from actual trading sessions.
+
+        The CLI promotion gate should validate folds on exchange sessions, not
+        calendar-day approximations, so this helper builds windows directly from
+        the ordered list of available trading dates.
+        """
+        sessions = sorted(
+            {session_date for session_date in trading_sessions if isinstance(session_date, date)}
+        )
+        if len(sessions) < train_sessions + test_sessions:
+            return
+
+        current_train_start_idx = 0
+        while True:
+            train_end_idx = current_train_start_idx + train_sessions - 1
+            test_start_idx = train_end_idx + 1
+            test_end_idx = test_start_idx + test_sessions - 1
+
+            if test_end_idx >= len(sessions):
+                break
+
+            yield WalkForwardWindow(
+                train_start=sessions[current_train_start_idx],
+                train_end=sessions[train_end_idx],
+                test_start=sessions[test_start_idx],
+                test_end=sessions[test_end_idx],
+            )
+
+            current_train_start_idx += roll_interval_sessions
 
     def run_walk_forward(
         self,

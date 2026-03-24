@@ -128,7 +128,7 @@ class BacktestParams:
     end_date: str | None = None
     entry_timeframe: str = "5min"
     # Strategy selection
-    strategy: str = "indian_2lynch"
+    strategy: str = "thresholdbreakout"
 
     # VectorBT engine config
     risk_per_trade_pct: float = 0.01
@@ -332,7 +332,6 @@ class DuckDBBacktestRunner:
         if strategy is None:
             return False
         return strategy.direction == PositionSide.LONG and strategy.family in {
-            "indian_2lynch",
             "threshold_breakout",
         }
 

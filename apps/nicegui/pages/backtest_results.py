@@ -43,13 +43,23 @@ from apps.nicegui.components import (
     page_header,
     paginated_table,
     export_menu,
+    loading_spinner,
 )
 
 
 async def backtest_page() -> None:
     """Render the backtest results page."""
     with page_layout("Backtest Results", "bar_chart"):
-        experiments_df = get_experiments()
+        try:
+            with loading_spinner():
+                experiments_df = get_experiments()
+        except Exception as e:
+            empty_state(
+                "Connection Error",
+                f"Could not load experiments: {e}",
+                icon="error",
+            )
+            return
 
         if experiments_df.is_empty():
             page_header("Backtest Results")

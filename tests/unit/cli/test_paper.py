@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from nse_momentum_lab.cli.paper import _evaluate_walk_forward, _summarize_folds, build_parser, main
+from nse_momentum_lab.cli.paper import (
+    _check_walk_forward_gate,
+    _evaluate_walk_forward,
+    _summarize_folds,
+    build_parser,
+    main,
+)
+from nse_momentum_lab.services.backtest.duckdb_backtest_runner import BacktestParams
+from nse_momentum_lab.services.paper.runtime import PaperRuntimePlan
 
 
 class TestPaperCLI:
@@ -14,6 +24,7 @@ class TestPaperCLI:
         assert commands == [
             "alert",
             "archive",
+            "cleanup-walk-forward",
             "flatten",
             "live",
             "pause",
@@ -96,9 +107,15 @@ class TestPaperCLI:
         assert _evaluate_walk_forward(passing_summary)["status"] == "PASS"
         assert _evaluate_walk_forward(failing_summary)["status"] == "FAIL"
 
+    @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
     @patch("nse_momentum_lab.cli.paper.create_or_update_paper_session", new_callable=AsyncMock)
     @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
-    def test_prepare_command_executes(self, mock_sm: MagicMock, mock_create: AsyncMock) -> None:
+    def test_prepare_command_executes(
+        self,
+        mock_sm: MagicMock,
+        mock_create: AsyncMock,
+        mock_warn: AsyncMock,
+    ) -> None:
         mock_session = AsyncMock()
         mock_context = MagicMock()
         mock_context.__aenter__ = AsyncMock(return_value=mock_session)
@@ -114,6 +131,30 @@ class TestPaperCLI:
 
         mock_create.assert_awaited_once()
 
+    @patch("nse_momentum_lab.cli.paper.delete_walk_forward_sessions", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
+    def test_cleanup_walk_forward_command_executes(
+        self,
+        mock_sm: MagicMock,
+        mock_delete: AsyncMock,
+    ) -> None:
+        mock_session = AsyncMock()
+        mock_context = MagicMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_context.__aexit__ = AsyncMock()
+        mock_sm.return_value.return_value = mock_context
+        mock_delete.return_value = {"deleted_count": 3, "session_ids": ["wf-1", "wf-2", "wf-3"]}
+
+        with patch(
+            "sys.argv",
+            ["nseml-paper", "cleanup-walk-forward", "--yes"],
+        ):
+            main()
+
+        mock_delete.assert_awaited_once()
+
+    @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper._check_walk_forward_gate", new_callable=AsyncMock)
     @patch("nse_momentum_lab.cli.paper.KiteStreamRunner.run", new_callable=AsyncMock)
     @patch(
         "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.execute_live_cycle", new_callable=AsyncMock
@@ -132,6 +173,8 @@ class TestPaperCLI:
         mock_prepare: AsyncMock,
         mock_execute: AsyncMock,
         mock_run: AsyncMock,
+        mock_gate: AsyncMock,
+        mock_warn: AsyncMock,
     ) -> None:
         mock_session = AsyncMock()
         mock_context = MagicMock()
@@ -161,7 +204,10 @@ class TestPaperCLI:
         mock_prepare.assert_awaited_once()
         mock_execute.assert_awaited_once()
         mock_run.assert_awaited_once()
+        mock_gate.assert_awaited_once()
 
+    @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper._check_walk_forward_gate", new_callable=AsyncMock)
     @patch("nse_momentum_lab.cli.paper.KiteStreamRunner.run", new_callable=AsyncMock)
     @patch(
         "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.prepare_session", new_callable=AsyncMock
@@ -174,6 +220,8 @@ class TestPaperCLI:
         mock_settings: MagicMock,
         mock_prepare: AsyncMock,
         mock_run: AsyncMock,
+        mock_gate: AsyncMock,
+        mock_warn: AsyncMock,
     ) -> None:
         mock_session = AsyncMock()
         mock_context = MagicMock()
@@ -198,7 +246,10 @@ class TestPaperCLI:
 
         mock_prepare.assert_awaited_once()
         mock_run.assert_awaited_once()
+        mock_gate.assert_awaited_once()
 
+    @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper._check_walk_forward_gate", new_callable=AsyncMock)
     @patch(
         "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.execute_replay_cycle",
         new_callable=AsyncMock,
@@ -214,6 +265,8 @@ class TestPaperCLI:
         mock_settings: MagicMock,
         mock_prepare: AsyncMock,
         mock_execute: AsyncMock,
+        mock_gate: AsyncMock,
+        mock_warn: AsyncMock,
     ) -> None:
         mock_session = AsyncMock()
         mock_context = MagicMock()
@@ -242,7 +295,10 @@ class TestPaperCLI:
 
         mock_prepare.assert_awaited_once()
         mock_execute.assert_awaited_once()
+        mock_gate.assert_awaited_once()
 
+    @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper._load_market_trading_sessions")
     @patch("nse_momentum_lab.cli.paper.set_paper_session_status", new_callable=AsyncMock)
     @patch("nse_momentum_lab.cli.paper.update_paper_session", new_callable=AsyncMock)
     @patch("nse_momentum_lab.cli.paper.insert_walk_forward_fold", new_callable=AsyncMock)
@@ -261,6 +317,8 @@ class TestPaperCLI:
         mock_insert_fold: AsyncMock,
         mock_update_session: AsyncMock,
         mock_set_status: AsyncMock,
+        mock_load_sessions: MagicMock,
+        mock_warn: AsyncMock,
     ) -> None:
         mock_session = AsyncMock()
         mock_session.commit = AsyncMock()
@@ -268,9 +326,15 @@ class TestPaperCLI:
         mock_context.__aenter__ = AsyncMock(return_value=mock_session)
         mock_context.__aexit__ = AsyncMock()
         mock_sm.return_value.return_value = mock_context
+        mock_load_sessions.return_value = [
+            date(2025, 4, 1),
+            date(2025, 4, 2),
+            date(2025, 4, 3),
+            date(2025, 4, 4),
+        ]
 
         mock_framework = MagicMock()
-        mock_framework.generate_rolling_windows.return_value = [
+        mock_framework.generate_rolling_windows_from_sessions.return_value = [
             SimpleNamespace(
                 train_start=date(2025, 4, 1),
                 train_end=date(2025, 12, 8),
@@ -306,6 +370,90 @@ class TestPaperCLI:
         ):
             main()
 
-        mock_reset_folds.assert_awaited_once_with(mock_session, "wf-indian_2lynch-2025-04-01-2026-03-09")
+        mock_reset_folds.assert_awaited_once_with(
+            mock_session, "wf-thresholdbreakout-2025-04-01-2026-03-09"
+        )
         mock_insert_fold.assert_awaited_once()
         mock_set_status.assert_awaited()
+
+    @patch("nse_momentum_lab.cli.paper.get_backtest_db")
+    @patch("nse_momentum_lab.cli.paper.list_passed_walk_forward_sessions", new_callable=AsyncMock)
+    async def test_check_walk_forward_gate_requires_trade_date_coverage(
+        self,
+        mock_list_sessions: AsyncMock,
+        mock_get_backtest_db: MagicMock,
+    ) -> None:
+        mock_get_backtest_db.return_value = MagicMock()
+        mock_list_sessions.return_value = [
+            {
+                "session_id": "wf-1",
+                "strategy_name": "threshold_breakout",
+                "finished_at": "2026-03-20T10:00:00+00:00",
+                "strategy_params": {
+                    "walk_forward": {
+                        "test_ranges": [{"start": "2026-03-10", "end": "2026-03-20"}]
+                    }
+                },
+            }
+        ]
+        plan = PaperRuntimePlan(
+            session_id="paper-1",
+            strategy_name="threshold_breakout",
+            trade_date=date(2026, 3, 21),
+            mode="replay",
+        )
+
+        try:
+            await _check_walk_forward_gate(AsyncMock(), plan)
+        except SystemExit as exc:
+            assert "outside validated test coverage" in str(exc)
+        else:
+            raise AssertionError("Expected walk-forward gate failure for uncovered trade date")
+
+    @patch("nse_momentum_lab.cli.paper.get_backtest_db")
+    @patch("nse_momentum_lab.cli.paper.list_passed_walk_forward_sessions", new_callable=AsyncMock)
+    async def test_check_walk_forward_gate_validates_experiment_lineage(
+        self,
+        mock_list_sessions: AsyncMock,
+        mock_get_backtest_db: MagicMock,
+    ) -> None:
+        base_params = asdict(BacktestParams(strategy="thresholdbreakout"))
+        mock_backtest_db = MagicMock()
+        mock_backtest_db.get_experiment.return_value = {
+            "strategy_name": "threshold_breakout",
+            "dataset_hash": "dataset-1",
+            "code_hash": "code-1",
+            "params_json": json.dumps(base_params),
+        }
+        mock_get_backtest_db.return_value = mock_backtest_db
+        mock_list_sessions.return_value = [
+            {
+                "session_id": "wf-1",
+                "strategy_name": "threshold_breakout",
+                "finished_at": "2026-03-20T10:00:00+00:00",
+                "strategy_params": {
+                    "walk_forward": {
+                        "base_params": base_params,
+                        "test_ranges": [{"start": "2026-03-10", "end": "2026-03-20"}],
+                        "lineage": {
+                            "dataset_hashes": ["dataset-2"],
+                            "code_hashes": ["code-1"],
+                        },
+                    }
+                },
+            }
+        ]
+        plan = PaperRuntimePlan(
+            session_id="paper-1",
+            strategy_name="threshold_breakout",
+            trade_date=date(2026, 3, 20),
+            mode="replay",
+            experiment_id="exp-1",
+        )
+
+        try:
+            await _check_walk_forward_gate(AsyncMock(), plan)
+        except SystemExit as exc:
+            assert "dataset hash is outside the validated walk-forward lineage" in str(exc)
+        else:
+            raise AssertionError("Expected walk-forward gate failure for mismatched lineage")

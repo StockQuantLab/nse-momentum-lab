@@ -137,17 +137,6 @@ class QualityThresholds:
 
 # Strategy-specific thresholds
 STRATEGY_THRESHOLDS: dict[str, QualityThresholds] = {
-    "indian_2lynch": QualityThresholds(
-        min_trades=100,
-        min_trades_per_year=20,
-        max_max_drawdown_pct=60.0,
-        suspicious_max_drawdown_pct=40.0,
-        max_annual_return_pct=300.0,
-        suspicious_win_rate=(0.70, 1.0),
-        max_calmar=30.0,
-        max_holding_days=60,
-        avg_holding_days_max=10,
-    ),
     "threshold_breakout": QualityThresholds(
         min_trades=100,
         min_trades_per_year=20,
@@ -187,7 +176,7 @@ STRATEGY_THRESHOLDS: dict[str, QualityThresholds] = {
 def validate_backtest_result(
     metrics: dict[str, float],
     trade_data: dict[str, Any] | None = None,
-    strategy_name: str = "indian_2lynch",
+    strategy_name: str = "threshold_breakout",
     custom_thresholds: QualityThresholds | None = None,
 ) -> QualityGateResult:
     """
@@ -650,7 +639,7 @@ def validate_performance_regressions(
 
 def validate_benchmark(
     metrics: BenchmarkMetrics,
-    strategy_name: str = "indian_2lynch",
+    strategy_name: str = "threshold_breakout",
 ) -> QualityGateResult:
     """
     Validate performance benchmarks.

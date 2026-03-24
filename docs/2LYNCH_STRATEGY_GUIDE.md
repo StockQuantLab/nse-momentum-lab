@@ -16,7 +16,7 @@
 
 ## Indian Market Adaptations
 
-Adapted from Stockbee's US-market approach for NSE equities. Full rationale: [INDIAN_2LYNCH_ADAPTATION.md](archive/INDIAN_2LYNCH_ADAPTATION.md).
+Adapted from Stockbee's US-market approach for NSE equities. Full rationale: [LEGACY_2LYNCH_ADAPTATION.md](archive/LEGACY_2LYNCH_ADAPTATION.md).
 
 | Parameter | US (Stockbee) | India (NSE) | Why |
 |-----------|---------------|-------------|-----|
@@ -35,19 +35,19 @@ Full NSE universe (~1,820 stocks), 60-min FEE window.
 
 | Strategy | Threshold | Dir | Trades | Win% | Ann Ret | Max DD | Calmar | Total Ret |
 |----------|-----------|-----|--------|------|---------|--------|--------|-----------|
-| **Indian2LYNCH** | 4% | LONG | **7,073** | **51.3%** | **193.9%** | **4.44%** | **43.67** | **2132%** |
+| **thresholdbreakout** | 4% | LONG | **7,073** | **51.3%** | **193.9%** | **4.44%** | **43.67** | **2132%** |
 | 2LYNCHBreakout | 4% | LONG | 7,073 | 51.3% | 193.9% | 4.44% | 43.67 | 2132% |
 | 2LYNCHBreakout | 2% | LONG | 18,657 | 45.8% | 338.7% | 5.75% | **58.94** | 3725% |
 | 2LYNCHBreakdown | 4% | SHORT | 4,717 | 38.9% | 61.4% | 36.69% | 1.67 | 675% |
 | 2LYNCHBreakdown | 2% | SHORT | 23,252 | 39.5% | 286.2% | 23.15% | 12.36 | 3148% |
 
-**Key validation**: Indian2LYNCH and 2LYNCHBreakout at 4% are **identical** — same trades, same year-by-year returns, same every metric. This confirms the 2LYNCH filter stack is correctly shared across all breakout variants.
+**Key validation**: thresholdbreakout and 2LYNCHBreakout at 4% are **identical** — same trades, same year-by-year returns, same every metric. This confirms the 2LYNCH filter stack is correctly shared across all breakout variants.
 
 **Key insight on 2% breakout**: Lower threshold generates more signals (18,657 vs 7,073) but the 2LYNCH filter stack maintains quality — Calmar 58.94 beats 4% (43.67). The filter stack, not the threshold, drives the edge.
 
 **Short side note**: Breakdown strategies have structurally lower win rates (38–39% vs 51%) in a 10-year bull market (2015–2025). 2LYNCHBreakdown 2% (Calmar 12.36) is more viable than 4% (Calmar 1.67). Short strategies perform better in bear/choppy regimes.
 
-### Production Baseline (Indian2LYNCH)
+### Production Baseline (thresholdbreakout)
 
 | Metric | Value |
 |--------|-------|
@@ -175,14 +175,14 @@ For SHORT: `close < ma_20`, `ret_5d < 0`, R² still ≥ 0.70 (orderly downtrend)
 
 | Strategy name | CLI flag | Description |
 |---------------|----------|-------------|
-| `Indian2LYNCH` | `--strategy indian2lynch` | 4% threshold, LONG, original 2LYNCH (production baseline) |
+| `thresholdbreakout` | `--strategy thresholdbreakout` | 4% threshold, LONG, canonical breakout baseline |
 | `2LYNCHBreakout` | `--strategy 2lynchbreakout` | Configurable threshold, LONG, **same 2LYNCH filter stack** |
 | `2LYNCHBreakdown` | `--strategy 2lynchbreakdown` | Configurable threshold, SHORT, **mirrored 2LYNCH filter stack** |
 | `EpisodicPivot` | `--strategy episodicpivot` | Gap-based episodic setups, LONG |
 
-**Key rule**: `2LYNCHBreakout` at `--breakout-threshold 0.04` must produce **identical results** to `Indian2LYNCH`. If they diverge, the filter stack has drifted — investigate immediately.
+**Key rule**: `2LYNCHBreakout` at `--breakout-threshold 0.04` must produce **identical results** to `thresholdbreakout`. If they diverge, the filter stack has drifted — investigate immediately.
 
-Old aliases `thresholdbreakout` and `thresholdbreakdown` still resolve to `2LYNCHBreakout` and `2LYNCHBreakdown` for backward compatibility.
+Legacy aliases `2lynchbreakout` and `2lynchbreakdown` still resolve to `thresholdbreakout` and `thresholdbreakdown` for backward compatibility.
 
 ---
 
@@ -273,7 +273,7 @@ NiceGUI Dashboard (apps/nicegui/)
 
 ## How to Run
 
-### Production Baseline (Indian2LYNCH, 4%, 60-min FEE)
+### Production Baseline (thresholdbreakout, 4%, 60-min FEE)
 
 ```bash
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
@@ -287,7 +287,7 @@ Expected: ~7,073 trades, 51.3% win rate, 193.9% annualized, 4.4% max DD, Calmar 
 ### 2LYNCHBreakout — Configurable Threshold
 
 ```bash
-# 4% threshold (must match Indian2LYNCH baseline)
+# 4% threshold (must match thresholdbreakout baseline)
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
   --strategy 2lynchbreakout --breakout-threshold 0.04 \
   --universe-size 2000 --start-year 2015 --end-year 2025

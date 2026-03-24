@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--strategy",
         type=str,
-        default="indian_2lynch",
+        default="thresholdbreakout",
         help="Strategy name resolved from registry",
     )
     parser.add_argument(

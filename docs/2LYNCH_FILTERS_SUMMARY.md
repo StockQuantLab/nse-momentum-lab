@@ -5,7 +5,7 @@
 
 ---
 
-## Filter Definitions — LONG Side (Indian2LYNCH / 2LYNCHBreakout)
+## Filter Definitions — LONG Side (thresholdbreakout / 2LYNCHBreakout)
 
 Six filters applied to every breakout signal. Require **5 of 6** to pass.
 
@@ -64,7 +64,7 @@ The original Stockbee filter uses `TI65 = MA7 / MA65 >= 1.05` (7-day MA 5% above
 | Component | File |
 |-----------|------|
 | Feature pre-computation | `src/nse_momentum_lab/features/daily_core.py` |
-| Candidate SQL — Indian2LYNCH | `src/nse_momentum_lab/services/backtest/strategy_registry.py` (`_build_2lynch_candidate_query`) |
+| Candidate SQL — thresholdbreakout | `src/nse_momentum_lab/services/backtest/strategy_registry.py` (`_build_2lynch_candidate_query`) |
 | Candidate SQL — 2LYNCHBreakout | `src/nse_momentum_lab/services/backtest/strategy_families.py` (`_build_threshold_breakout_candidate_query`) |
 | Candidate SQL — 2LYNCHBreakdown | `src/nse_momentum_lab/services/backtest/strategy_families.py` (`_build_threshold_breakdown_candidate_query`) |
 | Filter application (min_filters) | `src/nse_momentum_lab/services/backtest/duckdb_backtest_runner.py` (line ~862) |
@@ -98,7 +98,7 @@ The original Stockbee filter uses `TI65 = MA7 / MA65 >= 1.05` (7-day MA 5% above
 |------|--------|
 | 2025-02-24 | N filter moved to T-1 (prev day); Y window shortened from 90→30 days; filter_2 added (was missing); initial stop changed to breakout day low; R² now computed properly; trail activation 8%; breakeven stop added |
 | 2026-03-06 | Post-day-3 stop tightening added (LONG: stop=max(stop,low); SHORT: stop=min(stop,high)); STOP_POST_DAY3 exit reason added |
-| 2026-03-07 | **filter_2 bug fixed in 2LYNCHBreakout/2LYNCHBreakdown**: was using `ret_5d` (wrong), now uses `ret_1d_lag1/lag2` (correct, matching Indian2LYNCH); strategies renamed from ThresholdBreakout→2LYNCHBreakout, ThresholdBreakdown→2LYNCHBreakdown; version bumped to 1.1.0; profit_factor sign fixed for SHORT trades |
+| 2026-03-07 | **filter_2 bug fixed in 2LYNCHBreakout/2LYNCHBreakdown**: was using `ret_5d` (wrong), now uses `ret_1d_lag1/lag2` (correct, matching the legacy 4% breakout baseline); strategies renamed from ThresholdBreakout→2LYNCHBreakout, ThresholdBreakdown→2LYNCHBreakdown; version bumped to 1.1.0; profit_factor sign fixed for SHORT trades |
 
 ---
 

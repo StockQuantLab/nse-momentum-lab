@@ -44,12 +44,12 @@ class ScanWorker:
         scan_def_id: int | None = None,
         config: ScanConfig | None = None,
         symbols: list[str] | None = None,
-        strategy_name: str = "Indian2LYNCH",
+        strategy_name: str = "thresholdbreakout",
     ) -> None:
         self.scan_def_id = scan_def_id
         self.config = config or ScanConfig()
         self.symbols = [s.strip().upper() for s in symbols] if symbols else None
-        # Registry-aware: currently only Indian2LYNCH is supported for live scanning.
+        # Registry-aware: currently only the canonical breakout family is supported for live scanning.
         # Multi-strategy live scanning is tracked in Phase 1 of the platform plan.
         self.strategy_name = strategy_name
         self._feature_engine = FeatureEngine()
@@ -218,9 +218,9 @@ class ScanWorker:
         scan_def_name = strategy_def.name
         scan_def_version = strategy_def.version
 
-        if strategy_def.family not in ("indian_2lynch",):
+        if strategy_def.family not in ("threshold_breakout",):
             logger.warning(
-                "ScanWorker: strategy '%s' uses FeatureEngine/ScanRuleEngine (Indian2LYNCH path). "
+                "ScanWorker: strategy '%s' uses FeatureEngine/ScanRuleEngine (threshold breakout path). "
                 "DuckDB-based routing for '%s' is a Phase 1 enhancement.",
                 self.strategy_name,
                 strategy_def.family,

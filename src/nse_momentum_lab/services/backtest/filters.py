@@ -5,7 +5,7 @@ This module centralizes the filter definitions that were previously duplicated
 across:
 - services/backtest/duckdb_backtest_runner.py (SQL CTE)
 - services/scan/rules.py (Python FilterChecker class)
-- services/scan/indian_2lynch_signal_generator.py (270+ lines)
+- services/scan/legacy 2LYNCH signal generator code
 
 Filters are defined once with both SQL expression templates and Python
 validation functions.

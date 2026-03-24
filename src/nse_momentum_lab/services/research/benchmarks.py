@@ -512,11 +512,6 @@ def estimate_full_run_duration(
 
 # Baseline performance expectations (10-year, 500-symbol run)
 BASELINE_EXPECTATIONS = {
-    "indian_2lynch": {
-        "max_duration_seconds": 600,  # 10 minutes
-        "max_memory_mb": 2048,  # 2GB
-        "min_signals_per_second": 50.0,
-    },
     "threshold_breakout": {
         "max_duration_seconds": 600,
         "max_memory_mb": 2048,
@@ -544,7 +539,9 @@ def check_baseline_expectations(
 
     Returns dict with 'passed' bool and 'details' list.
     """
-    expectations = BASELINE_EXPECTATIONS.get(strategy_name, BASELINE_EXPECTATIONS["indian_2lynch"])
+    expectations = BASELINE_EXPECTATIONS.get(
+        strategy_name, BASELINE_EXPECTATIONS["threshold_breakout"]
+    )
 
     details: list[str] = []
     passed = True

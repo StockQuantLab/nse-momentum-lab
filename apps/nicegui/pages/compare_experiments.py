@@ -26,13 +26,24 @@ from apps.nicegui.components import (
     THEME,
     empty_state,
     page_header,
+    loading_spinner,
+    paginated_table,
 )
 
 
 async def compare_page() -> None:
     """Render the compare experiments page."""
     with page_layout("Compare", "compare_arrows"):
-        experiments_df = get_experiments()
+        try:
+            with loading_spinner():
+                experiments_df = get_experiments()
+        except Exception as e:
+            empty_state(
+                "Connection Error",
+                f"Could not load experiments: {e}",
+                icon="error",
+            )
+            return
 
         if experiments_df.is_empty():
             empty_state(
@@ -181,14 +192,15 @@ async def compare_page() -> None:
                         }
                     )
 
-            ui.table(
+            paginated_table(
                 columns=[
                     {"name": "Metric", "label": "Metric", "field": "Metric"},
                     {"name": "Experiment A", "label": "Experiment A", "field": "Experiment A"},
                     {"name": "Experiment B", "label": "Experiment B", "field": "Experiment B"},
                 ],
                 rows=comparison_data,
-            ).classes("w-full mb-6")
+                page_size=20,
+            )
 
             divider()
 

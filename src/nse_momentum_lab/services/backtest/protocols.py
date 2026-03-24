@@ -261,7 +261,7 @@ class GridSearchProtocol(ResearchProtocol):
     def _get_default_grid(self) -> dict[str, list[Any]]:
         strategy_family = self.config.strategy.family
 
-        if strategy_family == "indian_2lynch":
+        if strategy_family == "threshold_breakout":
             return {
                 "breakout_threshold": [0.03, 0.04, 0.05],
                 "close_pos_threshold": [0.60, 0.70, 0.80],
@@ -383,7 +383,7 @@ class RandomSearchProtocol(ResearchProtocol):
     def _get_default_space(self) -> dict[str, tuple[Any, Any]]:
         strategy_family = self.config.strategy.family
 
-        if strategy_family == "indian_2lynch":
+        if strategy_family == "threshold_breakout":
             return {
                 "breakout_threshold": (0.02, 0.06),
                 "close_pos_threshold": (0.50, 0.90),
@@ -788,7 +788,7 @@ class SensitivityOATProtocol(ResearchProtocol):
     def _get_default_ranges(self) -> dict[str, list[Any]]:
         strategy_family = self.config.strategy.family
 
-        if strategy_family == "indian_2lynch":
+        if strategy_family == "threshold_breakout":
             return {
                 "breakout_threshold": [0.02, 0.03, 0.04, 0.05, 0.06],
                 "close_pos_threshold": [0.50, 0.60, 0.70, 0.80, 0.90],

@@ -2,7 +2,7 @@
 
 This implements the complete Stockbee momentum burst strategy as specified in ADR-007.
 
-INDIAN MARKET ADAPTATIONS:
+NSE MARKET ADAPTATIONS:
 - Min price: ₹10 (adapted from $3 for US)
 - Min volume: 100,000 shares
 - 4% gap threshold (same as US)

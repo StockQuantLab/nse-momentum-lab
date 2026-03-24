@@ -105,7 +105,7 @@ config = ScanConfig(
 ### Indian Implementation (Adapted)
 
 ```python
-from nse_momentum_lab.services.scan.indian_2lynch_signal_generator import (
+from nse_momentum_lab.services.scan.legacy_2lynch_signal_generator import (
     Indian2LynchSignalGenerator,
 )
 
@@ -288,6 +288,6 @@ The 2LYNCH strategy transfers well to Indian markets with these key adaptations:
 ---
 
 **Files**:
-- Implementation: `indian_2lynch_signal_generator.py`
-- Test: `test_indian_2lynch.py`
-- Details: `INDIAN_2LYNCH_ADAPTATION.md`
+- Implementation: legacy 2LYNCH scan generator
+- Test: legacy 2LYNCH integration test
+- Details: `LEGACY_2LYNCH_ADAPTATION.md`

@@ -89,7 +89,7 @@ The materializer will:
 
 ```bash
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
-  --strategy indian_2lynch \
+  --strategy thresholdbreakout \
   --start-year 2026 \
   --end-year 2026
 ```
@@ -98,7 +98,7 @@ doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
 
 ```bash
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
-  --strategy indian_2lynch \
+  --strategy thresholdbreakout \
   --start-year 2015 \
   --end-year 2026
 ```

@@ -91,7 +91,8 @@ doppler run -- uv run nseml-backtest-status --watch --interval 15
 Walk-forward is the promotion gate for replay and live paper sessions.
 
 ```powershell
-doppler run -- uv run nseml-paper walk-forward --strategy indian_2lynch --start-date 2025-04-01 --end-date 2026-03-09
+doppler run -- uv run nseml-paper cleanup-walk-forward --yes
+doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date 2025-04-01 --end-date 2026-03-09
 doppler run -- uv run nseml-paper replay-day --session-id <SESSION_ID> --trade-date 2026-03-09 --skip-gate
 doppler run -- uv run nseml-paper live --session-id <SESSION_ID> --trade-date 2026-03-22 --execute --run
 doppler run -- uv run nseml-paper qualify --session-id <SESSION_ID> --max-rank 10

@@ -213,10 +213,17 @@ async def home_page() -> None:
             f"color: {THEME['text_secondary']};"
         )
 
-        with ui.grid(columns=3).classes("w-full gap-4 mb-6"):
+        with ui.grid(columns=4).classes("w-full gap-4 mb-6"):
+            nav_card(
+                "Walk Forward",
+                "Review validation folds and rerun promotion-gate checks",
+                "view_week",
+                "/walk_forward",
+                COLORS["primary"],
+            )
             nav_card(
                 "Paper Ledger",
-                "Track paper trading positions and performance",
+                "Track paper trading sessions and execution state",
                 "receipt_long",
                 "/paper_ledger",
                 COLORS["warning"],

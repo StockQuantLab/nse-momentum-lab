@@ -32,13 +32,24 @@ from apps.nicegui.components import (
     THEME,
     empty_state,
     page_header,
+    paginated_table,
+    loading_spinner,
 )
 
 
-def trade_analytics_page() -> None:
+async def trade_analytics_page() -> None:
     """Render the trade analytics page."""
     with page_layout("Trade Analytics", "analytics"):
-        experiments_df = get_experiments()
+        try:
+            with loading_spinner():
+                experiments_df = get_experiments()
+        except Exception as e:
+            empty_state(
+                "Connection Error",
+                f"Could not load experiments: {e}",
+                icon="error",
+            )
+            return
 
         if experiments_df.is_empty():
             page_header("Trade Analytics")
@@ -136,7 +147,7 @@ def trade_analytics_page() -> None:
                             )
                         )
 
-                        ui.table(
+                        paginated_table(
                             columns=[
                                 {"name": "exit_reason", "label": "Reason", "field": "exit_reason"},
                                 {"name": "count", "label": "Trades", "field": "count"},
@@ -160,7 +171,8 @@ def trade_analytics_page() -> None:
                                 }
                                 for row in exit_summary.iter_rows(named=True)
                             ],
-                        ).classes("w-full")
+                            page_size=20,
+                        )
 
                         fig = go.Figure()
                         fig.add_trace(
@@ -211,7 +223,7 @@ def trade_analytics_page() -> None:
                             )
                         )
 
-                        ui.table(
+                        paginated_table(
                             columns=[
                                 {"name": "month_str", "label": "Month", "field": "month_str"},
                                 {"name": "trades_fmt", "label": "Trades", "field": "trades_fmt"},
@@ -233,8 +245,8 @@ def trade_analytics_page() -> None:
                                 }
                                 for row in monthly_data.iter_rows(named=True)
                             ],
-                            pagination=15,
-                        ).classes("w-full")
+                            page_size=15,
+                        )
 
                         fig = go.Figure()
                         fig.add_trace(
@@ -266,7 +278,7 @@ def trade_analytics_page() -> None:
                             .sort("total_pnl", descending=True)
                         )
 
-                        ui.table(
+                        paginated_table(
                             columns=[
                                 {"name": "symbol", "label": "Symbol", "field": "symbol"},
                                 {"name": "trades_fmt", "label": "Trades", "field": "trades_fmt"},
@@ -290,12 +302,12 @@ def trade_analytics_page() -> None:
                                 }
                                 for row in symbol_stats.head(30).iter_rows(named=True)
                             ],
-                            pagination=10,
-                        ).classes("w-full")
+                            page_size=10,
+                        )
 
         # ── experiment selector ───────────────────────────────────
         with ui.row().classes("kpi-card w-full items-center gap-4 mb-6"):
-            ui.icon("science").classes("text-xl").style(f"color: {THEME['primary']};")
+            ui.icon("science").classes("text-2xl").style(f"color: {THEME['primary']};")
             ui.label("Experiment").classes("text-sm font-medium").style(
                 f"color: {THEME['text_secondary']};"
             )

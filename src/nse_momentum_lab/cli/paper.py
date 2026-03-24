@@ -15,15 +15,17 @@ from typing import Any
 from uuid import uuid4
 
 from nse_momentum_lab.config import get_settings
-from nse_momentum_lab.db import get_sessionmaker
+from nse_momentum_lab.db import get_market_db, get_sessionmaker
+from nse_momentum_lab.db.market_db import get_backtest_db
 from nse_momentum_lab.db.paper import (
     alert_session_signals,
     create_or_update_paper_session,
+    delete_walk_forward_sessions,
     flatten_open_positions,
-    get_latest_passed_walk_forward,
     get_paper_session_summary,
     insert_walk_forward_fold,
     list_paper_sessions,
+    list_passed_walk_forward_sessions,
     qualify_session_signals,
     reset_walk_forward_folds,
     set_paper_session_status,
@@ -39,6 +41,8 @@ from nse_momentum_lab.services.kite.stream import KiteStreamConfig, KiteStreamRu
 from nse_momentum_lab.services.paper.runtime import PaperRuntimePlan, PaperRuntimeScaffold
 
 logger = logging.getLogger(__name__)
+BACKTEST_DATE_KEYS = {"start_date", "end_date", "start_year", "end_year"}
+BACKTEST_PARAM_KEYS = set(BacktestParams.__dataclass_fields__)
 
 
 def _utc_today() -> date:
@@ -80,6 +84,210 @@ def _parse_int_csv(value: str | None) -> list[int]:
 def _default_session_id(prefix: str, *parts: str) -> str:
     safe = "-".join(part.strip().lower().replace(" ", "-") for part in parts if part.strip())
     return f"{prefix}-{safe}" if safe else f"{prefix}-{uuid4().hex[:8]}"
+
+
+def _normalize_backtest_params(
+    strategy_name: str,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    params = asdict(BacktestParams(strategy=strategy_name))
+    params.update(overrides or {})
+    params["strategy"] = strategy_name
+    return asdict(BacktestParams(**params))
+
+
+def _load_market_trading_sessions(start_date: date, end_date: date) -> list[date]:
+    market_db = get_market_db(read_only=True)
+    rows = market_db.con.execute(
+        """
+        SELECT DISTINCT date
+        FROM v_daily
+        WHERE date >= ? AND date <= ?
+        ORDER BY date
+        """,
+        [start_date, end_date],
+    ).fetchall()
+    return [row[0] for row in rows if isinstance(row[0], date)]
+
+
+def _coerce_iso_date(value: Any) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_walk_forward_metadata(session: dict[str, Any]) -> dict[str, Any]:
+    strategy_params = session.get("strategy_params")
+    if not isinstance(strategy_params, dict):
+        return {}
+    walk_forward = strategy_params.get("walk_forward")
+    return walk_forward if isinstance(walk_forward, dict) else {}
+
+
+def _extract_walk_forward_base_params(session: dict[str, Any]) -> dict[str, Any]:
+    strategy_params = session.get("strategy_params")
+    if not isinstance(strategy_params, dict):
+        return {}
+
+    walk_forward = _extract_walk_forward_metadata(session)
+    base_params = walk_forward.get("base_params")
+    if isinstance(base_params, dict):
+        return base_params
+
+    return {key: value for key, value in strategy_params.items() if key in BACKTEST_PARAM_KEYS}
+
+
+def _extract_walk_forward_test_ranges(session: dict[str, Any]) -> list[tuple[date, date]]:
+    walk_forward = _extract_walk_forward_metadata(session)
+    raw_ranges: list[Any] = []
+    test_ranges_value = walk_forward.get("test_ranges")
+    if isinstance(test_ranges_value, list):
+        raw_ranges = test_ranges_value
+    else:
+        folds_value = walk_forward.get("folds")
+        if isinstance(folds_value, list):
+            raw_ranges = folds_value
+
+    ranges: list[tuple[date, date]] = []
+    for raw_range in raw_ranges:
+        if not isinstance(raw_range, dict):
+            continue
+        start_date = _coerce_iso_date(raw_range.get("start") or raw_range.get("test_start"))
+        end_date = _coerce_iso_date(raw_range.get("end") or raw_range.get("test_end"))
+        if start_date is None or end_date is None:
+            continue
+        ranges.append((start_date, end_date))
+    return ranges
+
+
+def _trade_date_is_covered(
+    trade_date: date | None,
+    test_ranges: list[tuple[date, date]],
+) -> bool:
+    if trade_date is None:
+        return True
+    return any(start_date <= trade_date <= end_date for start_date, end_date in test_ranges)
+
+
+def _extract_walk_forward_lineage(
+    session: dict[str, Any],
+    *,
+    backtest_db: Any | None = None,
+) -> dict[str, list[str]]:
+    walk_forward = _extract_walk_forward_metadata(session)
+    lineage = walk_forward.get("lineage")
+    fold_exp_ids_value = walk_forward.get("fold_experiment_ids")
+    fold_exp_ids_source: list[Any] = (
+        fold_exp_ids_value if isinstance(fold_exp_ids_value, list) else []
+    )
+    fold_exp_ids = [str(exp_id) for exp_id in fold_exp_ids_source if str(exp_id).strip()]
+
+    dataset_hashes_source: list[Any] = []
+    code_hashes_source: list[Any] = []
+    if isinstance(lineage, dict):
+        dataset_hashes_value = lineage.get("dataset_hashes")
+        code_hashes_value = lineage.get("code_hashes")
+        if isinstance(dataset_hashes_value, list):
+            dataset_hashes_source = dataset_hashes_value
+        if isinstance(code_hashes_value, list):
+            code_hashes_source = code_hashes_value
+
+    dataset_hashes = {str(item) for item in dataset_hashes_source if str(item).strip()}
+    code_hashes = {str(item) for item in code_hashes_source if str(item).strip()}
+
+    if not fold_exp_ids:
+        folds = walk_forward.get("folds")
+        if isinstance(folds, list):
+            fold_exp_ids = [
+                str(fold.get("exp_id"))
+                for fold in folds
+                if isinstance(fold, dict) and str(fold.get("exp_id") or "").strip()
+            ]
+
+    if backtest_db is not None and fold_exp_ids and (not dataset_hashes or not code_hashes):
+        for exp_id in fold_exp_ids:
+            experiment = backtest_db.get_experiment(exp_id) or {}
+            if experiment.get("dataset_hash"):
+                dataset_hashes.add(str(experiment["dataset_hash"]))
+            if experiment.get("code_hash"):
+                code_hashes.add(str(experiment["code_hash"]))
+
+    return {
+        "fold_experiment_ids": sorted(dict.fromkeys(fold_exp_ids)),
+        "dataset_hashes": sorted(dataset_hashes),
+        "code_hashes": sorted(code_hashes),
+    }
+
+
+def _validate_experiment_against_walk_forward(
+    experiment: dict[str, Any],
+    session: dict[str, Any],
+    *,
+    backtest_db: Any | None = None,
+) -> str | None:
+    experiment_strategy = str(experiment.get("strategy_name") or "").strip()
+    session_strategy = str(session.get("strategy_name") or "").strip()
+    if experiment_strategy and session_strategy and experiment_strategy != session_strategy:
+        return (
+            f"experiment strategy '{experiment_strategy}' does not match validated strategy "
+            f"'{session_strategy}'"
+        )
+
+    validated_params = _extract_walk_forward_base_params(session)
+    if not validated_params:
+        return "validated base parameters are missing"
+
+    params_json = experiment.get("params_json")
+    experiment_params = (
+        json.loads(params_json) if isinstance(params_json, str) and params_json else {}
+    )
+    comparable_keys = BACKTEST_PARAM_KEYS - BACKTEST_DATE_KEYS
+    validated_comparable = {key: validated_params.get(key) for key in comparable_keys}
+    experiment_comparable = {key: experiment_params.get(key) for key in comparable_keys}
+    if experiment_comparable != validated_comparable:
+        return "experiment parameters do not match the validated walk-forward configuration"
+
+    lineage = _extract_walk_forward_lineage(session, backtest_db=backtest_db)
+    dataset_hash = str(experiment.get("dataset_hash") or "").strip()
+    code_hash = str(experiment.get("code_hash") or "").strip()
+
+    if lineage["dataset_hashes"] and dataset_hash not in lineage["dataset_hashes"]:
+        return "experiment dataset hash is outside the validated walk-forward lineage"
+    if lineage["code_hashes"] and code_hash not in lineage["code_hashes"]:
+        return "experiment code hash is outside the validated walk-forward lineage"
+
+    return None
+
+
+def _walk_forward_gate_rejection_reason(
+    *,
+    session: dict[str, Any],
+    trade_date: date | None,
+    experiment: dict[str, Any] | None,
+    backtest_db: Any | None = None,
+) -> str | None:
+    test_ranges = _extract_walk_forward_test_ranges(session)
+    if not test_ranges:
+        return "validated test ranges are missing"
+    if not _trade_date_is_covered(trade_date, test_ranges):
+        trade_date_display = trade_date.isoformat() if trade_date is not None else "unknown date"
+        return f"trade date {trade_date_display} is outside validated test coverage"
+    if experiment is not None:
+        experiment_reason = _validate_experiment_against_walk_forward(
+            experiment,
+            session,
+            backtest_db=backtest_db,
+        )
+        if experiment_reason is not None:
+            return experiment_reason
+    return None
 
 
 def _session_to_json(session: Any) -> dict[str, Any]:
@@ -349,24 +557,53 @@ async def _cmd_alert(args: argparse.Namespace) -> None:
 
 async def _check_walk_forward_gate(
     db_session: Any,
-    strategy_name: str,
+    plan: PaperRuntimePlan,
     *,
     bypass: bool = False,
 ) -> None:
-    """Raise SystemExit if no passing walk-forward session exists for the strategy."""
+    """Raise SystemExit if no compatible passing walk-forward session exists."""
     if bypass:
-        logger.warning("Walk-forward promotion gate bypassed for strategy=%s", strategy_name)
+        logger.warning("Walk-forward promotion gate bypassed for strategy=%s", plan.strategy_name)
         return
-    latest_wf = await get_latest_passed_walk_forward(db_session, strategy_name)
-    if latest_wf is None:
+
+    passed_sessions = await list_passed_walk_forward_sessions(db_session, plan.strategy_name)
+    if not passed_sessions:
         raise SystemExit(
-            f"No passing walk-forward session found for strategy '{strategy_name}'. "
+            f"No passing walk-forward session found for strategy '{plan.strategy_name}'. "
             "Run 'nseml-paper walk-forward' first, or pass --skip-gate to bypass."
         )
-    logger.info(
-        "Walk-forward gate passed: session_id=%s finished_at=%s",
-        latest_wf["session_id"],
-        latest_wf.get("finished_at"),
+
+    backtest_db = get_backtest_db(read_only=True) if plan.experiment_id else None
+    experiment = None
+    if plan.experiment_id:
+        experiment = backtest_db.get_experiment(plan.experiment_id) if backtest_db else None
+        if experiment is None:
+            raise SystemExit(f"Experiment '{plan.experiment_id}' was not found in backtest.duckdb")
+
+    rejected: list[str] = []
+    for session in passed_sessions:
+        rejection_reason = _walk_forward_gate_rejection_reason(
+            session=session,
+            trade_date=plan.trade_date,
+            experiment=experiment,
+            backtest_db=backtest_db,
+        )
+        if rejection_reason is None:
+            logger.info(
+                "Walk-forward gate passed: session_id=%s finished_at=%s trade_date=%s",
+                session["session_id"],
+                session.get("finished_at"),
+                plan.trade_date,
+            )
+            return
+        rejected.append(f"{session['session_id']}: {rejection_reason}")
+
+    raise SystemExit(
+        "No compatible passing walk-forward session found for "
+        f"strategy '{plan.strategy_name}'"
+        + (f", trade_date '{plan.trade_date.isoformat()}'" if plan.trade_date else "")
+        + ". Recent rejections: "
+        + "; ".join(rejected[:5])
     )
 
 
@@ -381,9 +618,7 @@ async def _cmd_replay_day(args: argparse.Namespace) -> None:
             command="replay-day",
             auto_generated=args.session_id is None,
         )
-        await _check_walk_forward_gate(
-            db_session, plan.strategy_name, bypass=getattr(args, "skip_gate", False)
-        )
+        await _check_walk_forward_gate(db_session, plan, bypass=getattr(args, "skip_gate", False))
     result = await runtime.prepare_session(sessionmaker, plan, status="RUNNING")
     execution = None
     if getattr(args, "execute", False):
@@ -415,9 +650,7 @@ async def _cmd_live(args: argparse.Namespace) -> None:
             command="live",
             auto_generated=args.session_id is None,
         )
-        await _check_walk_forward_gate(
-            db_session, plan.strategy_name, bypass=getattr(args, "skip_gate", False)
-        )
+        await _check_walk_forward_gate(db_session, plan, bypass=getattr(args, "skip_gate", False))
     result = await runtime.prepare_session(sessionmaker, plan, status=status)
     execution = None
     if getattr(args, "execute", False):
@@ -464,13 +697,13 @@ async def _cmd_stream(args: argparse.Namespace) -> None:
 
 async def _cmd_walk_forward(args: argparse.Namespace) -> None:
     framework = WalkForwardFramework(strategy_name=args.strategy)
+    trading_sessions = _load_market_trading_sessions(args.start_date, args.end_date)
     windows = list(
-        framework.generate_rolling_windows(
-            args.start_date,
-            args.end_date,
-            train_days=args.train_days,
-            test_days=args.test_days,
-            roll_interval_days=args.roll_interval_days,
+        framework.generate_rolling_windows_from_sessions(
+            trading_sessions,
+            train_sessions=args.train_days,
+            test_sessions=args.test_days,
+            roll_interval_sessions=args.roll_interval_days,
         )
     )
     if args.max_folds is not None:
@@ -481,9 +714,12 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
     session_id = args.session_id or _default_session_id(
         "wf", args.strategy, args.start_date.isoformat(), args.end_date.isoformat()
     )
-    base_params = asdict(BacktestParams(strategy=args.strategy))
-    base_params.update(_parse_json(args.params_json))
-    base_params["strategy"] = args.strategy
+    base_params = _normalize_backtest_params(args.strategy, _parse_json(args.params_json))
+    base_params_hash = BacktestParams(**base_params).to_hash()
+    test_ranges = [
+        {"start": window.test_start.isoformat(), "end": window.test_end.isoformat()}
+        for window in windows
+    ]
 
     sessionmaker = get_sessionmaker()
     runner = DuckDBBacktestRunner()
@@ -511,7 +747,14 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
                 "train_days": args.train_days,
                 "test_days": args.test_days,
                 "roll_interval_days": args.roll_interval_days,
+                "window_mode": "trading_sessions",
+                "requested_date_range": {
+                    "start": args.start_date.isoformat(),
+                    "end": args.end_date.isoformat(),
+                },
                 "base_params": base_params,
+                "base_params_hash": base_params_hash,
+                "test_ranges": test_ranges,
             },
             risk_config={},
             notes=args.notes,
@@ -542,6 +785,9 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
                     "max_drawdown_pct": exp.get("max_drawdown_pct"),
                     "profit_factor": exp.get("profit_factor"),
                     "total_trades": exp.get("total_trades"),
+                    "params_hash": exp.get("params_hash"),
+                    "dataset_hash": exp.get("dataset_hash"),
+                    "code_hash": exp.get("code_hash"),
                 }
                 folds.append(fold)
                 await insert_walk_forward_fold(
@@ -563,12 +809,42 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
 
             summary = _summarize_folds(folds)
             decision = _evaluate_walk_forward(summary)
+            fold_experiment_ids = sorted(
+                {str(fold["exp_id"]) for fold in folds if str(fold.get("exp_id") or "").strip()}
+            )
+            dataset_hashes = sorted(
+                {
+                    str(fold["dataset_hash"])
+                    for fold in folds
+                    if str(fold.get("dataset_hash") or "").strip()
+                }
+            )
+            code_hashes = sorted(
+                {
+                    str(fold["code_hash"])
+                    for fold in folds
+                    if str(fold.get("code_hash") or "").strip()
+                }
+            )
             await update_paper_session(
                 db_session,
                 session_id=session_id,
                 strategy_params={
                     **base_params,
                     "walk_forward": {
+                        "window_mode": "trading_sessions",
+                        "requested_date_range": {
+                            "start": args.start_date.isoformat(),
+                            "end": args.end_date.isoformat(),
+                        },
+                        "base_params": base_params,
+                        "base_params_hash": base_params_hash,
+                        "test_ranges": test_ranges,
+                        "fold_experiment_ids": fold_experiment_ids,
+                        "lineage": {
+                            "dataset_hashes": dataset_hashes,
+                            "code_hashes": code_hashes,
+                        },
                         "summary": summary,
                         "decision": decision,
                         "folds": folds,
@@ -607,6 +883,32 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
     )
 
 
+async def _cmd_cleanup_walk_forward(args: argparse.Namespace) -> None:
+    if not getattr(args, "yes", False):
+        raise SystemExit("Pass --yes to delete walk-forward sessions.")
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as db_session:
+        result = await delete_walk_forward_sessions(
+            db_session,
+            strategy_name=args.strategy,
+            before_date=args.before_date,
+            after_date=args.after_date,
+        )
+    print(
+        json.dumps(
+            {
+                "strategy": args.strategy,
+                "before_date": args.before_date.isoformat() if args.before_date else None,
+                "after_date": args.after_date.isoformat() if args.after_date else None,
+                **result,
+            },
+            default=str,
+            indent=2,
+        )
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Paper session and walk-forward workflow")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -614,7 +916,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = sub.add_parser("prepare", help="Create or update a paper session")
     prepare.add_argument("--session-id", default=None)
     prepare.add_argument("--trade-date", default=None, type=_parse_iso_date, help="YYYY-MM-DD")
-    prepare.add_argument("--strategy", default="indian_2lynch")
+    prepare.add_argument("--strategy", default="thresholdbreakout")
     prepare.add_argument("--mode", default="replay", choices=["replay", "live", "walk_forward"])
     prepare.add_argument("--status", default="PLANNING")
     prepare.add_argument("--experiment-id", default=None)
@@ -634,12 +936,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     walk_forward = sub.add_parser("walk-forward", help="Run rolling walk-forward backtests")
     walk_forward.add_argument("--session-id", default=None)
-    walk_forward.add_argument("--strategy", default="indian_2lynch")
+    walk_forward.add_argument("--strategy", default="thresholdbreakout")
     walk_forward.add_argument("--start-date", required=True, type=_parse_iso_date)
     walk_forward.add_argument("--end-date", required=True, type=_parse_iso_date)
-    walk_forward.add_argument("--train-days", type=_positive_int, default=252)
-    walk_forward.add_argument("--test-days", type=_positive_int, default=63)
-    walk_forward.add_argument("--roll-interval-days", type=_positive_int, default=63)
+    walk_forward.add_argument(
+        "--train-days",
+        type=_positive_int,
+        default=252,
+        help="Training window size in trading sessions",
+    )
+    walk_forward.add_argument(
+        "--test-days",
+        type=_positive_int,
+        default=63,
+        help="Test window size in trading sessions",
+    )
+    walk_forward.add_argument(
+        "--roll-interval-days",
+        type=_positive_int,
+        default=63,
+        help="Fold roll interval in trading sessions",
+    )
     walk_forward.add_argument("--max-folds", type=_positive_int, default=None)
     walk_forward.add_argument("--params-json", default=None)
     walk_forward.add_argument("--force", action="store_true")
@@ -647,10 +964,30 @@ def build_parser() -> argparse.ArgumentParser:
     walk_forward.add_argument("--notes", default=None)
     walk_forward.set_defaults(handler=_cmd_walk_forward)
 
+    cleanup = sub.add_parser(
+        "cleanup-walk-forward",
+        help="Delete walk-forward paper sessions so a fresh run can start cleanly",
+    )
+    cleanup.add_argument("--strategy", default=None, help="Optional strategy filter")
+    cleanup.add_argument(
+        "--before-date",
+        default=None,
+        type=_parse_iso_date,
+        help="Delete sessions before this trade date",
+    )
+    cleanup.add_argument(
+        "--after-date",
+        default=None,
+        type=_parse_iso_date,
+        help="Delete sessions on/after this trade date",
+    )
+    cleanup.add_argument("--yes", action="store_true", help="Confirm deletion")
+    cleanup.set_defaults(handler=_cmd_cleanup_walk_forward)
+
     replay = sub.add_parser("replay-day", help="Bootstrap a replay-day paper session")
     replay.add_argument("--session-id", default=None)
     replay.add_argument("--trade-date", required=True, type=_parse_iso_date, help="YYYY-MM-DD")
-    replay.add_argument("--strategy", default="indian_2lynch")
+    replay.add_argument("--strategy", default="thresholdbreakout")
     replay.add_argument("--experiment-id", default=None)
     replay.add_argument("--symbols", default="")
     replay.add_argument("--strategy-params", default=None)
@@ -667,7 +1004,7 @@ def build_parser() -> argparse.ArgumentParser:
     live = sub.add_parser("live", help="Bootstrap a live Kite-backed paper session")
     live.add_argument("--session-id", default=None)
     live.add_argument("--trade-date", default=None, type=_parse_iso_date, help="YYYY-MM-DD")
-    live.add_argument("--strategy", default="indian_2lynch")
+    live.add_argument("--strategy", default="thresholdbreakout")
     live.add_argument("--experiment-id", default=None)
     live.add_argument("--symbols", default="")
     live.add_argument("--strategy-params", default=None)
@@ -685,7 +1022,7 @@ def build_parser() -> argparse.ArgumentParser:
     stream = sub.add_parser("stream", help="Start the live Kite websocket loop")
     stream.add_argument("--session-id", default=None)
     stream.add_argument("--trade-date", default=None, type=_parse_iso_date, help="YYYY-MM-DD")
-    stream.add_argument("--strategy", default="indian_2lynch")
+    stream.add_argument("--strategy", default="thresholdbreakout")
     stream.add_argument("--experiment-id", default=None)
     stream.add_argument("--symbols", default="")
     stream.add_argument("--strategy-params", default=None)

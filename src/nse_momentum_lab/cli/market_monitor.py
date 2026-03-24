@@ -5,11 +5,14 @@ Usage:
     doppler run -- uv run nseml-market-monitor
     doppler run -- uv run nseml-market-monitor --force
     doppler run -- uv run nseml-market-monitor --status
+    doppler run -- uv run nseml-market-monitor --incremental
+    doppler run -- uv run nseml-market-monitor --since 2025-03-10
 """
 
 from __future__ import annotations
 
 import argparse
+from datetime import date
 
 from nse_momentum_lab.db.market_db import get_market_db
 
@@ -36,6 +39,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build or inspect the NSE Market Monitor")
     parser.add_argument("--force", action="store_true", help="Force rebuild of the monitor table")
     parser.add_argument("--status", action="store_true", help="Show status without rebuilding")
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Incrementally update from the latest existing date instead of full rebuild.",
+    )
+    parser.add_argument(
+        "--since",
+        type=date.fromisoformat,
+        help="Incrementally rebuild from this date (YYYY-MM-DD), inclusive.",
+    )
     args = parser.parse_args()
 
     db = get_market_db(read_only=args.status)
@@ -55,13 +68,21 @@ def main() -> int:
         _print_latest_snapshot(db)
         return 0
 
-    print("Building feat_daily_core if needed...")
-    core_rows = db.build_feat_daily_core(force=args.force)
-    print(f"  [OK] feat_daily_core: {core_rows:,} rows")
+    if args.incremental or args.since:
+        if args.since:
+            print(f"Incremental update from {args.since.isoformat()}...")
+        else:
+            print("Incremental update from the latest existing date...")
+        monitor_rows = db.build_market_monitor_incremental(since_date=args.since, force=args.force)
+        print(f"  [OK] market_monitor_daily: {monitor_rows:,} rows")
+    else:
+        print("Building feat_daily_core if needed...")
+        core_rows = db.build_feat_daily_core(force=args.force)
+        print(f"  [OK] feat_daily_core: {core_rows:,} rows")
 
-    print("Building market_monitor_daily...")
-    monitor_rows = db.build_market_monitor_table(force=args.force)
-    print(f"  [OK] market_monitor_daily: {monitor_rows:,} rows")
+        print("Building market_monitor_daily...")
+        monitor_rows = db.build_market_monitor_table(force=args.force)
+        print(f"  [OK] market_monitor_daily: {monitor_rows:,} rows")
 
     _print_latest_snapshot(db)
     return 0

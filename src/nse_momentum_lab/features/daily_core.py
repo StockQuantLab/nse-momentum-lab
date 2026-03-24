@@ -323,37 +323,7 @@ def build_feat_daily_core(
     Returns:
         Number of rows in the built table
     """
-    # Check if already built
-    if not force:
-        try:
-            row = con.execute(
-                "SELECT table_name, query_version, row_count FROM bt_materialization_state "
-                "WHERE table_name = 'feat_daily_core'"
-            ).fetchone()
-            if row:
-                _table_name, query_version, row_count = row
-                if query_version == FEAT_DAILY_CORE_VERSION:
-                    logger.info("feat_daily_core is up-to-date (%d rows).", row_count)
-                    return int(row_count)
-        except Exception:
-            pass  # Table doesn't exist yet
-
-    # Drop and rebuild
-    logger.info("Building feat_daily_core materialized table...")
-    con.execute("DROP TABLE IF EXISTS feat_daily_core")
-    con.execute(FEAT_DAILY_CORE_SQL)
-
-    # Create index for common queries
-    con.execute(
-        "CREATE INDEX idx_feat_daily_core_symbol_date ON feat_daily_core(symbol, trading_date)"
-    )
-
-    row = con.execute("SELECT COUNT(*) FROM feat_daily_core").fetchone()
-    n = int(row[0]) if row and row[0] is not None else 0
-
-    # Update materialization state
     if dataset_hash is None:
-        # Generate a simple hash from v_daily
         snapshot_row = con.execute("""
             SELECT
                 COUNT(*)::BIGINT AS rows,
@@ -374,6 +344,37 @@ def build_feat_daily_core(
         dataset_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[
             :16
         ]
+
+    # Check if already built
+    if not force:
+        try:
+            row = con.execute(
+                "SELECT table_name, dataset_hash, query_version, row_count FROM bt_materialization_state "
+                "WHERE table_name = 'feat_daily_core'"
+            ).fetchone()
+            if row:
+                _table_name, current_dataset_hash, query_version, row_count = row
+                if (
+                    query_version == FEAT_DAILY_CORE_VERSION
+                    and current_dataset_hash == dataset_hash
+                ):
+                    logger.info("feat_daily_core is up-to-date (%d rows).", row_count)
+                    return int(row_count)
+        except Exception:
+            pass  # Table doesn't exist yet
+
+    # Drop and rebuild
+    logger.info("Building feat_daily_core materialized table...")
+    con.execute("DROP TABLE IF EXISTS feat_daily_core")
+    con.execute(FEAT_DAILY_CORE_SQL)
+
+    # Create index for common queries
+    con.execute(
+        "CREATE INDEX idx_feat_daily_core_symbol_date ON feat_daily_core(symbol, trading_date)"
+    )
+
+    row = con.execute("SELECT COUNT(*) FROM feat_daily_core").fetchone()
+    n = int(row[0]) if row and row[0] is not None else 0
 
     con.execute(
         """

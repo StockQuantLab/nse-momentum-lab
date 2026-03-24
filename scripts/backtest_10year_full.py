@@ -273,7 +273,7 @@ def run_yearly_backtest(
 
         engine = VectorBTEngine(config=vbt_config)
         result = engine.run_backtest(
-            strategy_name=f"Indian2LYNCH_{year}",
+            strategy_name=f"2LYNCHBreakout_{year}",
             signals=vbt_signals,
             price_data=price_data,
             value_traded_inr=value_traded_inr,
@@ -346,7 +346,7 @@ def run_10year_backtest():
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
     print("\n" + "=" * 80)
-    print("INDIAN 2LYNCH - 10 YEAR COMPREHENSIVE BACKTEST")
+    print("2LYNCH BREAKOUT - 10 YEAR COMPREHENSIVE BACKTEST")
     print("=" * 80)
 
     db = get_market_db()

@@ -34,7 +34,7 @@ class TestPaperRuntimeScaffold:
         runtime = PaperRuntimeScaffold(feed_batch_size=100)
         plan = PaperRuntimePlan(
             session_id="paper-1",
-            strategy_name="indian_2lynch",
+            strategy_name="thresholdbreakout",
             trade_date=None,
             mode="live",
         )
@@ -81,7 +81,7 @@ class TestPaperRuntimeScaffold:
         runtime = PaperRuntimeScaffold(feed_batch_size=100)
         plan = PaperRuntimePlan(
             session_id="paper-1",
-            strategy_name="indian_2lynch",
+            strategy_name="thresholdbreakout",
             trade_date=date(2026, 3, 23),
             mode="live",
             experiment_id="exp-1",

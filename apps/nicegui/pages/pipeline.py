@@ -16,42 +16,45 @@ if str(_apps_root) not in sys.path:
 
 from nicegui import ui
 
-from apps.nicegui.components import page_layout, divider, THEME
+from apps.nicegui.components import page_layout, divider, THEME, empty_state, COLORS, kpi_grid
 
 
 def pipeline_page() -> None:
     """Render the pipeline status page."""
     with page_layout("Pipeline", "engineering"):
-        with ui.column().classes("kpi-card mb-6"):
-            ui.label("Pipeline Jobs").classes("text-xl font-semibold mb-4").style(
-                f"color: {THEME['text_primary']};"
-            )
-            ui.label("This page requires the API to be running for job status monitoring.").classes(
-                "mb-4"
-            ).style(f"color: {THEME['text_secondary']};")
-            ui.label("Start the API server: doppler run -- uv run nseml-api").classes(
-                "font-mono text-sm px-3 py-2 rounded"
-            ).style(
-                f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
-            )
+        empty_state(
+            "API Required",
+            "Pipeline job monitoring requires the API server to be running.",
+            action_label="Copy API Command",
+            action_callback=lambda: ui.run_javascript(
+                "navigator.clipboard.writeText('doppler run -- uv run nseml-api');"
+            ),
+            icon="engineering",
+        )
 
         divider()
 
-        ui.label("Pipeline Jobs").classes("text-lg font-semibold mb-2").style(
+        # Show job types as informational cards
+        ui.label("Pipeline Jobs").classes("text-lg font-semibold mb-4").style(
             f"color: {THEME['text_primary']};"
         )
 
         job_types = [
-            ("Ingestion", "Load OHLCV data from source", "download"),
-            ("Rollup", "Compute features and indicators", "functions"),
-            ("Scan", "Generate momentum signals", "radar"),
-            ("Backtest", "Run strategy backtests", "science"),
+            ("Ingestion", "Load OHLCV data from source", "download", COLORS["success"]),
+            ("Rollup", "Compute features and indicators", "functions", COLORS["info"]),
+            ("Scan", "Generate momentum signals", "radar", COLORS["warning"]),
+            ("Backtest", "Run strategy backtests", "science", COLORS["primary"]),
         ]
 
-        for job_name, description, icon in job_types:
-            with ui.row().classes("kpi-card items-center gap-3 w-full mb-2"):
-                ui.icon(icon).classes("text-xl").style(f"color: {THEME['primary']};")
-                ui.label(job_name).classes("font-semibold").style(
-                    f"color: {THEME['text_primary']};"
-                )
-                ui.label(description).classes("text-sm").style(f"color: {THEME['text_muted']};")
+        kpi_grid(
+            [
+                {
+                    "title": name,
+                    "value": description,
+                    "icon": icon,
+                    "color": color,
+                }
+                for name, description, icon, color in job_types
+            ],
+            columns=4,
+        )

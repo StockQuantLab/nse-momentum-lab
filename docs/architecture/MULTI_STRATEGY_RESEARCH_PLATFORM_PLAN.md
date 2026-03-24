@@ -19,7 +19,7 @@ Chosen defaults:
 - Direction support: **long and short from the first architecture pass**
 - Storage contract: **Postgres = metadata/system of record, MinIO = canonical data/artifacts, DuckDB = compute/query engine**
 - First supported strategy families:
-  - `indian_2lynch`
+  - `thresholdbreakout`
   - `threshold_breakout`
   - `threshold_breakdown`
   - `episodic_pivot`
@@ -38,7 +38,7 @@ The current repo already has strong pieces that should be preserved:
 
 The main limitations are architectural, not computational:
 
-- Production runner is still hardcoded around `Indian2LYNCH`
+- Production runner is still hardcoded around the legacy breakout baseline
 - Candidate SQL is embedded directly in the runner and assumes 4% breakout logic
 - Current `feat_daily` materialization includes 2LYNCH-specific assumptions
 - Scan/rules layer is also 2LYNCH-oriented
@@ -319,8 +319,8 @@ This gives fast authoring for common strategies and full flexibility for complex
 
 ## 4.3 First-class strategy families
 
-### 4.3.1 `indian_2lynch`
-- Preserve current behavior as a plugin, not as a system-wide assumption
+### 4.3.1 `threshold_breakout`
+- Preserve current breakout behavior as a plugin, not as a system-wide assumption
 - Keep current stop stack and intraday breakout entry logic
 - Validate against today’s known baseline metrics within tolerance
 
@@ -798,7 +798,7 @@ Acceptance:
 
 ### Phase 1 - Generalize the domain model: 100% ✓ (2026-03-07)
 - **What exists**: Strategy registry, CLI flags, DuckDB runner generalized, ScanWorker `strategy_name` wired into scan definition name/version lookup via `resolve_strategy()`
-- **Architecture note**: Live scan routing (FeatureEngine/ScanRuleEngine) remains Indian2LYNCH-specific; DuckDB-SQL-based live scan for non-2LYNCH strategies is a Phase 1 enhancement tracked as backlog. Scan definition metadata now correctly reflects the active strategy.
+- **Architecture note**: Live scan routing (FeatureEngine/ScanRuleEngine) remains legacy breakout-specific; DuckDB-SQL-based live scan for non-2LYNCH strategies is a Phase 1 enhancement tracked as backlog. Scan definition metadata now correctly reflects the active strategy.
 
 ### Phase 2 - Build the real incremental data pipeline: 100% ✓ (2026-03-06)
 - **What exists**:

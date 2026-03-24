@@ -83,7 +83,7 @@ class SensitivityAnalyzer:
         start_date: date,
         end_date: date,
         objective: str = "sharpe_ratio",
-        strategy_name: str = "indian2lynch",
+        strategy_name: str = "thresholdbreakout",
     ) -> None:
         self.start_date = start_date
         self.end_date = end_date
@@ -97,7 +97,7 @@ class SensitivityAnalyzer:
         """Get default parameter ranges based on strategy family."""
         strategy_family = self._strategy.family
 
-        if strategy_family == "indian_2lynch":
+        if strategy_family == "threshold_breakout":
             return {
                 "breakout_threshold": [0.02, 0.03, 0.04, 0.05, 0.06],
                 "close_pos_threshold": [0.50, 0.60, 0.70, 0.80, 0.90],

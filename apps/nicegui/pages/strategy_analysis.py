@@ -27,6 +27,7 @@ from apps.nicegui.components import (
     THEME,
     empty_state,
     page_header,
+    paginated_table,
 )
 
 
@@ -40,8 +41,12 @@ def _strategy_display_name(row: dict) -> str:
         except ValueError, TypeError:
             pass
     threshold = params.get("breakout_threshold")
-    # Show threshold for all strategies except Indian2LYNCH (which is always 4%)
-    if threshold is not None and name not in ("Indian2LYNCH",):
+    # Show threshold for all breakout strategies except the canonical 4% baseline label.
+    if threshold is not None and name not in (
+        "2LYNCHBreakout",
+        "thresholdbreakout",
+        "threshold_breakout",
+    ):
         pct = round(float(threshold) * 100)
         return f"{name} {pct}%"
     return name
@@ -99,7 +104,7 @@ def strategy_page() -> None:
                         f"color: {COLORS['error']};"
                     )
 
-            ui.table(
+            paginated_table(
                 columns=[
                     {"name": "exp_id", "label": "Experiment", "field": "exp_id_fmt"},
                     {"name": "strategy_name", "label": "Strategy", "field": "strategy_label"},
@@ -127,5 +132,5 @@ def strategy_page() -> None:
                     }
                     for row in experiments_df.iter_rows(named=True)
                 ],
-                pagination=15,
-            ).classes("w-full")
+                page_size=15,
+            )
