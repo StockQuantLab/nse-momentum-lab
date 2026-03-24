@@ -22,6 +22,8 @@ from apps.nicegui.components import (
     divider,
     COLORS,
     THEME,
+    primary_action_card,
+    kpi_section,
 )
 
 
@@ -55,12 +57,36 @@ async def home_page() -> None:
 
         divider()
 
-        # Database Status KPIs
+        # Primary CTA - most important action
+        has_experiments = not experiments_df.is_empty()
+        if not has_experiments:
+            primary_action_card(
+                "Run Your First Backtest",
+                "Start exploring momentum strategies with a quick backtest on NSE data. "
+                "Results will appear here for detailed analysis.",
+                "play_arrow",
+                "/",
+                subtitle="GET STARTED",
+            )
+        else:
+            primary_action_card(
+                "Analyze Your Results",
+                f"You have {len(experiments_df)} backtest experiment(s) ready for analysis. "
+                "Dive into equity curves, trade breakdowns, and performance metrics.",
+                "bar_chart",
+                "/backtest",
+                subtitle="VIEW RESULTS",
+            )
+
+        divider()
+
+        # Database Status KPIs - grouped for clarity
         ui.label("Database Status").classes("text-xl font-semibold mb-4").style(
             f"color: {THEME['text_primary']};"
         )
 
-        kpi_grid(
+        kpi_section(
+            "Data Overview",
             [
                 dict(
                     title="Data Source",
@@ -86,7 +112,8 @@ async def home_page() -> None:
                     icon="science",
                     color=COLORS["primary"],
                 ),
-            ]
+            ],
+            columns=4,
         )
 
         # Dataset info
@@ -102,7 +129,7 @@ async def home_page() -> None:
 
         divider()
 
-        # Latest Experiment
+        # Latest Experiment - show as hero if available
         ui.label("Latest Experiment").classes("text-xl font-semibold mb-4").style(
             f"color: {THEME['text_primary']};"
         )
@@ -116,19 +143,17 @@ async def home_page() -> None:
         else:
             latest = experiments_df.row(0, named=True)
             ret_val = float(latest.get("total_return_pct", 0))
+            # Use kpi_grid with hero_index=0 for first card as hero
             kpi_grid(
                 [
                     dict(
-                        title="Exp ID",
-                        value=str(latest.get("exp_id", "-"))[:12],
-                        icon="tag",
-                        color=COLORS["gray"],
-                    ),
-                    dict(
-                        title="Return",
+                        title="Total Return",
                         value=f"{ret_val:.2f}%",
                         icon="attach_money",
                         color=COLORS["success"] if ret_val > 0 else COLORS["error"],
+                        is_hero=True,  # First card is hero
+                        trend=ret_val,  # Shows trend indicator
+                        trend_label="All-time performance",
                     ),
                     dict(
                         title="Win Rate",
@@ -142,12 +167,20 @@ async def home_page() -> None:
                         icon="bar_chart",
                         color=COLORS["warning"],
                     ),
-                ]
+                    dict(
+                        title="Exp ID",
+                        value=str(latest.get("exp_id", "-"))[:12],
+                        icon="tag",
+                        color=COLORS["gray"],
+                    ),
+                ],
+                columns=4,
+                hero_index=0,  # First card is hero
             )
 
         divider()
 
-        # Navigation Cards — grouped by category for better visual hierarchy
+        # Navigation Cards — grouped by category with visual hierarchy
         ui.label("Core Analysis").classes("text-xl font-semibold mb-4").style(
             f"color: {THEME['text_primary']};"
         )
@@ -204,7 +237,7 @@ async def home_page() -> None:
             nav_card(
                 "Market Monitor",
                 "Track Stockbee-style market regime and breadth",
-                "monitoring",
+                "monitor",
                 "/market_monitor",
                 COLORS["info"],
             )
@@ -245,23 +278,35 @@ async def home_page() -> None:
 
         divider()
 
-        # Quick Start Commands
+        # Quick Start Commands - enhanced with hints
         with ui.expansion("Quick Start Commands", icon="terminal").classes("w-full"):
             ui.label("Run these commands in your terminal:").classes("mb-3").style(
                 f"color: {THEME['text_secondary']};"
             )
             commands = [
-                "uv sync",
-                "doppler run -- docker compose up -d",
-                "doppler run -- uv run nseml-backtest --universe-size 500 --start-year 2015 --end-year 2025",
-                "doppler run -- uv run nseml-dashboard",
+                ("Sync dependencies", "uv sync"),
+                ("Start database", "doppler run -- docker compose up -d"),
+                (
+                    "Run backtest",
+                    "doppler run -- uv run nseml-backtest --universe-size 500 --start-year 2015 --end-year 2025",
+                ),
+                ("Launch dashboard", "doppler run -- uv run nseml-dashboard"),
             ]
-            for cmd in commands:
-                with ui.row().classes("w-full items-center gap-2 mb-2"):
-                    ui.label("$").classes("font-mono").style(f"color: {COLORS['success']};")
-                    ui.label(cmd).classes("flex-grow font-mono text-sm px-3 py-2 rounded").style(
-                        f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
+            for desc, cmd in commands:
+                with ui.column().classes("w-full mb-3 gap-1"):
+                    ui.label(desc).classes("text-xs uppercase tracking-wide").style(
+                        f"color: {THEME['text_muted']};"
                     )
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label("$").classes("font-mono").style(f"color: {COLORS['success']};")
+                        ui.label(cmd).classes(
+                            "flex-grow font-mono text-sm px-3 py-2 rounded"
+                        ).style(
+                            f"background: {THEME['surface_hover']}; "
+                            f"border: 1px solid {THEME['surface_border']}; "
+                            f"color: {THEME['text_primary']}; "
+                            f"border-radius: 6px;"
+                        )
 
         # Footer
         divider()
@@ -277,7 +322,5 @@ async def home_page() -> None:
         async def refresh_status():
             """Refresh status in background after initial render."""
             _ = await aget_db_status()  # Populates cache for next interaction
-            # Update happens via cache, user sees fresh data on next interaction
-            # or we could force a refresh of specific elements
 
         ui.timer(0.5, refresh_status, once=True)

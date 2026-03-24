@@ -98,9 +98,10 @@ async def compare_page() -> None:
 
         with ui.row().classes("kpi-card p-4 mb-6 w-full gap-4"):
             with ui.column().classes("flex-1"):
-                ui.label("Experiment A").classes("text-sm font-medium mb-2").style(
-                    f"color: {THEME['text_secondary']};"
-                )
+                exp1_label_id = "exp1-label"
+                ui.label("Experiment A").props(f'id="{exp1_label_id}"').classes(
+                    "text-sm font-medium mb-2"
+                ).style(f"color: {THEME['text_secondary']};")
 
                 def on_exp1_change(e):
                     selected["exp1"] = e.value
@@ -113,12 +114,15 @@ async def compare_page() -> None:
                     labels,
                     value=initial_exp1,
                     on_change=on_exp1_change,
-                ).classes("w-full")
+                ).classes("w-full").props(
+                    f'aria-labelledby="{exp1_label_id}" aria-label="Select first experiment to compare"'
+                )
 
             with ui.column().classes("flex-1"):
-                ui.label("Experiment B").classes("text-sm font-medium mb-2").style(
-                    f"color: {THEME['text_secondary']};"
-                )
+                exp2_label_id = "exp2-label"
+                ui.label("Experiment B").props(f'id="{exp2_label_id}"').classes(
+                    "text-sm font-medium mb-2"
+                ).style(f"color: {THEME['text_secondary']};")
 
                 def on_exp2_change(e):
                     selected["exp2"] = e.value
@@ -131,7 +135,13 @@ async def compare_page() -> None:
                     labels,
                     value=initial_exp2,
                     on_change=on_exp2_change,
-                ).classes("w-full")
+                ).classes("w-full").props(
+                    f'aria-labelledby="{exp2_label_id}" aria-label="Select second experiment to compare"'
+                )
+
+        # Accessibility: Live region for dynamic comparison updates
+        with ui.row().props('aria-live="polite" aria-atomic="true').classes("sr-only"):
+            ui.label("Comparison results will update here")
 
         @ui.refreshable
         def render_comparison():

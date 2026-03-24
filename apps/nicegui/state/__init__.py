@@ -586,10 +586,10 @@ async def aget_paper_positions(
                     "pnl": float(row.pnl) if row.pnl is not None else None,
                     "market_price": latest_close_map.get(row.symbol_id),
                     "unrealized_pnl": (
-                        (latest_close_map.get(row.symbol_id) - float(row.avg_entry))
+                        (float(latest_close_map[row.symbol_id]) - float(row.avg_entry))
                         * float(row.qty)
                         if row.closed_at is None
-                        and latest_close_map.get(row.symbol_id) is not None
+                        and row.symbol_id in latest_close_map
                         and row.avg_entry is not None
                         and row.qty is not None
                         else None

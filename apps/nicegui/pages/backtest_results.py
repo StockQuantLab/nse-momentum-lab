@@ -449,10 +449,14 @@ async def backtest_page() -> None:
                             diag_components = {"raw": raw_components}
 
                 with ui.dialog() as dialog:
+                    dialog_id = f"trade-detail-dialog-{details['symbol']}".replace("/", "_")
                     with (
                         ui.card()
                         .classes("w-full")
                         .style("padding: 20px; width:min(96vw, 1100px); max-width:none;")
+                        .props(
+                            f'role="dialog" aria-label="Trade details for {details["symbol"]}" aria-modal="true" id="{dialog_id}"'
+                        )
                     ):
                         with ui.row().classes("items-center justify-between w-full"):
                             ui.label(f"Trade Detail · {details['symbol']}").classes(
@@ -460,7 +464,32 @@ async def backtest_page() -> None:
                             ).style(f"color: {THEME['text_primary']};")
                             ui.button("Close", icon="close", on_click=dialog.close).props(
                                 "flat dense"
-                            )
+                            ).props('aria-label="Close trade details dialog"')
+
+                        # Accessibility: ESC key handler for dialog
+                        ui.run_javascript(f'''
+                            (function() {{
+                                const dialogId = "{dialog_id}";
+                                        const handleEscape = (e) => {{
+                                    if (e.key === 'Escape') {{
+                                        const closeBtn = document.querySelector('#' + dialogId + ' [aria-label*="Close"]');
+                                        if (closeBtn) closeBtn.click();
+                                    }}
+                                }};
+                                document.addEventListener('keydown', handleEscape);
+                                setTimeout(() => {{
+                                    const observer = new MutationObserver((mutations) => {{
+                                        mutations.forEach((mutation) => {{
+                                            if (mutation.removedNodes) {{
+                                                document.removeEventListener('keydown', handleEscape);
+                                                observer.disconnect();
+                                            }}
+                                        }});
+                                    }});
+                                    observer.observe(document.getElementById(dialogId), {{ childList: true }});
+                                }}, 100);
+                            }})();
+                        ''')
 
                         entry_date_value = _coerce_date(details.get("entry_date"))
                         entry_date = (
@@ -1083,9 +1112,16 @@ async def backtest_page() -> None:
                     f"color: {THEME['text_secondary']};"
                 )
                 with ui.row().classes("w-full gap-4"):
-                    ui.number("Universe Size", value=500, min=50, max=2000, step=50)
-                    ui.number("Start Year", value=2015, min=2010, max=2025)
-                    ui.number("End Year", value=2025, min=2015, max=2026)
+                    # Accessibility: Add autocomplete attributes for better form UX
+                    ui.number("Universe Size", value=500, min=50, max=2000, step=50).props(
+                        'autocomplete="off" aria-label="Universe size for backtest"'
+                    )
+                    ui.number("Start Year", value=2015, min=2010, max=2025).props(
+                        'autocomplete="off" aria-label="Start year for backtest period"'
+                    )
+                    ui.number("End Year", value=2025, min=2015, max=2026).props(
+                        'autocomplete="off" aria-label="End year for backtest period"'
+                    )
 
                 with ui.column().classes("kpi-card mt-4"):
                     ui.label("Run this command in your terminal:").classes("text-sm mb-2").style(

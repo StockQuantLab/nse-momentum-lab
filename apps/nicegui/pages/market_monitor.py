@@ -319,7 +319,7 @@ def _year_table_rows(frame: pl.DataFrame) -> list[dict]:
 
 async def market_monitor_page() -> None:
     """Render the Market Monitor page."""
-    with page_layout("Market Monitor", "monitoring"):
+    with page_layout("Market Monitor", "monitor"):
         page_header(
             "Market Monitor",
             "NSE breadth regime tracking - Stockbee-inspired for Indian markets.",

@@ -42,13 +42,13 @@ from nicegui import ui
 
 # Terminal theme — Dark, brutalist trading terminal with neon green
 THEME_TERMINAL = {
-    "page_bg": "#0d1117",
+    "page_bg": "#0a0e14",  # Deep near-black for better contrast
     "surface": "#161b22",
     "surface_border": "#30363d",
     "surface_hover": "#21262d",
     "text_primary": "#f0f6fc",
     "text_secondary": "#8b949e",
-    "text_muted": "#6e7681",
+    "text_muted": "#9ca3af",  # Lightened for WCAG AA compliance (was #6e7681)
     "primary": "#00ff88",  # Classic terminal phosphor green
     "primary_dark": "#00cc6a",
     "divider": "#30363d",
@@ -60,7 +60,7 @@ COLORS_TERMINAL = {
     "warning": "#ffd93d",
     "info": "#6bcfff",
     "primary": "#00ff88",
-    "gray": "#6e7681",
+    "gray": "#9ca3af",  # Updated to match text_muted
 }
 
 # Clean theme — Light, modern SaaS dashboard with indigo primary
@@ -105,7 +105,7 @@ NAV_ITEMS = [
     {"label": "Walk Forward", "icon": "view_week", "path": "/walk_forward"},
     {"label": "Paper Ledger", "icon": "receipt_long", "path": "/paper_ledger"},
     {"label": "Daily Summary", "icon": "today", "path": "/daily_summary"},
-    {"label": "Market Monitor", "icon": "monitoring", "path": "/market_monitor"},
+    {"label": "Market Monitor", "icon": "monitor", "path": "/market_monitor"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -116,14 +116,18 @@ NAV_ITEMS = [
 _FONT_HEAD_TERMINAL = """
 <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Fira+Code:wght@400;500;600;700&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Fira+Code:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Fira+Code:wght@400;500;600;700&display=swap"></noscript>
 """
 
 # Clean theme fonts — DM Sans (distinctive, not generic Inter) + JetBrains Mono
 _FONT_HEAD_CLEAN = """
 <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"></noscript>
 """
 
 
@@ -134,6 +138,218 @@ def _get_font_html() -> str:
 
 # Base CSS using CSS variables — works for both themes
 _PAGE_CSS_BASE = """
+/* ============================================================================
+   ACCESSIBILITY: Skip Navigation Link (A11Y-008)
+   ============================================================================ */
+.skip-link {
+    position: absolute;
+    top: -40px;
+    left: 0;
+    background: var(--theme-primary);
+    color: var(--theme-page-bg);
+    padding: 8px 16px;
+    text-decoration: none;
+    z-index: 10000;
+    font-weight: 600;
+    font-family: var(--font-mono);
+    transition: top 0.2s;
+}
+.skip-link:focus {
+    top: 0;
+}
+
+/* ============================================================================
+   ACCESSIBILITY: Focus Indicators (A11Y-001)
+   Visible focus state for keyboard navigation
+   ============================================================================ */
+/* Focus visible - only show for keyboard navigation, not mouse clicks */
+*:focus-visible {
+    outline: 2px solid var(--theme-primary) !important;
+    outline-offset: 2px !important;
+    border-radius: 2px;
+}
+/* Buttons need stronger focus */
+.q-btn:focus-visible,
+.q-item:focus-visible,
+.nav-item:focus-visible {
+    outline: 3px solid var(--theme-primary) !important;
+    outline-offset: 2px !important;
+    box-shadow: 0 0 0 4px var(--theme-primary-alpha) !important;
+}
+/* Table cells focus */
+.q-table td:focus-visible,
+.q-table th:focus-visible {
+    outline: 2px solid var(--theme-primary) !important;
+    background: var(--theme-surface-hover) !important;
+}
+
+/* ============================================================================
+   RESPONSIVE: Touch Targets (RESP-002)
+   Minimum 44x44px for all interactive elements (WCAG AAA)
+   ============================================================================ */
+.q-btn {
+    min-height: 44px !important;
+    min-width: 44px !important;
+}
+.q-btn--dense {
+    min-height: 44px !important;
+    min-width: 44px !important;
+    padding: 0 12px !important;
+}
+.nav-item {
+    min-height: 44px !important;
+    display: flex !important;
+    align-items: center !important;
+}
+.nav-tile {
+    min-height: 44px !important;
+    padding: 20px !important;
+}
+.q-item {
+    min-height: 44px !important;
+}
+.q-pagination .q-btn {
+    min-height: 40px !important;
+    min-width: 40px !important;
+}
+/* Icon-only buttons need explicit touch targets */
+.q-btn .q-icon {
+    font-size: 20px;
+}
+
+/* ============================================================================
+   ACCESSIBILITY: Color-Only Status Alternatives (A11Y-007)
+   Add icon indicators for color-blind users
+   ============================================================================ */
+.value-positive::before {
+    content: "↑ ";
+    color: var(--theme-color-success);
+    font-weight: 700;
+}
+.value-negative::before {
+    content: "↓ ";
+    color: var(--theme-color-error);
+    font-weight: 700;
+}
+.value-neutral::before {
+    content: "– ";
+    color: var(--theme-color-gray);
+    font-weight: 700;
+}
+
+/* ============================================================================
+   RESPONSIVE: Mobile Table Optimizations (RESP-003)
+   Card-based view for small screens
+   ============================================================================ */
+@media (max-width: 768px) {
+    .q-table {
+        font-size: 0.8rem !important;
+    }
+    .q-table thead th {
+        padding: 8px 12px !important;
+        font-size: 0.65rem !important;
+    }
+    .q-table tbody td {
+        padding: 10px 12px !important;
+        font-size: 0.75rem !important;
+    }
+    /* Hide less important columns on mobile */
+    .q-table .hide-mobile {
+        display: none !important;
+    }
+    /* Stack rows on very small screens */
+    @media (max-width: 480px) {
+        .q-table tbody tr {
+            display: block;
+            margin-bottom: 12px;
+            border: 1px solid var(--theme-surface-border);
+        }
+        .q-table tbody td {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 12px !important;
+            border-bottom: 1px solid var(--theme-surface-border) !important;
+        }
+        .q-table tbody td::before {
+            content: attr(data-label);
+            font-weight: 600;
+            color: var(--theme-text-secondary);
+            margin-right: 16px;
+        }
+        .q-table thead {
+            display: none;
+        }
+    }
+}
+
+/* ============================================================================
+   RESPONSIVE: Fluid Chart Heights (RESP-004)
+   Charts adapt to viewport size
+   ============================================================================ */
+.plotly-graph-wrapper,
+.plotly {
+    min-height: 250px !important;
+    max-height: 80vh !important;
+    width: 100% !important;
+}
+@media (max-width: 768px) {
+    .plotly-graph-wrapper,
+    .plotly {
+        min-height: 200px !important;
+        max-height: 60vh !important;
+    }
+}
+
+/* ============================================================================
+   RESPONSIVE: Mobile Bottom Navigation (RESP-005)
+   Bottom tab bar for mobile devices
+   ============================================================================ */
+.mobile-bottom-nav {
+    display: none !important;
+}
+@media (max-width: 768px) {
+    .mobile-bottom-nav {
+        display: flex !important;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 56px;
+        background: var(--theme-surface);
+        border-top: 1px solid var(--theme-surface-border);
+        justify-content: space-around;
+        align-items: center;
+        z-index: 1000;
+        padding: 0 8px;
+    }
+    .mobile-bottom-nav-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 8px 12px;
+        color: var(--theme-text-secondary);
+        text-decoration: none;
+        font-size: 0.65rem;
+        min-width: 48px;
+    }
+    .mobile-bottom-nav-item.active {
+        color: var(--theme-primary);
+    }
+    .mobile-bottom-nav-item .q-icon {
+        font-size: 1.4rem !important;
+        margin-bottom: 2px;
+    }
+    /* Adjust main content for bottom nav */
+    .q-page-container {
+        padding-bottom: 60px !important;
+    }
+    /* Hide sidebar on mobile */
+    .q-drawer {
+        display: none !important;
+    }
+}
+
 /* Typography — Terminal: Fira Code, Clean: DM Sans */
 body, .q-app {
     font-family: var(--font-body, 'DM Sans', system-ui, -apple-system, sans-serif) !important;
@@ -155,6 +371,34 @@ h4, .text-h4, .text-xl { font-size: 1.25rem; font-weight: 600; }
 .text-lg { font-size: 1.1rem; font-weight: 500; }
 .text-sm { font-size: 0.875rem; font-weight: 400; }
 .text-xs { font-size: 0.75rem; font-weight: 400; }
+
+/* ============================================================================
+   ACCESSIBILITY: Reduced Motion Support (THEME-003)
+   Respect prefers-reduced-motion for users with vestibular disorders
+   ============================================================================ */
+@media (prefers-reduced-motion: reduce) {
+    /* Disable scanline effect for motion-sensitive users */
+    body.terminal-mode::after {
+        display: none !important;
+    }
+    /* Reduce or disable animations */
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+    .kpi-card {
+        animation: none !important;
+    }
+    /* Keep essential transitions but make them instant */
+    .nav-item:hover,
+    .nav-tile:hover,
+    .kpi-card:hover {
+        transition: none !important;
+    }
+}
 
 /* Terminal scanline effect — only in terminal mode */
 body.terminal-mode::after {
@@ -268,6 +512,21 @@ body.terminal-mode::after {
     opacity: 1;
 }
 
+/* Primary action card — larger, more prominent CTA */
+.primary-action-card {
+    background: var(--theme-surface);
+    border: 2px solid var(--theme-primary);
+    border-radius: var(--tile-radius, 4px);
+    padding: 32px;
+    transition: all 0.15s;
+    box-shadow: 0 0 20px var(--theme-primary-alpha), var(--tile-shadow, 0 4px 8px rgba(0,0,0,0.3));
+    position: relative;
+}
+.primary-action-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 0 32px var(--theme-primary-alpha), 0 8px 16px rgba(0,0,0,0.4);
+}
+
 /* Sidebar nav items — uses theme variables */
 .nav-item {
     border-radius: var(--nav-radius, 0);
@@ -282,6 +541,7 @@ body.terminal-mode::after {
     display: flex;
     align-items: center;
     gap: 12px;
+    flex-shrink: 0;
 }
 .nav-item::before {
     content: ">";
@@ -311,9 +571,13 @@ body.terminal-mode::after {
 }
 .nav-icon {
     width: 24px;
+    min-width: 24px;
+    max-width: 24px;
     flex: 0 0 24px;
     text-align: center;
-    margin-left: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 .nav-label {
     flex: 1;
@@ -614,6 +878,15 @@ def page_layout(title: str, icon: str = "bar_chart"):
     # Inject keyboard shortcuts
     ui.add_head_html(_KEYBINDINGS_HTML)
 
+    # Update page title for accessibility (A11Y-011)
+    ui.run_javascript(f'document.title = "NSE Momentum Lab — {title}"')
+
+    # Add live region for dynamic updates (A11Y-010)
+    ui.element("div").props('aria-live="polite" aria-atomic="true"').style(
+        "position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; "
+        "overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;"
+    ).classes("live-region").style("display: none;")
+
     # -- sidebar state: cycles expanded → mini → hidden → expanded
     _state = {"v": "expanded"}  # mutable cell for closure
 
@@ -640,9 +913,9 @@ def page_layout(title: str, icon: str = "bar_chart"):
         )
     ):
         # Hamburger — cycles sidebar through expanded / mini / hidden
-        ui.button(icon="menu", on_click=_cycle_sidebar).props("flat round dense").style(
-            f"color: {THEME['text_secondary']};"
-        )
+        ui.button(icon="menu", on_click=_cycle_sidebar).props("flat round dense").props(
+            'aria-label="Toggle sidebar navigation"'
+        ).style(f"color: {THEME['text_secondary']};")
 
         # Terminal-style title with status indicator
         with ui.row().classes("items-center gap-2 ml-2"):
@@ -667,9 +940,9 @@ def page_layout(title: str, icon: str = "bar_chart"):
 
         # Theme toggle (shows "TERMINAL" in Clean mode, "CLEAN" in Terminal mode)
         toggle_label = "TERMINAL" if not is_terminal else "CLEAN"
-        ui.button(toggle_label, on_click=toggle_theme_mode).props("flat dense").classes(
-            "text-xs mono-font px-3"
-        ).style(
+        ui.button(toggle_label, on_click=toggle_theme_mode).props("flat dense").props(
+            f'aria-label="Switch to {toggle_label} theme"'
+        ).classes("text-xs mono-font px-3").style(
             f"color: {THEME['text_secondary']}; "
             f"border: 1px solid {THEME['surface_border']}; "
             "border-radius: 2px; padding: 4px 12px;"
@@ -677,9 +950,9 @@ def page_layout(title: str, icon: str = "bar_chart"):
 
         # Shortcuts help
         _shortcuts_dialog_instance = shortcuts_dialog()
-        ui.button("?", on_click=_shortcuts_dialog_instance.open).props("flat dense").classes(
-            "mono-font text-xs px-2"
-        ).style(
+        ui.button("?", on_click=_shortcuts_dialog_instance.open).props("flat dense").props(
+            'aria-label="Show keyboard shortcuts"'
+        ).classes("mono-font text-xs px-2").style(
             f"color: {THEME['primary']}; "
             f"border: 1px solid {THEME['surface_border']}; "
             "border-radius: 2px;"
@@ -692,7 +965,7 @@ def page_layout(title: str, icon: str = "bar_chart"):
     with (
         ui.left_drawer(value=True, bordered=False)
         .props(
-            "width=240 mini-width=56 breakpoint=0"  # breakpoint=0 → never auto-collapse
+            "width=240 mini-width=56 breakpoint=md"  # breakpoint=md → collapses on mobile (<1024px)
         )
         .classes("p-0")
         .style(
@@ -728,9 +1001,14 @@ def page_layout(title: str, icon: str = "bar_chart"):
                     ui.row()
                     .classes(f"nav-item{active_cls} items-center gap-3 w-full nav-row")
                     .on("click", lambda p=item["path"]: ui.navigate.to(p))
+                    .props(f'aria-label="Navigate to {item["label"]}" role="button" tabindex="0"')
                 ):
-                    ui.icon(item["icon"]).classes("text-lg nav-icon")
-                    ui.label(item["label"]).classes("text-sm nav-label")
+                    ui.icon(item["icon"]).classes("text-lg nav-icon").props(
+                        f'aria-label="{item["label"]}"'
+                    )
+                    ui.label(item["label"]).classes("text-sm nav-label").props(
+                        "role='presentation'"
+                    )
 
     # -- main content area --------------------------------------------------
     with ui.column().classes("w-full px-6 py-6"):
@@ -762,15 +1040,121 @@ def kpi_card(
 def kpi_grid(
     cards: list[dict[str, Any]],
     columns: int = 4,
+    hero_index: int | None = None,
 ) -> None:
     """Render a row of KPI cards using ``ui.grid`` for equal-width alignment.
 
     Each dict in *cards* is passed as kwargs to :func:`kpi_card`.
-    Keys: title, value, subtitle, icon, color.
+    Keys: title, value, subtitle, icon, color, is_hero, trend, trend_label.
+
+    Args:
+        cards: List of card dictionaries
+        columns: Number of columns in the grid
+        hero_index: Index of the card to render as hero (larger, with trend)
     """
     with ui.grid(columns=columns).classes("w-full gap-4 mb-6"):
-        for card in cards:
-            kpi_card(**card)
+        for i, card in enumerate(cards):
+            # Set is_hero based on hero_index if not already in card
+            card_kwargs = {**card}
+            if hero_index is not None and i == hero_index:
+                card_kwargs["is_hero"] = True
+            _render_kpi_card_with_features(**card_kwargs)
+
+
+def _render_kpi_card_with_features(
+    title: str,
+    value: str | float | int,
+    subtitle: str | None = None,
+    icon: str = "info",
+    color: str = COLORS["primary"],
+    is_hero: bool = False,
+    trend: float | None = None,
+    trend_label: str | None = None,
+) -> None:
+    """Render a KPI card with optional hero styling and trend indicator."""
+    card_classes = "kpi-card gap-1" + (" p-6" if is_hero else "")
+
+    with ui.column().classes(card_classes):
+        with ui.row().classes("items-center gap-3"):
+            ui.icon(icon).classes(f"{'text-4xl' if is_hero else 'text-2xl'}").style(
+                f"color: {color};"
+            )
+            ui.label(title).classes("text-xs uppercase tracking-wide font-medium").style(
+                f"color: {THEME['text_secondary']};"
+            )
+
+        # Value and optional trend
+        with ui.row().classes("items-baseline gap-2 mt-1"):
+            ui.label(str(value)).classes(
+                f"{'text-4xl' if is_hero else 'text-2xl'} font-bold"
+            ).style(f"color: {color};")
+            if trend is not None:
+                trend_icon = "↑" if trend > 0 else "↓" if trend < 0 else "→"
+                trend_color = (
+                    COLORS["success"]
+                    if trend > 0
+                    else COLORS["error"]
+                    if trend < 0
+                    else COLORS["gray"]
+                )
+                ui.label(f"{trend_icon} {abs(trend):.1f}%").classes(
+                    f"{'text-lg' if is_hero else 'text-sm'} font-medium"
+                ).style(f"color: {trend_color};")
+
+        if trend_label:
+            ui.label(trend_label).classes(f"{'text-sm' if is_hero else 'text-xs'}").style(
+                f"color: {THEME['text_muted']};"
+            )
+        elif subtitle:
+            ui.label(subtitle).classes("text-xs").style(f"color: {THEME['text_muted']};")
+
+
+def kpi_section(title: str, cards: list[dict[str, Any]], columns: int = 4) -> None:
+    """Render a titled section of KPI cards.
+
+    Args:
+        title: Section heading
+        cards: List of card dictionaries for :func:`kpi_card`
+        columns: Grid column count
+    """
+    ui.label(title).classes("text-xl font-semibold mb-4").style(f"color: {THEME['text_primary']};")
+    kpi_grid(cards, columns=columns)
+
+
+# ---------------------------------------------------------------------------
+# Primary action card (prominent CTA for home page)
+# ---------------------------------------------------------------------------
+def primary_action_card(
+    title: str,
+    description: str,
+    icon: str,
+    target: str,
+    subtitle: str | None = None,
+) -> None:
+    """Render a prominent call-to-action card for the home page.
+
+    Larger and more visually prominent than nav_card, used for primary actions
+    like "Run Your First Backtest" or "Analyze Your Results".
+    """
+    with (
+        ui.column()
+        .classes("primary-action-card cursor-pointer")
+        .on("click", lambda t=target: ui.navigate.to(t))
+    ):
+        with ui.row().classes("items-center gap-4 mb-3"):
+            ui.icon(icon).classes("text-4xl").style(f"color: {THEME['primary']};")
+            ui.label(title).classes("text-2xl font-bold").style(f"color: {THEME['text_primary']};")
+
+        ui.label(description).classes("text-base leading-relaxed mb-3").style(
+            f"color: {THEME['text_secondary']};"
+        )
+
+        if subtitle:
+            ui.label(subtitle).classes(
+                "text-xs uppercase tracking-wide font-semibold px-3 py-1 rounded"
+            ).style(
+                f"background: {THEME['primary']}; color: {THEME['page_bg']}; display: inline-block;"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1065,10 +1449,18 @@ def paginated_table(
         start = state["page"] * page_size
         end = start + page_size
 
+        # Add scope="col" to all column definitions for accessibility (A11Y-003)
+        accessible_columns = [
+            {**col, "headerClasses": "scope-col"}
+            if "headerClasses" not in col
+            else {**col, "headerClasses": col.get("headerClasses", "") + " scope-col"}
+            for col in columns
+        ]
+
         with ui.column().classes("w-full"):
             with ui.element("div").style("width: 100%; overflow-x: auto;"):
                 table = ui.table(
-                    columns=columns,
+                    columns=accessible_columns,
                     rows=rows[start:end],
                     pagination={"rowsPerPage": page_size, "rowsPerPage_options": [10, 20, 50, 100]},
                     row_key=table_row_key,
@@ -1149,13 +1541,27 @@ def page_header(
     title: str,
     subtitle: str | None = None,
     kpi_row: list[dict] | None = None,
+    level: int = 1,
 ) -> None:
-    """Consistent page header with optional KPIs."""
+    """Consistent page header with optional KPIs.
+
+    Args:
+        title: Page title
+        subtitle: Optional subtitle
+        kpi_row: Optional KPI cards
+        level: Heading level (1 or 2)
+    """
     with ui.column().classes("mb-8 w-full"):
         with ui.column().classes("gap-1 mb-6"):
-            ui.label(title).classes("text-2xl font-bold").style(f"color: {THEME['text_primary']};")
+            # Use semantic heading elements for accessibility (A11Y-012)
+            heading_tag = f"h{level}"
+            ui.html(
+                f"<{heading_tag} class='text-2xl font-bold' style='color: {THEME['text_primary']}; margin: 0;'>{title}</{heading_tag}>"
+            )
             if subtitle:
-                ui.label(subtitle).classes("text-sm").style(f"color: {THEME['text_secondary']};")
+                ui.html(
+                    f"<p class='text-sm' style='color: {THEME['text_secondary']}; margin: 4px 0 0;'>{subtitle}</p>"
+                )
 
         if kpi_row:
             kpi_grid(kpi_row, columns=len(kpi_row))
