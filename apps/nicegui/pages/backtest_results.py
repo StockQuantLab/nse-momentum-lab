@@ -37,13 +37,27 @@ from apps.nicegui.components import (
     kpi_grid,
     divider,
     apply_chart_theme,
-    COLORS,
-    THEME,
+    color_error,
+    color_gray,
+    color_info,
+    color_primary,
+    color_success,
+    color_warning,
     empty_state,
     page_header,
     paginated_table,
     export_menu,
     loading_spinner,
+    SPACE_GRID_DEFAULT,
+    SPACE_GROUP_TIGHT,
+    SPACE_LG,
+    SPACE_SECTION,
+    SPACE_SM,
+    SPACE_XL,
+    theme_primary,
+    theme_text_muted,
+    theme_text_primary,
+    theme_text_secondary,
 )
 
 
@@ -91,7 +105,7 @@ async def backtest_page() -> None:
             """Render all data for the selected experiment."""
             exp = get_experiment(exp_id)
             if not exp:
-                ui.label("Could not load experiment details.").style(f"color: {COLORS['error']};")
+                ui.label("Could not load experiment details.").style(f"color: {color_error()};")
                 return
 
             page_header(
@@ -102,19 +116,19 @@ async def backtest_page() -> None:
                         title="Strategy",
                         value=str(exp.get("strategy_name", "-")),
                         icon="flag",
-                        color=COLORS["info"],
+                        color=color_info(),
                     ),
                     dict(
                         title="Period",
                         value=f"{exp.get('start_year', '-')}-{exp.get('end_year', '-')}",
                         icon="date_range",
-                        color=COLORS["gray"],
+                        color=color_gray(),
                     ),
                     dict(
                         title="Status",
                         value=str(exp.get("status", "-")).upper(),
                         icon="check_circle",
-                        color=COLORS["success"],
+                        color=color_success(),
                     ),
                 ],
             )
@@ -126,31 +140,31 @@ async def backtest_page() -> None:
                         title="Total Return",
                         value=f"{ret_val:.1f}%",
                         icon="attach_money",
-                        color=COLORS["success"] if ret_val > 0 else COLORS["error"],
+                        color=color_success() if ret_val > 0 else color_error(),
                     ),
                     dict(
                         title="Annualized",
                         value=f"{float(exp.get('annualized_return_pct', 0)):.1f}%",
                         icon="trending_up",
-                        color=COLORS["info"],
+                        color=color_info(),
                     ),
                     dict(
                         title="Win Rate",
                         value=f"{float(exp.get('win_rate_pct', 0)):.1f}%",
                         icon="target",
-                        color=COLORS["warning"],
+                        color=color_warning(),
                     ),
                     dict(
                         title="Max Drawdown",
                         value=f"{float(exp.get('max_drawdown_pct', 0)):.1f}",
                         icon="trending_down",
-                        color=COLORS["error"],
+                        color=color_error(),
                     ),
                     dict(
                         title="Total Trades",
                         value=f"{int(exp.get('total_trades') or 0):,}",
                         icon="bar_chart",
-                        color=COLORS["primary"],
+                        color=color_primary(),
                     ),
                 ],
                 columns=5,
@@ -158,8 +172,8 @@ async def backtest_page() -> None:
 
             divider()
 
-            ui.label("Yearly Breakdown").classes("text-xl font-semibold mb-4").style(
-                f"color: {THEME['text_primary']};"
+            ui.label("Yearly Breakdown").classes(f"text-xl font-semibold {SPACE_XL}").style(
+                f"color: {theme_text_primary()};"
             )
 
             yearly_df = get_experiment_yearly_metrics(exp_id)
@@ -311,15 +325,15 @@ async def backtest_page() -> None:
                 return json.dumps(value, indent=2, default=_json_default)
 
             def _render_kv_table(pairs: list[tuple[str, object]], *, mono: bool = False) -> None:
-                with ui.column().classes("w-full gap-1"):
+                with ui.column().classes(f"w-full {SPACE_GROUP_TIGHT}"):
                     for label, value in pairs:
-                        with ui.row().classes("w-full justify-between gap-4"):
+                        with ui.row().classes(f"w-full justify-between {SPACE_GRID_DEFAULT}"):
                             ui.label(label).classes("text-sm").style(
-                                f"color:{THEME['text_secondary']};"
+                                f"color:{theme_text_secondary()};"
                             )
                             label_class = "mono-font text-right text-sm" if mono else "text-sm"
                             ui.label(_safe_value(value)).classes(label_class).style(
-                                f"color:{THEME['text_primary']};"
+                                f"color:{theme_text_primary()};"
                             )
 
             def _format_trade_details_dict(row: dict[str, object]) -> dict:
@@ -461,18 +475,24 @@ async def backtest_page() -> None:
                         with ui.row().classes("items-center justify-between w-full"):
                             ui.label(f"Trade Detail · {details['symbol']}").classes(
                                 "text-lg font-semibold"
-                            ).style(f"color: {THEME['text_primary']};")
+                            ).style(f"color: {theme_text_primary()};")
                             ui.button("Close", icon="close", on_click=dialog.close).props(
                                 "flat dense"
                             ).props('aria-label="Close trade details dialog"')
 
-                        # Accessibility: ESC key handler for dialog
+                        # Accessibility: ESC key handler for dialog (A11Y-014)
                         ui.run_javascript(f'''
                             (function() {{
                                 const dialogId = "{dialog_id}";
-                                        const handleEscape = (e) => {{
+                                const handleEscape = (e) => {{
                                     if (e.key === 'Escape') {{
-                                        const closeBtn = document.querySelector('#' + dialogId + ' [aria-label*="Close"]');
+                                        // More resilient selector: try multiple approaches
+                                        const dialog = document.getElementById(dialogId);
+                                        if (!dialog) return;
+                                        const closeBtn = dialog.querySelector('[aria-label*="Close"]')
+                                            || dialog.querySelector('[aria-label*="close"]')
+                                            || dialog.querySelector('.q-card .q-btn:last-child')
+                                            || dialog.querySelector('button');
                                         if (closeBtn) closeBtn.click();
                                     }}
                                 }};
@@ -510,11 +530,11 @@ async def backtest_page() -> None:
 
                         with ui.tab_panels(tabs, value=tab_overview).classes("w-full"):
                             with ui.tab_panel(tab_overview):
-                                with ui.row().classes("w-full gap-4"):
+                                with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
                                     with ui.column().classes("flex-1"):
                                         ui.label("Trade Snapshot").classes(
                                             "text-sm font-semibold"
-                                        ).style(f"color: {COLORS['info']};")
+                                        ).style(f"color: {color_info()};")
                                         _render_kv_table(
                                             [
                                                 ("Symbol", details["symbol"]),
@@ -533,7 +553,7 @@ async def backtest_page() -> None:
                                     with ui.column().classes("flex-1"):
                                         ui.label("Trade Performance").classes(
                                             "text-sm font-semibold"
-                                        ).style(f"color: {COLORS['success']};")
+                                        ).style(f"color: {color_success()};")
                                         _render_kv_table(
                                             [
                                                 (
@@ -565,7 +585,7 @@ async def backtest_page() -> None:
                                     with ui.column().classes("flex-1"):
                                         ui.label("Run Context").classes(
                                             "text-sm font-semibold"
-                                        ).style(f"color: {COLORS['warning']};")
+                                        ).style(f"color: {color_warning()};")
                                         _render_kv_table(
                                             [
                                                 (
@@ -591,10 +611,10 @@ async def backtest_page() -> None:
                             with ui.tab_panel(tab_execution):
                                 ui.label("Execution Context").classes(
                                     "text-sm font-semibold"
-                                ).style(f"color: {COLORS['info']};")
+                                ).style(f"color: {color_info()};")
                                 if not diag:
                                     ui.label("No execution diagnostic row for this trade.").style(
-                                        f"color: {THEME['text_secondary']};"
+                                        f"color: {theme_text_secondary()};"
                                     )
                                 else:
                                     _render_kv_table(
@@ -631,11 +651,11 @@ async def backtest_page() -> None:
                             with ui.tab_panel(tab_ranking):
                                 ui.label("Selection / Ranking").classes(
                                     "text-sm font-semibold"
-                                ).style(f"color: {COLORS['info']};")
+                                ).style(f"color: {color_info()};")
                                 if not diag:
                                     ui.label(
                                         "No ranking diagnostics available for this trade."
-                                    ).style(f"color: {THEME['text_secondary']};")
+                                    ).style(f"color: {theme_text_secondary()};")
                                 else:
                                     _render_kv_table(
                                         [
@@ -650,7 +670,7 @@ async def backtest_page() -> None:
                                     if diag_components:
                                         ui.separator().classes("my-3")
                                         ui.label("Selection Components").classes("text-xs").style(
-                                            f"color: {THEME['text_secondary']};"
+                                            f"color: {theme_text_secondary()};"
                                         )
                                         ui.code(
                                             _json_dump_safe(diag_components), language="json"
@@ -658,31 +678,31 @@ async def backtest_page() -> None:
 
                             with ui.tab_panel(tab_filters):
                                 ui.label("Filter Snapshot").classes("text-sm font-semibold").style(
-                                    f"color: {COLORS['info']};"
+                                    f"color: {color_info()};"
                                 )
                                 if diag_filters:
                                     for k, v in sorted(diag_filters.items()):
                                         _render_kv_table([(str(k), v)])
                                 else:
                                     ui.label("No filter snapshot available for this trade.").style(
-                                        f"color: {THEME['text_secondary']};"
+                                        f"color: {theme_text_secondary()};"
                                     )
 
                             with ui.tab_panel(tab_raw):
                                 ui.label("Strategy Parameters").classes(
                                     "text-sm font-semibold"
-                                ).style(f"color: {COLORS['warning']};")
+                                ).style(f"color: {color_warning()};")
                                 if exp_params:
                                     ui.code(_json_dump_safe(exp_params), language="json").classes(
                                         "text-xs"
                                     )
                                 else:
                                     ui.label("No strategy params recorded.").style(
-                                        f"color: {THEME['text_secondary']};"
+                                        f"color: {theme_text_secondary()};"
                                     )
                                 ui.separator().classes("my-3")
                                 ui.label("Trade Row (Raw)").classes("text-sm font-semibold").style(
-                                    f"color: {THEME['text_secondary']};"
+                                    f"color: {theme_text_secondary()};"
                                 )
                                 ui.code(_json_dump_safe(details), language="json").classes(
                                     "text-xs"
@@ -691,7 +711,7 @@ async def backtest_page() -> None:
                                     ui.separator().classes("my-3")
                                     ui.label("Diagnostic Row (Raw)").classes(
                                         "text-sm font-semibold"
-                                    ).style(f"color: {THEME['text_secondary']};")
+                                    ).style(f"color: {theme_text_secondary()};")
                                     ui.code(_json_dump_safe(diag), language="json").classes(
                                         "text-xs"
                                     )
@@ -708,13 +728,13 @@ async def backtest_page() -> None:
 
             divider()
 
-            with ui.row().classes("mb-4 gap-2"):
+            with ui.row().classes(f"{SPACE_LG} {SPACE_SM}"):
                 export_menu(trades_df, f"{exp_id}_all_trades", "Export Trades")
 
             divider()
 
-            ui.label("Trade Analytics").classes("text-xl font-semibold mb-4").style(
-                f"color: {THEME['text_primary']};"
+            ui.label("Trade Analytics").classes(f"text-xl font-semibold {SPACE_XL}").style(
+                f"color: {theme_text_primary()};"
             )
 
             tabs = ui.tabs().classes("w-full")
@@ -755,8 +775,8 @@ async def backtest_page() -> None:
                                 x=equity.get_column("entry_date").to_list(),
                                 y=equity.get_column("drawdown").to_list(),
                                 fill="tozeroy",
-                                fillcolor=hex_to_rgba(COLORS["error"], 0.15),
-                                line_color=COLORS["error"],
+                                fillcolor=hex_to_rgba(color_error(), 0.15),
+                                line_color=color_error(),
                                 name="Drawdown",
                                 hovertemplate="%{x}<br>Drawdown: %{y:.2f}%<extra></extra>",
                             )
@@ -768,7 +788,7 @@ async def backtest_page() -> None:
                                 y=equity.get_column("cumulative_return").to_list(),
                                 mode="lines",
                                 name="Cumulative Return %",
-                                line=dict(color=COLORS["primary"], width=2.5),
+                                line=dict(color=color_primary(), width=2.5),
                                 hovertemplate="%{x}<br>Return: %{y:.2f}%<extra></extra>",
                             )
                         )
@@ -789,7 +809,7 @@ async def backtest_page() -> None:
                             pl.col("pnl_pct").mean().alias("avg_pnl"),
                             pl.col("pnl_r").mean().alias("avg_r"),
                         )
-                        with ui.row().classes("w-full gap-4"):
+                        with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
                             with ui.column().classes("flex-1"):
                                 exit_counts = trades_df.group_by("exit_reason").agg(
                                     pl.len().alias("count")
@@ -854,7 +874,7 @@ async def backtest_page() -> None:
                                 go.Histogram(
                                     x=r_vals,
                                     nbinsx=50,
-                                    marker_color=COLORS["primary"],
+                                    marker_color=color_primary(),
                                     name="Distribution",
                                     opacity=0.7,
                                 )
@@ -875,15 +895,15 @@ async def backtest_page() -> None:
                                         y=y_norm_scaled,
                                         mode="lines",
                                         name="Normal Dist",
-                                        line=dict(color=COLORS["error"], dash="dash"),
+                                        line=dict(color=color_error(), dash="dash"),
                                     )
                                 )
 
-                            fig_r.add_vline(x=0, line_dash="dash", line_color=THEME["text_muted"])
+                            fig_r.add_vline(x=0, line_dash="dash", line_color=theme_text_muted())
                             fig_r.add_vline(
                                 x=mu,
                                 line_dash="dot",
-                                line_color=COLORS["success"],
+                                line_color=color_success(),
                                 annotation_text=f"Mean: {mu:.2f}R",
                             )
 
@@ -968,11 +988,11 @@ async def backtest_page() -> None:
                             for col in avail_cols
                         ]
 
-                        with ui.row().classes("w-full gap-4"):
+                        with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
                             with ui.column().classes("flex-1"):
-                                ui.label("Top Winners").classes("text-lg font-semibold mb-2").style(
-                                    f"color: {COLORS['success']};"
-                                )
+                                ui.label("Top Winners").classes(
+                                    f"text-lg font-semibold {SPACE_SM}"
+                                ).style(f"color: {color_success()};")
                                 top_winners = trades_df.sort(
                                     "pnl_pct", descending=True, nulls_last=True
                                 ).head(min(20, trades_df.height))
@@ -988,9 +1008,9 @@ async def backtest_page() -> None:
                                     )
 
                             with ui.column().classes("flex-1"):
-                                ui.label("Top Losers").classes("text-lg font-semibold mb-2").style(
-                                    f"color: {COLORS['error']};"
-                                )
+                                ui.label("Top Losers").classes(
+                                    f"text-lg font-semibold {SPACE_SM}"
+                                ).style(f"color: {color_error()};")
                                 top_losers = trades_df.sort(
                                     "pnl_pct", descending=False, nulls_last=True
                                 ).head(min(20, trades_df.height))
@@ -1098,7 +1118,7 @@ async def backtest_page() -> None:
                                 "Dec",
                             ],
                             y=years,
-                            color_continuous_scale=[COLORS["error"], "#f1f5f9", COLORS["success"]],
+                            color_continuous_scale=[color_error(), "#f1f5f9", color_success()],
                             color_continuous_midpoint=0,
                             title="Monthly Returns Heatmap",
                         )
@@ -1108,10 +1128,10 @@ async def backtest_page() -> None:
 
             divider()
             with ui.expansion("Run New Backtest", icon="play_arrow").classes("w-full"):
-                ui.label("Configure and launch a new backtest run.").classes("mb-4").style(
-                    f"color: {THEME['text_secondary']};"
+                ui.label("Configure and launch a new backtest run.").classes(SPACE_LG).style(
+                    f"color: {theme_text_secondary()};"
                 )
-                with ui.row().classes("w-full gap-4"):
+                with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
                     # Accessibility: Add autocomplete attributes for better form UX
                     ui.number("Universe Size", value=500, min=50, max=2000, step=50).props(
                         'autocomplete="off" aria-label="Universe size for backtest"'
@@ -1124,21 +1144,21 @@ async def backtest_page() -> None:
                     )
 
                 with ui.column().classes("kpi-card mt-4"):
-                    ui.label("Run this command in your terminal:").classes("text-sm mb-2").style(
-                        f"color: {THEME['text_secondary']};"
-                    )
+                    ui.label("Run this command in your terminal:").classes(
+                        f"text-sm {SPACE_SM}"
+                    ).style(f"color: {theme_text_secondary()};")
                     ui.label(
                         "doppler run -- uv run nseml-backtest --universe-size 2000 --start-year 2015 --end-year 2025"
-                    ).classes("font-mono text-sm").style(f"color: {COLORS['success']};")
+                    ).classes("font-mono text-sm").style(f"color: {color_success()};")
 
                 ui.label("After completion, refresh this page to see the new experiment.").classes(
                     "text-sm mt-2"
-                ).style(f"color: {THEME['text_muted']};")
+                ).style(f"color: {theme_text_muted()};")
 
-        with ui.row().classes("kpi-card w-full items-center gap-4 mb-6"):
-            ui.icon("science").classes("text-xl").style(f"color: {THEME['primary']};")
+        with ui.row().classes(f"kpi-card w-full items-center {SPACE_GRID_DEFAULT} {SPACE_SECTION}"):
+            ui.icon("science").classes("text-xl").style(f"color: {theme_primary()};")
             ui.label("Experiment").classes("text-sm font-medium").style(
-                f"color: {THEME['text_secondary']};"
+                f"color: {theme_text_secondary()};"
             )
 
             def on_select(e):

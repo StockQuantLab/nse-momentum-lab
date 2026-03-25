@@ -20,14 +20,19 @@ from nicegui import ui
 
 from apps.nicegui.state import get_experiments
 from apps.nicegui.components import (
-    page_layout,
+    color_error,
+    color_success,
     divider,
-    info_box,
-    COLORS,
-    THEME,
     empty_state,
+    info_box,
     page_header,
+    page_layout,
     paginated_table,
+    SPACE_GRID_DEFAULT,
+    SPACE_LG,
+    SPACE_SECTION,
+    SPACE_SM,
+    theme_text_secondary,
 )
 
 
@@ -67,41 +72,41 @@ def strategy_page() -> None:
             return
 
         # Analysis options
-        with ui.column().classes("kpi-card mb-6"):
-            ui.label("Analysis Options").classes("text-sm font-medium mb-2").style(
-                f"color: {THEME['text_secondary']};"
+        with ui.column().classes(f"kpi-card {SPACE_SECTION}"):
+            ui.label("Analysis Options").classes(f"text-sm font-medium {SPACE_SM}").style(
+                f"color: {theme_text_secondary()};"
             )
             info_box(
                 "Run multiple backtests with different parameter values to see sensitivity charts."
             )
             ui.label(f"Found {len(experiments_df)} experiments to analyze.").classes(
                 "text-sm"
-            ).style(f"color: {THEME['text_secondary']};")
+            ).style(f"color: {theme_text_secondary()};")
 
         divider()
 
         # Experiments Overview — collapsible so the page isn't dominated by the table
         with ui.expansion("Experiments Overview", icon="science", value=True).classes(
-            "w-full mb-4"
+            f"w-full {SPACE_LG}"
         ):
             if "strategy_name" in experiments_df.columns:
                 # Show all unique strategy names (no truncation)
                 unique_strategies = sorted(experiments_df["strategy_name"].unique().to_list())
-                ui.label(f"Strategies: {', '.join(unique_strategies)}").classes("mb-4").style(
-                    f"color: {THEME['text_secondary']};"
+                ui.label(f"Strategies: {', '.join(unique_strategies)}").classes(SPACE_LG).style(
+                    f"color: {theme_text_secondary()};"
                 )
 
             if "total_return_pct" in experiments_df.columns:
                 returns = experiments_df["total_return_pct"].drop_nulls()
-                with ui.row().classes("w-full gap-4 mb-4"):
+                with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT} {SPACE_LG}"):
                     ui.label(f"Best Return: {returns.max():.1f}%").style(
-                        f"color: {COLORS['success']};"
+                        f"color: {color_success()};"
                     )
                     ui.label(f"Median Return: {returns.median():.1f}%").style(
-                        f"color: {THEME['text_secondary']};"
+                        f"color: {theme_text_secondary()};"
                     )
                     ui.label(f"Worst Return: {returns.min():.1f}%").style(
-                        f"color: {COLORS['error']};"
+                        f"color: {color_error()};"
                     )
 
             paginated_table(

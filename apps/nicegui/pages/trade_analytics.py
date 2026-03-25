@@ -28,12 +28,18 @@ from apps.nicegui.components import (
     page_layout,
     kpi_grid,
     apply_chart_theme,
-    COLORS,
-    THEME,
     empty_state,
     page_header,
     paginated_table,
     loading_spinner,
+    SPACE_GRID_DEFAULT,
+    SPACE_SECTION,
+    theme_primary,
+    theme_text_secondary,
+    color_success,
+    color_error,
+    color_info,
+    color_warning,
 )
 
 
@@ -90,13 +96,13 @@ async def trade_analytics_page() -> None:
                     title="Total Trades",
                     value=f"{total_trades:,}",
                     icon="bar_chart",
-                    color=COLORS["info"],
+                    color=color_info(),
                 ),
                 dict(
                     title="Win Rate",
                     value=f"{win_rate:.1f}%",
                     icon="target",
-                    color=COLORS["success"],
+                    color=color_success(),
                 ),
             ]
             if "pnl_pct" in trades_df.columns:
@@ -106,7 +112,7 @@ async def trade_analytics_page() -> None:
                         title="Total Return",
                         value=f"{total_pnl:.1f}%",
                         icon="attach_money",
-                        color=COLORS["success"] if total_pnl > 0 else COLORS["error"],
+                        color=color_success() if total_pnl > 0 else color_error(),
                     )
                 )
             if "pnl_r" in trades_df.columns:
@@ -116,7 +122,7 @@ async def trade_analytics_page() -> None:
                         title="Avg R",
                         value=f"{avg_r:.2f}R",
                         icon="trending_up",
-                        color=COLORS["warning"],
+                        color=color_warning(),
                     )
                 )
 
@@ -180,7 +186,7 @@ async def trade_analytics_page() -> None:
                                 x=exit_summary["exit_reason"].to_list(),
                                 y=exit_summary["avg_pnl"].to_list(),
                                 marker_color=[
-                                    COLORS["success"] if v > 0 else COLORS["error"]
+                                    color_success() if v > 0 else color_error()
                                     for v in exit_summary["avg_pnl"].to_list()
                                 ],
                             )
@@ -254,7 +260,7 @@ async def trade_analytics_page() -> None:
                                 x=monthly_data["month_str"].to_list(),
                                 y=monthly_data["total_pnl"].to_list(),
                                 mode="lines+markers",
-                                line=dict(color=COLORS["success"]),
+                                line=dict(color=color_success()),
                             )
                         )
                         fig.update_layout(
@@ -306,10 +312,10 @@ async def trade_analytics_page() -> None:
                         )
 
         # ── experiment selector ───────────────────────────────────
-        with ui.row().classes("kpi-card w-full items-center gap-4 mb-6"):
-            ui.icon("science").classes("text-2xl").style(f"color: {THEME['primary']};")
+        with ui.row().classes(f"kpi-card w-full items-center {SPACE_GRID_DEFAULT} {SPACE_SECTION}"):
+            ui.icon("science").classes("text-2xl").style(f"color: {theme_primary()};")
             ui.label("Experiment").classes("text-sm font-medium").style(
-                f"color: {THEME['text_secondary']};"
+                f"color: {theme_text_secondary()};"
             )
 
             def on_select(e):

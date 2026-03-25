@@ -19,14 +19,26 @@ if str(_apps_root) not in sys.path:
 from nicegui import ui
 
 from apps.nicegui.components import (
-    COLORS,
-    THEME,
+    color_error,
+    color_info,
+    color_success,
+    color_warning,
     divider,
     empty_state,
     info_box,
     kpi_grid,
     page_layout,
     paginated_table,
+    SPACE_GRID_DEFAULT,
+    SPACE_MD,
+    SPACE_SECTION,
+    SPACE_SM,
+    SPACE_XS,
+    theme_surface_border,
+    theme_surface_hover,
+    theme_text_muted,
+    theme_text_primary,
+    theme_text_secondary,
 )
 from apps.nicegui.state import (
     aget_paper_positions,
@@ -57,12 +69,12 @@ def _fmt_ts(value: Any) -> str:
 def _status_color(status: str | None) -> str:
     normalized = str(status or "").upper()
     if normalized in {"ACTIVE", "RUNNING", "CONNECTED", "READY", "COMPLETE", "COMPLETED", "PASS"}:
-        return COLORS["success"]
+        return color_success()
     if normalized in {"PAUSED", "STOPPING", "PLANNING", "CONNECTING"}:
-        return COLORS["warning"]
+        return color_warning()
     if normalized in {"FAILED", "ERROR", "DISCONNECTED", "ARCHIVED", "CANCELLED"}:
-        return COLORS["error"]
-    return COLORS["info"]
+        return color_error()
+    return color_info()
 
 
 def _title_case_words(value: str) -> str:
@@ -330,19 +342,19 @@ def _event_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 async def paper_ledger_page() -> None:
     """Render the paper trading ledger page."""
     with page_layout("Paper Ledger", "receipt_long"):
-        with ui.column().classes("kpi-card p-6 mb-6"):
-            ui.label("Paper Session Ledger").classes("text-xl font-semibold mb-2").style(
-                f"color: {THEME['text_primary']};"
+        with ui.column().classes(f"kpi-card p-6 {SPACE_SECTION}"):
+            ui.label("Paper Session Ledger").classes(f"text-xl font-semibold {SPACE_SM}").style(
+                f"color: {theme_text_primary()};"
             )
             ui.label(
                 "This page reads live paper-session state from PostgreSQL so replay and live "
                 "sessions can be observed without leaving the dashboard."
-            ).classes("mb-3").style(f"color: {THEME['text_secondary']};")
+            ).classes(SPACE_MD).style(f"color: {theme_text_secondary()};")
             ui.label(
                 "Use the separate /walk_forward page for validation history and reruns. "
                 "Load an approved experiment/date here, execute replay or live once, and "
                 "monitor feed, queue, orders, fills, and positions."
-            ).style(f"color: {THEME['text_muted']};")
+            ).style(f"color: {theme_text_muted()};")
 
         try:
             sessions = await aget_paper_sessions(limit=50)
@@ -396,7 +408,7 @@ async def paper_ledger_page() -> None:
             current["session_id"] = option_map[current["label"]]
             await render_session(current["session_id"])
 
-        with ui.row().classes("items-center gap-3 mb-6 w-full"):
+        with ui.row().classes(f"items-center {SPACE_MD} {SPACE_SECTION} w-full"):
             ui.select(
                 options=list(option_map.keys()),
                 value=current["label"],
@@ -409,10 +421,10 @@ async def paper_ledger_page() -> None:
                 on_click=lambda: asyncio.create_task(render_session(current["session_id"])),
             ).props("outline")
             ui.label("Auto-refresh every 30s when active").classes("text-sm").style(
-                f"color: {THEME['text_muted']};"
+                f"color: {theme_text_muted()};"
             )
 
-        commands_card = ui.column().classes("kpi-card p-5 mb-6")
+        commands_card = ui.column().classes(f"kpi-card p-5 {SPACE_SECTION}")
         content = ui.column().classes("w-full")
 
         def render_dynamic_panels(session: dict[str, Any]) -> None:
@@ -426,7 +438,7 @@ async def paper_ledger_page() -> None:
                 with ui.expansion("Commands", icon="terminal").classes("w-full"):
                     ui.label(
                         f"Suggested commands for the selected session ({strategy_display})."
-                    ).classes("text-sm mb-3").style(f"color: {THEME['text_secondary']};")
+                    ).classes(f"text-sm {SPACE_MD}").style(f"color: {theme_text_secondary()};")
                     for command in [
                         (
                             "doppler run -- uv run nseml-paper replay-day "
@@ -441,8 +453,10 @@ async def paper_ledger_page() -> None:
                             f"--trade-date {trade_date} --experiment-id {exp_id}"
                         ),
                     ]:
-                        ui.label(command).classes("font-mono text-sm px-3 py-2 rounded mb-2").style(
-                            f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
+                        ui.label(command).classes(
+                            f"font-mono text-sm px-3 py-2 rounded {SPACE_XS}"
+                        ).style(
+                            f"background: {theme_surface_hover()}; border: 1px solid {theme_surface_border()}; color: {theme_text_primary()}; border-radius: 6px;"
                         )
 
         async def render_session(session_id: str) -> None:
@@ -498,13 +512,13 @@ async def paper_ledger_page() -> None:
                 )
                 total_pnl = realized_pnl + unrealized_pnl
 
-                with ui.column().classes("kpi-card p-5 mb-6"):
-                    ui.label("What This Session Means").classes("text-lg font-semibold mb-2").style(
-                        f"color: {THEME['text_primary']};"
-                    )
+                with ui.column().classes(f"kpi-card p-5 {SPACE_SECTION}"):
+                    ui.label("What This Session Means").classes(
+                        f"text-lg font-semibold {SPACE_SM}"
+                    ).style(f"color: {theme_text_primary()};")
                     ui.label(_session_summary_text(session, counts, feed_state)).classes(
                         "leading-6"
-                    ).style(f"color: {THEME['text_secondary']};")
+                    ).style(f"color: {theme_text_secondary()};")
 
                 kpi_grid(
                     [
@@ -520,21 +534,21 @@ async def paper_ledger_page() -> None:
                             value=int(counts.get("queue_signals", 0)),
                             subtitle=f"Open signals: {int(counts.get('open_signals', 0))}",
                             icon="queue",
-                            color=COLORS["info"],
+                            color=color_info(),
                         ),
                         dict(
                             title="Open Positions",
                             value=int(counts.get("open_positions", 0)),
                             subtitle=f"Orders: {int(counts.get('orders', 0))}",
                             icon="work",
-                            color=COLORS["warning"],
+                            color=color_warning(),
                         ),
                         dict(
                             title="Fills",
                             value=int(counts.get("fills", 0)),
                             subtitle=f"Signals tracked: {int(counts.get('signals', 0))}",
                             icon="done_all",
-                            color=COLORS["success"],
+                            color=color_success(),
                         ),
                         dict(
                             title="Feed",
@@ -554,33 +568,33 @@ async def paper_ledger_page() -> None:
                             value=_fmt_float(realized_pnl),
                             subtitle="Closed positions",
                             icon="account_balance_wallet",
-                            color=COLORS["success"] if realized_pnl >= 0 else COLORS["error"],
+                            color=color_success() if realized_pnl >= 0 else color_error(),
                         ),
                         dict(
                             title="Unrealized P&L",
                             value=_fmt_float(unrealized_pnl),
                             subtitle="Open positions MTM",
                             icon="show_chart",
-                            color=COLORS["warning"] if unrealized_pnl >= 0 else COLORS["error"],
+                            color=color_warning() if unrealized_pnl >= 0 else color_error(),
                         ),
                         dict(
                             title="Total P&L",
                             value=_fmt_float(total_pnl),
                             subtitle="Realized + unrealized",
                             icon="query_stats",
-                            color=COLORS["info"] if total_pnl >= 0 else COLORS["error"],
+                            color=color_info() if total_pnl >= 0 else color_error(),
                         ),
                     ],
                     columns=3,
                 )
 
                 with ui.expansion("Session Details", icon="info").classes(
-                    "kpi-card p-5 mb-6 w-full"
+                    f"kpi-card p-5 {SPACE_SECTION} w-full"
                 ):
-                    with ui.grid(columns=2).classes("w-full gap-4"):
+                    with ui.grid(columns=2).classes(f"w-full {SPACE_GRID_DEFAULT}"):
                         with ui.column().classes("h-full"):
-                            ui.label("Session").classes("text-lg font-semibold mb-3").style(
-                                f"color: {THEME['text_primary']};"
+                            ui.label("Session").classes(f"text-lg font-semibold {SPACE_MD}").style(
+                                f"color: {theme_text_primary()};"
                             )
                             for label, value in [
                                 ("Internal Session ID", session.get("session_id")),
@@ -596,16 +610,18 @@ async def paper_ledger_page() -> None:
                                 ("Experiment ID", session.get("experiment_id") or "-"),
                                 ("Updated", _fmt_ts(session.get("updated_at"))),
                             ]:
-                                with ui.row().classes("justify-between w-full gap-4"):
-                                    ui.label(label).style(f"color: {THEME['text_secondary']};")
+                                with ui.row().classes(
+                                    f"justify-between w-full {SPACE_GRID_DEFAULT}"
+                                ):
+                                    ui.label(label).style(f"color: {theme_text_secondary()};")
                                     ui.label(str(value or "-")).classes("font-mono").style(
-                                        f"color: {THEME['text_primary']};"
+                                        f"color: {theme_text_primary()};"
                                     )
 
                         with ui.column().classes("h-full"):
-                            ui.label("Feed Details").classes("text-lg font-semibold mb-3").style(
-                                f"color: {THEME['text_primary']};"
-                            )
+                            ui.label("Feed Details").classes(
+                                f"text-lg font-semibold {SPACE_MD}"
+                            ).style(f"color: {theme_text_primary()};")
                             for label, value in [
                                 (
                                     "Source",
@@ -617,16 +633,18 @@ async def paper_ledger_page() -> None:
                                 ("Heartbeat", _fmt_ts(feed_state.get("heartbeat_at"))),
                                 ("Last Tick", _fmt_ts(feed_state.get("last_tick_at"))),
                             ]:
-                                with ui.row().classes("justify-between w-full gap-4"):
-                                    ui.label(label).style(f"color: {THEME['text_secondary']};")
+                                with ui.row().classes(
+                                    f"justify-between w-full {SPACE_GRID_DEFAULT}"
+                                ):
+                                    ui.label(label).style(f"color: {theme_text_secondary()};")
                                     ui.label(str(value or "-")).classes("font-mono").style(
-                                        f"color: {THEME['text_primary']};"
+                                        f"color: {theme_text_primary()};"
                                     )
 
                 divider()
 
-                ui.label("Trade Watchlist").classes("text-lg font-semibold mb-3").style(
-                    f"color: {THEME['text_primary']};"
+                ui.label("Trade Watchlist").classes(f"text-lg font-semibold {SPACE_MD}").style(
+                    f"color: {theme_text_primary()};"
                 )
                 queue_rows = _queue_rows(signals)
                 if queue_rows:
@@ -669,10 +687,10 @@ async def paper_ledger_page() -> None:
 
                 divider()
 
-                with ui.grid(columns=2).classes("w-full gap-4"):
+                with ui.grid(columns=2).classes(f"w-full {SPACE_GRID_DEFAULT}"):
                     with ui.column().classes("w-full"):
-                        ui.label("Positions").classes("text-lg font-semibold mb-3").style(
-                            f"color: {THEME['text_primary']};"
+                        ui.label("Positions").classes(f"text-lg font-semibold {SPACE_MD}").style(
+                            f"color: {theme_text_primary()};"
                         )
                         position_rows = _position_rows(positions)
                         if position_rows:
@@ -720,8 +738,8 @@ async def paper_ledger_page() -> None:
                             )
 
                     with ui.column().classes("w-full"):
-                        ui.label("Orders").classes("text-lg font-semibold mb-3").style(
-                            f"color: {THEME['text_primary']};"
+                        ui.label("Orders").classes(f"text-lg font-semibold {SPACE_MD}").style(
+                            f"color: {theme_text_primary()};"
                         )
                         order_rows = _order_rows(orders)
                         if order_rows:
@@ -756,10 +774,10 @@ async def paper_ledger_page() -> None:
 
                 divider()
 
-                with ui.grid(columns=2).classes("w-full gap-4"):
+                with ui.grid(columns=2).classes(f"w-full {SPACE_GRID_DEFAULT}"):
                     with ui.column().classes("w-full"):
-                        ui.label("Fills").classes("text-lg font-semibold mb-3").style(
-                            f"color: {THEME['text_primary']};"
+                        ui.label("Fills").classes(f"text-lg font-semibold {SPACE_MD}").style(
+                            f"color: {theme_text_primary()};"
                         )
                         fill_rows = _fill_rows(fills)
                         if fill_rows:
@@ -788,9 +806,9 @@ async def paper_ledger_page() -> None:
                             )
 
                     with ui.column().classes("w-full"):
-                        ui.label("Recent Activity").classes("text-lg font-semibold mb-3").style(
-                            f"color: {THEME['text_primary']};"
-                        )
+                        ui.label("Recent Activity").classes(
+                            f"text-lg font-semibold {SPACE_MD}"
+                        ).style(f"color: {theme_text_primary()};")
                         event_rows = _event_rows(events)
                         if event_rows:
                             paginated_table(

@@ -21,13 +21,28 @@ import plotly.graph_objects as go
 from nicegui import ui
 
 from apps.nicegui.components import (
-    COLORS,
-    THEME,
+    color_error,
+    color_gray,
+    color_info,
+    color_primary,
+    color_success,
+    color_warning,
     divider,
     empty_state,
     kpi_grid,
     page_header,
     page_layout,
+    SPACE_GRID_DEFAULT,
+    SPACE_LG,
+    SPACE_SECTION,
+    SPACE_SM,
+    SPACE_XS,
+    theme_surface,
+    theme_surface_border,
+    theme_surface_hover,
+    theme_text_muted,
+    theme_text_primary,
+    theme_text_secondary,
 )
 from apps.nicegui.state import aget_market_monitor_all, aget_market_monitor_latest
 
@@ -76,10 +91,10 @@ def _num(value: object, decimals: int = 0) -> str:
 def _regime_color(label: str) -> str:
     value = (label or "").lower()
     if any(token in value for token in ["bull", "long", "aggressive"]):
-        return COLORS["success"]
+        return color_success()
     if any(token in value for token in ["bear", "short", "defensive"]):
-        return COLORS["error"]
-    return COLORS["warning"]
+        return color_error()
+    return color_warning()
 
 
 def _latest_cards(latest: dict) -> list[dict]:
@@ -106,19 +121,19 @@ def _latest_cards(latest: dict) -> list[dict]:
             title="Aggression",
             value=_num(latest.get("aggression_score"), decimals=1),
             icon="speed",
-            color=COLORS["info"],
+            color=color_info(),
         ),
         dict(
             title="Universe",
             value=_num(latest.get("universe_size"), decimals=0),
             icon="groups",
-            color=COLORS["primary"],
+            color=color_primary(),
         ),
         dict(
             title="Last Update",
             value=_safe_value(latest, "trading_date"),
             icon="event",
-            color=COLORS["gray"],
+            color=color_gray(),
         ),
     ]
 
@@ -357,36 +372,36 @@ async def market_monitor_page() -> None:
         ma20_breadth = (
             latest.get("pct_above_ma20", 0) if not _is_missing(latest.get("pct_above_ma20")) else 0
         )
-        success_bg = _rgba(COLORS["success"], 0.25)
-        success_border = _rgba(COLORS["success"], 0.3)
-        success_fill = _rgba(COLORS["success"], 0.1)
-        success_fill_soft = _rgba(COLORS["success"], 0.06)
-        error_bg = _rgba(COLORS["error"], 0.25)
-        error_border = _rgba(COLORS["error"], 0.3)
-        error_fill = _rgba(COLORS["error"], 0.1)
-        error_fill_soft = _rgba(COLORS["error"], 0.06)
-        warning_bg = _rgba(COLORS["warning"], 0.25)
-        warning_border = _rgba(COLORS["warning"], 0.3)
-        info_bg = _rgba(COLORS["info"], 0.25)
+        success_bg = _rgba(color_success(), 0.25)
+        success_border = _rgba(color_success(), 0.3)
+        success_fill = _rgba(color_success(), 0.1)
+        success_fill_soft = _rgba(color_success(), 0.06)
+        error_bg = _rgba(color_error(), 0.25)
+        error_border = _rgba(color_error(), 0.3)
+        error_fill = _rgba(color_error(), 0.1)
+        error_fill_soft = _rgba(color_error(), 0.06)
+        warning_bg = _rgba(color_warning(), 0.25)
+        warning_border = _rgba(color_warning(), 0.3)
+        info_bg = _rgba(color_info(), 0.25)
 
         # ========================================================================
         # MARKET HEALTH DASHBOARD - Enhanced Cards with Visual Indicators
         # ========================================================================
         with (
             ui.card()
-            .classes("w-full p-5 mb-6")
+            .classes(f"w-full p-5 {SPACE_SECTION}")
             .style(
-                f"background: linear-gradient(145deg, {THEME['surface']}, {THEME['surface_hover']}40); border: 1px solid {THEME['surface_border']}; border-radius: 16px;"
+                f"background: linear-gradient(145deg, {theme_surface()}, {theme_surface_hover()}40); border: 1px solid {theme_surface_border()}; border-radius: 16px;"
             )
         ):
             ui.label("MARKET HEALTH DASHBOARD").classes(
-                "text-sm font-bold tracking-wider mb-2"
+                f"text-sm font-bold tracking-wider {SPACE_SM}"
             ).style(
-                f"color: {THEME['text_primary']}; letter-spacing: 0.15em; text-transform: uppercase;"
+                f"color: {theme_text_primary()}; letter-spacing: 0.15em; text-transform: uppercase;"
             )
             ui.label("Latest daily breadth snapshot for the most recent trading date.").classes(
-                "text-xs mb-4"
-            ).style(f"color: {THEME['text_muted']};")
+                f"text-xs {SPACE_LG}"
+            ).style(f"color: {theme_text_muted()};")
             kpi_grid(
                 [
                     dict(
@@ -401,9 +416,9 @@ async def market_monitor_page() -> None:
                             )
                         ),
                         icon="show_chart",
-                        color=COLORS["success"]
+                        color=color_success()
                         if up_4pct >= down_4pct
-                        else (COLORS["error"] if down_4pct > up_4pct else COLORS["warning"]),
+                        else (color_error() if down_4pct > up_4pct else color_warning()),
                     ),
                     dict(
                         title="5-Day Breadth Ratio",
@@ -415,7 +430,7 @@ async def market_monitor_page() -> None:
                             else ("BEARISH" if ratio_5d <= 0.67 else "NEUTRAL")
                         ),
                         icon="timeline",
-                        color=COLORS["info"],
+                        color=color_info(),
                     ),
                     dict(
                         title="MA40 Breadth",
@@ -427,7 +442,7 @@ async def market_monitor_page() -> None:
                             else ("OVERBOUGHT" if t2108 >= 70 else "NEUTRAL")
                         ),
                         icon="insights",
-                        color=COLORS["primary"],
+                        color=color_primary(),
                     ),
                     dict(
                         title="MA20 Breadth",
@@ -439,7 +454,7 @@ async def market_monitor_page() -> None:
                             else ("DOWNTREND" if ma20_breadth <= 40 else "MIXED")
                         ),
                         icon="moving",
-                        color=COLORS["warning"],
+                        color=color_warning(),
                     ),
                 ],
                 columns=4,
@@ -452,23 +467,23 @@ async def market_monitor_page() -> None:
         # ========================================================================
         with (
             ui.card()
-            .classes("w-full p-5 mb-6")
+            .classes(f"w-full p-5 {SPACE_SECTION}")
             .style(
-                f"background: linear-gradient(145deg, {THEME['surface']}, {THEME['surface_hover']}35); border: 1px solid {THEME['surface_border']}; border-left: 4px solid {COLORS['info']}; border-radius: 16px;"
+                f"background: linear-gradient(145deg, {theme_surface()}, {theme_surface_hover()}35); border: 1px solid {theme_surface_border()}; border-left: 4px solid {color_info()}; border-radius: 16px;"
             )
         ):
-            ui.label("REGIME STATUS").classes("text-sm font-bold tracking-wider mb-2").style(
-                f"color: {THEME['text_primary']}; letter-spacing: 0.1em; text-transform: uppercase;"
+            ui.label("REGIME STATUS").classes(f"text-sm font-bold tracking-wider {SPACE_SM}").style(
+                f"color: {theme_text_primary()}; letter-spacing: 0.1em; text-transform: uppercase;"
             )
             ui.label("Derived interpretation of the raw breadth snapshot above.").classes(
-                "text-xs mb-4"
-            ).style(f"color: {THEME['text_muted']};")
+                f"text-xs {SPACE_LG}"
+            ).style(f"color: {theme_text_muted()};")
             ui.label(f"{_safe_value(latest, 'trading_date')} Market State").classes(
-                "text-2xl font-bold mb-1"
-            ).style(f"color: {THEME['text_primary']};")
+                f"text-2xl font-bold {SPACE_XS}"
+            ).style(f"color: {theme_text_primary()};")
             ui.label("Current regime classification for tactical trading decisions").classes(
-                "text-sm mb-4"
-            ).style(f"color: {THEME['text_secondary']};")
+                f"text-sm {SPACE_LG}"
+            ).style(f"color: {theme_text_secondary()};")
             kpi_grid(_latest_cards(latest), columns=6)
 
         divider()
@@ -480,21 +495,21 @@ async def market_monitor_page() -> None:
             ui.card()
             .classes("w-full p-5")
             .style(
-                f"background: linear-gradient(145deg, {THEME['surface']}, {THEME['surface_hover']}35); border: 1px solid {THEME['surface_border']}; border-radius: 16px;"
+                f"background: linear-gradient(145deg, {theme_surface()}, {theme_surface_hover()}35); border: 1px solid {theme_surface_border()}; border-radius: 16px;"
             )
         ):
             ui.label("MARKET BREADTH HISTORY").classes(
-                "text-sm font-bold tracking-wider mb-2"
-            ).style(f"color: {THEME['text_primary']}; letter-spacing: 0.1em;")
+                f"text-sm font-bold tracking-wider {SPACE_SM}"
+            ).style(f"color: {theme_text_primary()}; letter-spacing: 0.1em;")
             ui.label(
                 "Select a year tab to inspect the daily breadth table. The table stays compact, while the definitions below explain each short column name."
-            ).classes("text-xs mb-4").style(f"color: {THEME['text_muted']};")
+            ).classes(f"text-xs {SPACE_LG}").style(f"color: {theme_text_muted()};")
             ui.label(
                 "Bullish = favorable breadth | Bearish = weak breadth | Capitulation = extreme weakness / watch zone"
-            ).classes("text-xs mb-1").style(f"color: {THEME['text_secondary']};")
+            ).classes(f"text-xs {SPACE_XS}").style(f"color: {theme_text_secondary()};")
             ui.label(
                 "4%↑ / 4%↓ = stocks moving at least +/-4% today | 5D BR / 10D BR = up-vs-down breadth ratio over 5 / 10 days | MA40 = percent of stocks above 40-day moving average | 25Q / 25M / 50M / 13/34 = Stockbee-style move buckets for quarterly, monthly, and medium-term breadth"
-            ).classes("text-xs mb-4").style(f"color: {THEME['text_secondary']};")
+            ).classes(f"text-xs {SPACE_LG}").style(f"color: {theme_text_secondary()};")
 
             # Prepare data
             numeric_count_cols = [
@@ -538,8 +553,8 @@ async def market_monitor_page() -> None:
             history_styles_html = f"""
         <style>
             .mm-history-card {{
-                background: linear-gradient(145deg, {THEME["surface"]}, {THEME["surface_hover"]}40);
-                border: 1px solid {THEME["surface_border"]};
+                background: linear-gradient(145deg, {theme_surface()}, {theme_surface_hover()}40);
+                border: 1px solid {theme_surface_border()};
                 border-radius: 16px;
                 box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
                 overflow: hidden;
@@ -554,13 +569,13 @@ async def market_monitor_page() -> None:
                 background: transparent;
             }}
             .mm-history-table thead th {{
-                background: {THEME["surface"]};
-                color: {THEME["text_secondary"]};
+                background: {theme_surface()};
+                color: {theme_text_secondary()};
                 font-size: 9px;
                 font-weight: 800;
                 text-transform: uppercase;
                 letter-spacing: 0.08em;
-                border-bottom: 1px solid {THEME["surface_border"]};
+                border-bottom: 1px solid {theme_surface_border()};
                 white-space: nowrap;
             }}
             .mm-history-table tbody tr:hover {{
@@ -568,7 +583,7 @@ async def market_monitor_page() -> None:
             }}
             .mm-history-table .mm-weekday {{
                 display: block;
-                color: {THEME["text_muted"]};
+                color: {theme_text_muted()};
                 font-size: 9px;
                 text-transform: uppercase;
                 letter-spacing: 0.05em;
@@ -576,7 +591,7 @@ async def market_monitor_page() -> None:
             }}
             .mm-history-table .mm-date-text {{
                 display: block;
-                color: {THEME["text_primary"]};
+                color: {theme_text_primary()};
                 font-weight: 700;
                 line-height: 1.2;
             }}
@@ -592,18 +607,18 @@ async def market_monitor_page() -> None:
                 letter-spacing: 0.05em;
                 white-space: nowrap;
             }}
-            .bullish-badge {{ background: {success_bg}; color: {COLORS["success"]}; border: 1px solid {success_border}; }}
-            .bearish-badge {{ background: {error_bg}; color: {COLORS["error"]}; border: 1px solid {error_border}; }}
-            .neutral-badge {{ background: {warning_bg}; color: {COLORS["warning"]}; border: 1px solid {warning_border}; }}
-            .cell-strong-bullish {{ background: linear-gradient(90deg, {success_fill}, transparent); color: {COLORS["success"]}; font-weight: 700; }}
-            .cell-bullish {{ background: linear-gradient(90deg, {success_fill_soft}, transparent); color: {COLORS["success"]}; }}
-            .cell-strong-bearish {{ background: linear-gradient(90deg, {error_fill}, transparent); color: {COLORS["error"]}; font-weight: 700; }}
-            .cell-bearish {{ background: linear-gradient(90deg, {error_fill_soft}, transparent); color: {COLORS["error"]}; }}
-            .cell-oversold {{ background: linear-gradient(90deg, {success_bg}, transparent); color: {COLORS["success"]}; font-weight: 800; border-left: 3px solid {COLORS["success"]}; }}
-            .cell-overbought {{ background: linear-gradient(90deg, {error_bg}, transparent); color: {COLORS["error"]}; font-weight: 800; border-left: 3px solid {COLORS["error"]}; }}
-            .cell-capitulation {{ background: linear-gradient(90deg, {info_bg}, transparent); color: {COLORS["info"]}; font-weight: 700; border-left: 3px solid {COLORS["info"]}; }}
-            .cell-neutral {{ color: {THEME["text_primary"]}; }}
-            .cell-weak {{ color: {THEME["text_muted"]}; }}
+            .bullish-badge {{ background: {success_bg}; color: {color_success()}; border: 1px solid {success_border}; }}
+            .bearish-badge {{ background: {error_bg}; color: {color_error()}; border: 1px solid {error_border}; }}
+            .neutral-badge {{ background: {warning_bg}; color: {color_warning()}; border: 1px solid {warning_border}; }}
+            .cell-strong-bullish {{ background: linear-gradient(90deg, {success_fill}, transparent); color: {color_success()}; font-weight: 700; }}
+            .cell-bullish {{ background: linear-gradient(90deg, {success_fill_soft}, transparent); color: {color_success()}; }}
+            .cell-strong-bearish {{ background: linear-gradient(90deg, {error_fill}, transparent); color: {color_error()}; font-weight: 700; }}
+            .cell-bearish {{ background: linear-gradient(90deg, {error_fill_soft}, transparent); color: {color_error()}; }}
+            .cell-oversold {{ background: linear-gradient(90deg, {success_bg}, transparent); color: {color_success()}; font-weight: 800; border-left: 3px solid {color_success()}; }}
+            .cell-overbought {{ background: linear-gradient(90deg, {error_bg}, transparent); color: {color_error()}; font-weight: 800; border-left: 3px solid {color_error()}; }}
+            .cell-capitulation {{ background: linear-gradient(90deg, {info_bg}, transparent); color: {color_info()}; font-weight: 700; border-left: 3px solid {color_info()}; }}
+            .cell-neutral {{ color: {theme_text_primary()}; }}
+            .cell-weak {{ color: {theme_text_muted()}; }}
             .mm-history-legend {{
                 display: flex;
                 align-items: center;
@@ -612,7 +627,7 @@ async def market_monitor_page() -> None:
                 gap: 16px;
                 padding: 12px 0 0;
                 font-size: 12px;
-                color: {THEME["text_muted"]};
+                color: {theme_text_muted()};
             }}
             .mm-legend-chip {{
                 display: inline-flex;
@@ -630,11 +645,11 @@ async def market_monitor_page() -> None:
                 grid-template-columns: repeat(2, minmax(0, 1fr));
                 gap: 8px 16px;
                 margin-top: 12px;
-                color: {THEME["text_muted"]};
+                color: {theme_text_muted()};
                 font-size: 12px;
             }}
             .mm-column-guide code {{
-                color: {THEME["text_primary"]};
+                color: {theme_text_primary()};
                 font-weight: 700;
             }}
         </style>
@@ -748,11 +763,11 @@ async def market_monitor_page() -> None:
         with ui.expansion("BREADTH TRENDS (90 Days)", icon="timeline", value=False).classes(
             "w-full"
         ):
-            with ui.column().classes("w-full gap-4 pt-3"):
-                with ui.row().classes("w-full gap-4"):
+            with ui.column().classes(f"w-full {SPACE_GRID_DEFAULT} pt-3"):
+                with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
                     _create_4pct_chart(history_df)
                     _create_ratio_chart(history_df)
-                with ui.row().classes("w-full gap-4"):
+                with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
                     _create_t2108_chart(history_df)
                     _create_ma_breadth_chart(history_df)
 
@@ -763,19 +778,19 @@ async def market_monitor_page() -> None:
 
 
 def _create_chart_layout(title: str, height: int = 240) -> dict:
-    grid_color = _rgba(THEME["surface_border"], 0.35)
+    grid_color = _rgba(theme_surface_border(), 0.35)
     return {
         "title": {
             "text": title,
-            "font": {"size": 12, "color": THEME["text_primary"], "family": "system-ui, sans-serif"},
+            "font": {"size": 12, "color": theme_text_primary(), "family": "system-ui, sans-serif"},
             "x": 0.02,
             "xanchor": "left",
         },
         "height": height,
         "margin": dict(l=40, r=20, t=40, b=35),
         "paper_bgcolor": "rgba(0,0,0,0)",
-        "plot_bgcolor": _rgba(THEME["surface_hover"], 0.12),
-        "font": dict(color=THEME["text_primary"], size=10),
+        "plot_bgcolor": _rgba(theme_surface_hover(), 0.12),
+        "font": dict(color=theme_text_primary(), size=10),
         "legend": dict(
             orientation="h",
             yanchor="bottom",
@@ -791,8 +806,8 @@ def _create_chart_layout(title: str, height: int = 240) -> dict:
             linewidth=1,
             title="",
             showline=True,
-            linecolor=THEME["surface_border"],
-            tickfont=dict(size=9, color=THEME["text_muted"]),
+            linecolor=theme_surface_border(),
+            tickfont=dict(size=9, color=theme_text_muted()),
         ),
         "yaxis": dict(
             showgrid=True,
@@ -800,8 +815,8 @@ def _create_chart_layout(title: str, height: int = 240) -> dict:
             linewidth=1,
             title="",
             showline=True,
-            linecolor=THEME["surface_border"],
-            tickfont=dict(size=9, color=THEME["text_muted"]),
+            linecolor=theme_surface_border(),
+            tickfont=dict(size=9, color=theme_text_muted()),
         ),
     }
 
@@ -815,12 +830,10 @@ def _create_4pct_chart(df: pl.DataFrame) -> None:
             y=df_sorted.get_column("up_4pct_count").to_list(),
             mode="lines+markers",
             name="4% Up",
-            line=dict(color=COLORS["success"], width=2.5, shape="spline"),
-            marker=dict(
-                size=5, color=COLORS["success"], line=dict(width=1, color=THEME["surface"])
-            ),
+            line=dict(color=color_success(), width=2.5, shape="spline"),
+            marker=dict(size=5, color=color_success(), line=dict(width=1, color=theme_surface())),
             fill="tozeroy",
-            fillcolor=_rgba(COLORS["success"], 0.1),
+            fillcolor=_rgba(color_success(), 0.1),
         )
     )
     fig.add_trace(
@@ -829,12 +842,12 @@ def _create_4pct_chart(df: pl.DataFrame) -> None:
             y=df_sorted.get_column("down_4pct_count").to_list(),
             mode="lines+markers",
             name="4% Down",
-            line=dict(color=COLORS["error"], width=2.5, shape="spline"),
-            marker=dict(size=5, color=COLORS["error"], line=dict(width=1, color=THEME["surface"])),
+            line=dict(color=color_error(), width=2.5, shape="spline"),
+            marker=dict(size=5, color=color_error(), line=dict(width=1, color=theme_surface())),
         )
     )
     fig.add_hline(
-        y=100, line_dash="dash", line_color=COLORS["success"], opacity=0.5, annotation_text="Strong"
+        y=100, line_dash="dash", line_color=color_success(), opacity=0.5, annotation_text="Strong"
     )
     fig.update_layout(**_create_chart_layout("4% Move Participation"))
     ui.plotly(fig).classes("w-full rounded-lg overflow-hidden")
@@ -849,8 +862,8 @@ def _create_ratio_chart(df: pl.DataFrame) -> None:
             y=df_sorted.get_column("ratio_5d").to_list(),
             mode="lines+markers",
             name="5D Ratio",
-            line=dict(color=COLORS["info"], width=2, shape="spline"),
-            marker=dict(size=4, color=COLORS["info"], line=dict(width=1, color=THEME["surface"])),
+            line=dict(color=color_info(), width=2, shape="spline"),
+            marker=dict(size=4, color=color_info(), line=dict(width=1, color=theme_surface())),
         )
     )
     fig.add_trace(
@@ -859,24 +872,22 @@ def _create_ratio_chart(df: pl.DataFrame) -> None:
             y=df_sorted.get_column("ratio_10d").to_list(),
             mode="lines+markers",
             name="10D Ratio",
-            line=dict(color=COLORS["primary"], width=3, shape="spline"),
-            marker=dict(
-                size=5, color=COLORS["primary"], line=dict(width=1, color=THEME["surface"])
-            ),
+            line=dict(color=color_primary(), width=3, shape="spline"),
+            marker=dict(size=5, color=color_primary(), line=dict(width=1, color=theme_surface())),
         )
     )
-    fig.add_hline(y=1.0, line_dash="dot", line_color=THEME["text_muted"], opacity=0.5)
+    fig.add_hline(y=1.0, line_dash="dot", line_color=theme_text_muted(), opacity=0.5)
     fig.add_hline(
         y=RATIO_10D_BULLISH,
         line_dash="dash",
-        line_color=COLORS["success"],
+        line_color=color_success(),
         opacity=0.6,
         annotation_text="Bullish",
     )
     fig.add_hline(
         y=RATIO_10D_BEARISH,
         line_dash="dash",
-        line_color=COLORS["error"],
+        line_color=color_error(),
         opacity=0.6,
         annotation_text="Bearish",
     )
@@ -892,14 +903,14 @@ def _create_t2108_chart(df: pl.DataFrame) -> None:
     fig.add_hrect(
         y0=T2108_OVERBOUGHT,
         y1=100,
-        fillcolor=_rgba(COLORS["error"], 0.1),
+        fillcolor=_rgba(color_error(), 0.1),
         layer="below",
         line_width=0,
     )
     fig.add_hrect(
         y0=0,
         y1=T2108_OVERSOLD,
-        fillcolor=_rgba(COLORS["success"], 0.1),
+        fillcolor=_rgba(color_success(), 0.1),
         layer="below",
         line_width=0,
     )
@@ -910,25 +921,23 @@ def _create_t2108_chart(df: pl.DataFrame) -> None:
             y=df_sorted.get_column("t2108_equivalent_pct").to_list(),
             mode="lines+markers",
             name="Above MA40",
-            line=dict(color=COLORS["primary"], width=2.5, shape="spline"),
-            marker=dict(
-                size=5, color=COLORS["primary"], line=dict(width=1, color=THEME["surface"])
-            ),
+            line=dict(color=color_primary(), width=2.5, shape="spline"),
+            marker=dict(size=5, color=color_primary(), line=dict(width=1, color=theme_surface())),
             fill="tozeroy",
-            fillcolor=_rgba(COLORS["primary"], 0.15),
+            fillcolor=_rgba(color_primary(), 0.15),
         )
     )
     fig.add_hline(
         y=T2108_OVERSOLD,
         line_dash="dash",
-        line_color=COLORS["success"],
+        line_color=color_success(),
         opacity=0.7,
         annotation_text="Oversold",
     )
     fig.add_hline(
         y=T2108_OVERBOUGHT,
         line_dash="dash",
-        line_color=COLORS["error"],
+        line_color=color_error(),
         opacity=0.7,
         annotation_text="Overbought",
     )
@@ -943,9 +952,7 @@ def _create_ma_breadth_chart(df: pl.DataFrame) -> None:
     fig = go.Figure()
 
     # Add middle zone
-    fig.add_hrect(
-        y0=40, y1=60, fillcolor=_rgba(COLORS["warning"], 0.08), layer="below", line_width=0
-    )
+    fig.add_hrect(y0=40, y1=60, fillcolor=_rgba(color_warning(), 0.08), layer="below", line_width=0)
 
     fig.add_trace(
         go.Scatter(
@@ -953,18 +960,16 @@ def _create_ma_breadth_chart(df: pl.DataFrame) -> None:
             y=df_sorted.get_column("pct_above_ma20").to_list(),
             mode="lines+markers",
             name="Above MA20",
-            line=dict(color=COLORS["primary"], width=2.5, shape="spline"),
-            marker=dict(
-                size=5, color=COLORS["primary"], line=dict(width=1, color=THEME["surface"])
-            ),
+            line=dict(color=color_primary(), width=2.5, shape="spline"),
+            marker=dict(size=5, color=color_primary(), line=dict(width=1, color=theme_surface())),
         )
     )
-    fig.add_hline(y=50, line_dash="dot", line_color=THEME["text_muted"], opacity=0.6)
+    fig.add_hline(y=50, line_dash="dot", line_color=theme_text_muted(), opacity=0.6)
     fig.add_hline(
-        y=65, line_dash="dash", line_color=COLORS["success"], opacity=0.5, annotation_text="Strong"
+        y=65, line_dash="dash", line_color=color_success(), opacity=0.5, annotation_text="Strong"
     )
     fig.add_hline(
-        y=35, line_dash="dash", line_color=COLORS["error"], opacity=0.5, annotation_text="Weak"
+        y=35, line_dash="dash", line_color=color_error(), opacity=0.5, annotation_text="Weak"
     )
     fig.update_layout(**_create_chart_layout("MA20 Breadth", height=240), yaxis_range=[0, 100])
     ui.plotly(fig).classes("w-full rounded-lg overflow-hidden")

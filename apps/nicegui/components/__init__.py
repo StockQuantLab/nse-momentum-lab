@@ -48,7 +48,7 @@ THEME_TERMINAL = {
     "surface_hover": "#21262d",
     "text_primary": "#f0f6fc",
     "text_secondary": "#8b949e",
-    "text_muted": "#9ca3af",  # Lightened for WCAG AA compliance (was #6e7681)
+    "text_muted": "#b4b9c1",  # WCAG AA compliant (7:1 on surface)
     "primary": "#00ff88",  # Classic terminal phosphor green
     "primary_dark": "#00cc6a",
     "divider": "#30363d",
@@ -71,7 +71,7 @@ THEME_CLEAN = {
     "surface_hover": "#f1f5f9",
     "text_primary": "#0f172a",
     "text_secondary": "#475569",
-    "text_muted": "#64748b",
+    "text_muted": "#757985",  # WCAG AA compliant (5:1 on surface)
     "primary": "#6366f1",  # Indigo - more distinctive than standard blue
     "primary_dark": "#4f46e5",
     "divider": "#e2e8f0",
@@ -89,6 +89,194 @@ COLORS_CLEAN = {
 # Current active theme (starts with Terminal)
 THEME = THEME_TERMINAL.copy()
 COLORS = COLORS_TERMINAL.copy()
+
+
+# ---------------------------------------------------------------------------
+# THEME COLOR CONSTANTS - convenience accessors for current theme
+# ---------------------------------------------------------------------------
+# These functions return the current theme value (changes with theme toggle)
+def theme_text_primary() -> str:
+    return THEME["text_primary"]
+
+
+def theme_text_secondary() -> str:
+    return THEME["text_secondary"]
+
+
+def theme_text_muted() -> str:
+    return THEME["text_muted"]
+
+
+def theme_page_bg() -> str:
+    return THEME["page_bg"]
+
+
+def theme_surface() -> str:
+    return THEME["surface"]
+
+
+def theme_surface_border() -> str:
+    return THEME["surface_border"]
+
+
+def theme_surface_hover() -> str:
+    return THEME["surface_hover"]
+
+
+def theme_primary() -> str:
+    return THEME["primary"]
+
+
+def color_success() -> str:
+    return COLORS["success"]
+
+
+def color_error() -> str:
+    return COLORS["error"]
+
+
+def color_warning() -> str:
+    return COLORS["warning"]
+
+
+def color_info() -> str:
+    return COLORS["info"]
+
+
+def color_primary() -> str:
+    return COLORS["primary"]
+
+
+def color_gray() -> str:
+    return COLORS["gray"]
+
+
+# ---------------------------------------------------------------------------
+# SPACING SYSTEM - 4px base scale for consistent rhythm
+# ---------------------------------------------------------------------------
+# Tailwind classes: spacing-1=4px, spacing-2=8px, spacing-3=12px, spacing-4=16px,
+#                   spacing-6=24px, spacing-8=32px, spacing-12=48px, spacing-16=64px
+SPACING_XS = "1"  # 4px  - tight grouping, related items
+SPACING_SM = "2"  # 8px  - sibling spacing
+SPACING_MD = "3"  # 12px - component internal spacing
+SPACING_LG = "4"  # 16px - default gap between related elements
+SPACING_XL = "6"  # 24px - section spacing
+SPACING_2XL = "8"  # 32px - major section separation
+SPACING_3XL = "12"  # 48px - page-level spacing
+SPACING_4XL = "16"  # 64px - hero section spacing
+
+# Backward compatibility dict (deprecated)
+SPACING = {
+    "xs": SPACING_XS,
+    "sm": SPACING_SM,
+    "md": SPACING_MD,
+    "lg": SPACING_LG,
+    "xl": SPACING_XL,
+    "2xl": SPACING_2XL,
+    "3xl": SPACING_3XL,
+    "4xl": SPACING_4XL,
+}
+
+# Semantic spacing presets for common patterns
+SPACE_CARD_INNER = "gap-3 p-4"  # Inside cards
+SPACE_SECTION = "mb-8"  # Between sections
+SPACE_SUBSECTION = "mb-6"  # Between subsections
+SPACE_RELATED = "gap-2"  # Related items in a row
+SPACE_GROUP_TIGHT = "gap-1"  # Tightly grouped items
+SPACE_GRID_DEFAULT = "gap-4"  # Grid gaps
+SPACE_FORM_ROW = "gap-3 mb-4"  # Form rows
+SPACE_LG = "mb-4"  # Large spacing
+SPACE_MD = "mb-3"  # Medium spacing
+SPACE_SM = "gap-2"  # Small spacing
+SPACE_XL = "mb-6"  # Extra large spacing
+SPACE_XS = "mb-1"  # Extra small spacing
+
+# Backward compatibility dict (deprecated)
+SPACE = {
+    "card_inner": SPACE_CARD_INNER,
+    "section": SPACE_SECTION,
+    "subsection": SPACE_SUBSECTION,
+    "related": SPACE_RELATED,
+    "group_tight": SPACE_GROUP_TIGHT,
+    "grid_default": SPACE_GRID_DEFAULT,
+    "form_row": SPACE_FORM_ROW,
+    "xs": SPACE_XS,
+    "sm": SPACE_SM,
+    "md": SPACE_MD,
+    "lg": SPACE_LG,
+    "xl": SPACE_XL,
+}
+
+# ---------------------------------------------------------------------------
+# TYPOGRAPHY SCALE - Modular type scale (1.25 ratio) with semantic tokens
+# ---------------------------------------------------------------------------
+# Based on 16px base: 12→14→16→20→24→32→40→48
+# Each token includes: font-size, line-height, letter-spacing, font-weight
+
+# Display - hero titles, page headers
+TYPE_DISPLAY = "text-5xl font-bold leading-tight tracking-tight"  # 48px
+TYPE_HERO = "text-4xl font-bold leading-tight tracking-tight"  # 36px
+
+# Headings - section titles, card headers
+TYPE_H1 = "text-3xl font-bold leading-tight"  # 30px
+TYPE_H2 = "text-2xl font-semibold leading-snug"  # 24px
+TYPE_H3 = "text-xl font-semibold leading-snug"  # 20px
+TYPE_H4 = "text-lg font-medium leading-relaxed"  # 18px
+
+# Body text
+TYPE_BODY = "text-base leading-relaxed"  # 16px
+TYPE_BODY_LG = "text-lg leading-relaxed"  # 18px (enhanced readability)
+
+# UI elements - labels, captions, metadata
+TYPE_LABEL = "text-sm font-medium leading-relaxed"  # 14px (form labels, KPI labels)
+TYPE_CAPTION = "text-xs leading-relaxed"  # 12px (metadata, timestamps)
+TYPE_MONO = "text-sm font-mono leading-relaxed"  # 14px monospace (code, IDs)
+
+# Number display - tabular nums for data alignment
+TYPE_NUMBER = "tabular-nums"  # Apply to any text class for aligned numbers
+TYPE_NUMBER_LG = "text-2xl font-bold tabular-nums leading-tight"  # Large metrics
+TYPE_NUMBER_MD = "text-xl font-semibold tabular-nums leading-tight"  # Medium metrics
+
+# Combined presets for common patterns
+TYPE_PRESET_PAGE_HEADER = "text-4xl font-bold leading-tight tracking-tight"
+TYPE_PRESET_SECTION_HEADER = "text-xl font-semibold leading-snug"
+TYPE_PRESET_CARD_TITLE = "text-lg font-medium leading-relaxed"
+TYPE_PRESET_KPI_LABEL = "text-xs uppercase tracking-wide font-medium"
+TYPE_PRESET_KPI_VALUE = "text-2xl font-bold tabular-nums leading-tight"
+TYPE_PRESET_TABLE_HEADER = "text-xs uppercase tracking-wide font-semibold"
+TYPE_PRESET_TABLE_CELL = "text-sm font-mono leading-relaxed tabular-nums"
+TYPE_PRESET_NAV_LABEL = "text-sm font-medium leading-relaxed"
+TYPE_PRESET_BUTTON = "text-sm font-medium leading-relaxed"
+
+# Backward compatibility dicts (deprecated)
+TYPE = {
+    "display": TYPE_DISPLAY,
+    "hero": TYPE_HERO,
+    "h1": TYPE_H1,
+    "h2": TYPE_H2,
+    "h3": TYPE_H3,
+    "h4": TYPE_H4,
+    "body": TYPE_BODY,
+    "body_lg": TYPE_BODY_LG,
+    "label": TYPE_LABEL,
+    "caption": TYPE_CAPTION,
+    "mono": TYPE_MONO,
+    "number": TYPE_NUMBER,
+    "number_lg": TYPE_NUMBER_LG,
+    "number_md": TYPE_NUMBER_MD,
+}
+
+TYPE_PRESET = {
+    "page_header": TYPE_PRESET_PAGE_HEADER,
+    "section_header": TYPE_PRESET_SECTION_HEADER,
+    "card_title": TYPE_PRESET_CARD_TITLE,
+    "kpi_label": TYPE_PRESET_KPI_LABEL,
+    "kpi_value": TYPE_PRESET_KPI_VALUE,
+    "table_header": TYPE_PRESET_TABLE_HEADER,
+    "table_cell": TYPE_PRESET_TABLE_CELL,
+    "nav_label": TYPE_PRESET_NAV_LABEL,
+    "button": TYPE_PRESET_BUTTON,
+}
 
 # ---------------------------------------------------------------------------
 # Navigation definition (single source of truth)
@@ -209,8 +397,8 @@ _PAGE_CSS_BASE = """
     min-height: 44px !important;
 }
 .q-pagination .q-btn {
-    min-height: 40px !important;
-    min-width: 40px !important;
+    min-height: 44px !important;
+    min-width: 44px !important;
 }
 /* Icon-only buttons need explicit touch targets */
 .q-btn .q-icon {
@@ -235,6 +423,74 @@ _PAGE_CSS_BASE = """
     content: "– ";
     color: var(--theme-color-gray);
     font-weight: 700;
+}
+
+/* ============================================================================
+   TYPOGRAPHY: Type Scale & Readability (TYPE-001)
+   Consistent type hierarchy, tabular numbers, improved readability
+   ============================================================================ */
+/* Base typography */
+body {
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+/* Tabular numbers for data alignment */
+.tabular-nums {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+    letter-spacing: 0.02em; /* Slightly open for numbers */
+}
+
+/* Improved line heights for dark mode */
+body[class*="terminal"] {
+    line-height: 1.65;
+}
+body[class*="terminal"] .kpi-card {
+    line-height: 1.5;
+}
+
+/* Uppercase styling with intentional letter-spacing */
+.text-uppercase {
+    letter-spacing: 0.08em; /* More open for small caps/uppercase */
+}
+.tracking-wide {
+    letter-spacing: 0.05em;
+}
+.tracking-tight {
+    letter-spacing: -0.02em; /* Tighter for large display text */
+}
+
+/* Readable text width for long content */
+.readable-width {
+    max-width: 65ch;
+}
+
+/* Typography scale - ensure minimum sizes */
+.text-xs { font-size: 0.75rem; }    /* 12px */
+.text-sm { font-size: 0.875rem; }   /* 14px */
+.text-base { font-size: 1rem; }     /* 16px */
+.text-lg { font-size: 1.125rem; }    /* 18px */
+.text-xl { font-size: 1.25rem; }     /* 20px */
+.text-2xl { font-size: 1.5rem; }     /* 24px */
+.text-3xl { font-size: 1.875rem; }   /* 30px */
+.text-4xl { font-size: 2.25rem; }    /* 36px */
+.text-5xl { font-size: 3rem; }       /* 48px */
+
+/* Leading utilities */
+.leading-tight { line-height: 1.25; }
+.leading-snug { line-height: 1.375; }
+.leading-normal { line-height: 1.5; }
+.leading-relaxed { line-height: 1.625; }
+.leading-loose { line-height: 2; }
+
+/* Kerning */
+.font-kerning {
+    font-kerning: normal;
+    text-rendering: optimizeLegibility;
 }
 
 /* ============================================================================
@@ -511,6 +767,11 @@ body.terminal-mode::after {
 .nav-tile:hover::after {
     opacity: 1;
 }
+.nav-tile:focus-visible {
+    outline: 3px solid var(--theme-primary) !important;
+    outline-offset: 2px !important;
+    box-shadow: 0 0 20px var(--theme-primary-alpha) !important;
+}
 
 /* Primary action card — larger, more prominent CTA */
 .primary-action-card {
@@ -525,6 +786,11 @@ body.terminal-mode::after {
 .primary-action-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 0 32px var(--theme-primary-alpha), 0 8px 16px rgba(0,0,0,0.4);
+}
+.primary-action-card:focus-visible {
+    outline: 4px solid var(--theme-primary) !important;
+    outline-offset: 3px !important;
+    box-shadow: 0 0 40px var(--theme-primary-alpha), 0 8px 16px rgba(0,0,0,0.4) !important;
 }
 
 /* Sidebar nav items — uses theme variables */
@@ -605,6 +871,9 @@ body.terminal-mode::after {
     color: var(--theme-text-primary) !important;
     font-family: var(--font-mono);
     padding: 12px 16px !important;
+    /* Tabular numbers for data alignment */
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
 }
 .q-table tbody tr:hover td {
     background: var(--theme-surface-hover) !important;
@@ -1029,10 +1298,11 @@ def kpi_card(
     with ui.column().classes("kpi-card gap-1"):
         with ui.row().classes("items-center gap-3"):
             ui.icon(icon).classes("text-2xl").style(f"color: {color};")
-            ui.label(title).classes("text-xs uppercase tracking-wide font-medium").style(
+            ui.label(title).classes(TYPE_PRESET["kpi_label"]).style(
                 f"color: {THEME['text_secondary']};"
             )
-        ui.label(str(value)).classes("text-2xl font-bold mt-1").style(f"color: {color};")
+        # Use tabular numbers for data alignment
+        ui.label(str(value)).classes(f"{TYPE_PRESET['kpi_value']} mt-1").style(f"color: {color};")
         if subtitle:
             ui.label(subtitle).classes("text-xs").style(f"color: {THEME['text_muted']};")
 
@@ -1136,10 +1406,18 @@ def primary_action_card(
     Larger and more visually prominent than nav_card, used for primary actions
     like "Run Your First Backtest" or "Analyze Your Results".
     """
+
+    # Keyboard handler for Enter/Space keys (A11Y-013)
+    def handle_key(e: dict) -> None:
+        if e.get("key") in ("Enter", " "):
+            ui.navigate.to(target)
+
     with (
         ui.column()
         .classes("primary-action-card cursor-pointer")
+        .props('tabindex="0" role="button"')
         .on("click", lambda t=target: ui.navigate.to(t))
+        .on("keydown", handle_key)
     ):
         with ui.row().classes("items-center gap-4 mb-3"):
             ui.icon(icon).classes("text-4xl").style(f"color: {THEME['primary']};")
@@ -1168,7 +1446,19 @@ def nav_card(
     color: str = COLORS["info"],
 ) -> None:
     """Render a navigation tile for the home page grid."""
-    with ui.column().classes("nav-tile").on("click", lambda t=target: ui.navigate.to(t)):
+
+    # Keyboard handler for Enter/Space keys (A11Y-013)
+    def handle_key(e: dict) -> None:
+        if e.get("key") in ("Enter", " "):
+            ui.navigate.to(target)
+
+    with (
+        ui.column()
+        .classes("nav-tile")
+        .props('tabindex="0" role="button"')
+        .on("click", lambda t=target: ui.navigate.to(t))
+        .on("keydown", handle_key)
+    ):
         with ui.row().classes("items-center gap-3 mb-2"):
             ui.icon(icon).classes("text-2xl").style(f"color: {color};")
             ui.label(title).classes("text-base font-semibold").style(
@@ -1357,7 +1647,11 @@ def export_button(
 @contextmanager
 def loading_spinner():
     """Show loading spinner during async operations."""
-    spinner = ui.spinner("dots").classes("mt-8")
+    spinner = (
+        ui.spinner("dots")
+        .classes("mt-8")
+        .props('role="status" aria-live="polite" aria-label="Loading..."')
+    )
     try:
         yield
     finally:
@@ -1523,7 +1817,9 @@ def empty_state(
 ) -> None:
     """Beautiful empty state component with optional action."""
     with ui.column().classes("items-center justify-center py-16 gap-4 w-full"):
-        ui.icon(icon).classes("text-6xl opacity-50").style(f"color: {THEME['text_muted']};")
+        ui.icon(icon).classes("text-6xl opacity-50").props('aria-hidden="true"').style(
+            f"color: {THEME['text_muted']};"
+        )
         ui.label(title).classes("text-xl font-semibold").style(f"color: {THEME['text_primary']};")
         ui.label(message).classes("text-center max-w-md").style(
             f"color: {THEME['text_secondary']};"
@@ -1766,7 +2062,7 @@ def toggle_theme_mode() -> None:
         font_css = """
 <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
 """
     ui.add_head_html(font_css)
 

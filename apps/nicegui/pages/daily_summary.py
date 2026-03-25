@@ -18,7 +18,21 @@ from datetime import date
 from nicegui import ui
 
 from apps.nicegui.state import get_db_status
-from apps.nicegui.components import page_layout, kpi_grid, divider, info_box, COLORS, THEME
+from apps.nicegui.components import (
+    color_gray,
+    color_info,
+    color_success,
+    color_warning,
+    divider,
+    info_box,
+    kpi_grid,
+    page_layout,
+    SPACE_MD,
+    SPACE_XL,
+    theme_primary,
+    theme_text_primary,
+    theme_text_secondary,
+)
 
 
 def daily_summary_page() -> None:
@@ -27,8 +41,8 @@ def daily_summary_page() -> None:
         status = get_db_status()
         today = date.today().isoformat()
 
-        ui.label(f"Market Summary for {today}").classes("text-xl font-semibold mb-4").style(
-            f"color: {THEME['text_primary']};"
+        ui.label(f"Market Summary for {today}").classes(f"text-xl font-semibold {SPACE_XL}").style(
+            f"color: {theme_text_primary()};"
         )
 
         kpi_grid(
@@ -38,36 +52,36 @@ def daily_summary_page() -> None:
                     value="Current",
                     subtitle="Latest data available",
                     icon="check_circle",
-                    color=COLORS["success"],
+                    color=color_success(),
                 ),
                 dict(
                     title="Universe Size",
                     value=f"{int(status.get('symbols', 0)):,}",
                     subtitle="Active symbols",
                     icon="bar_chart",
-                    color=COLORS["info"],
+                    color=color_info(),
                 ),
                 dict(
                     title="Total Candles",
                     value=f"{int(status.get('total_candles', 0)):,}",
                     subtitle="In database",
                     icon="candlestick_chart",
-                    color=COLORS["warning"],
+                    color=color_warning(),
                 ),
                 dict(
                     title="Date Range",
                     value=status.get("date_range", "-"),
                     subtitle="Coverage period",
                     icon="date_range",
-                    color=COLORS["gray"],
+                    color=color_gray(),
                 ),
             ]
         )
 
         divider()
 
-        ui.label("Market Health").classes("text-lg font-semibold mb-4").style(
-            f"color: {THEME['text_primary']};"
+        ui.label("Market Health").classes(f"text-lg font-semibold {SPACE_XL}").style(
+            f"color: {theme_text_primary()};"
         )
 
         indicators = [
@@ -77,16 +91,16 @@ def daily_summary_page() -> None:
             ("Top Loser", "Scan required", "arrow_downward"),
         ]
 
-        with ui.column().classes("gap-3"):
+        with ui.column().classes(f"{SPACE_MD}"):
             for title, value, icon in indicators:
-                with ui.row().classes("kpi-card items-center gap-3 w-full"):
-                    ui.icon(icon).classes("text-xl").style(f"color: {THEME['primary']};")
+                with ui.row().classes(f"kpi-card items-center {SPACE_MD} w-full"):
+                    ui.icon(icon).classes("text-xl").style(f"color: {theme_primary()};")
                     with ui.column().classes("gap-0"):
                         ui.label(title).classes("text-sm").style(
-                            f"color: {THEME['text_secondary']};"
+                            f"color: {theme_text_secondary()};"
                         )
                         ui.label(value).classes("text-lg font-semibold").style(
-                            f"color: {THEME['text_primary']};"
+                            f"color: {theme_text_primary()};"
                         )
 
         divider()

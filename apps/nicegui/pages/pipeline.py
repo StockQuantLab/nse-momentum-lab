@@ -16,7 +16,18 @@ if str(_apps_root) not in sys.path:
 
 from nicegui import ui
 
-from apps.nicegui.components import page_layout, divider, THEME, empty_state, COLORS, kpi_grid
+from apps.nicegui.components import (
+    page_layout,
+    divider,
+    empty_state,
+    kpi_grid,
+    SPACE_LG,
+    theme_text_primary,
+    color_success,
+    color_info,
+    color_warning,
+    color_primary,
+)
 
 
 def pipeline_page() -> None:
@@ -35,15 +46,15 @@ def pipeline_page() -> None:
         divider()
 
         # Show job types as informational cards
-        ui.label("Pipeline Jobs").classes("text-lg font-semibold mb-4").style(
-            f"color: {THEME['text_primary']};"
+        ui.label("Pipeline Jobs").classes(f"text-lg font-semibold {SPACE_LG}").style(
+            f"color: {theme_text_primary()};"
         )
 
         job_types = [
-            ("Ingestion", "Load OHLCV data from source", "download", COLORS["success"]),
-            ("Rollup", "Compute features and indicators", "functions", COLORS["info"]),
-            ("Scan", "Generate momentum signals", "radar", COLORS["warning"]),
-            ("Backtest", "Run strategy backtests", "science", COLORS["primary"]),
+            ("Ingestion", "Load OHLCV data from source", "download", color_success()),
+            ("Rollup", "Compute features and indicators", "functions", color_info()),
+            ("Scan", "Generate momentum signals", "radar", color_warning()),
+            ("Backtest", "Run strategy backtests", "science", color_primary()),
         ]
 
         kpi_grid(

@@ -22,12 +22,21 @@ from apps.nicegui.components import (
     page_layout,
     divider,
     apply_chart_theme,
-    COLORS,
-    THEME,
     empty_state,
     page_header,
     loading_spinner,
     paginated_table,
+    SPACE_SECTION,
+    SPACE_GRID_DEFAULT,
+    SPACE_SM,
+    SPACE_XL,
+    theme_text_secondary,
+    theme_text_muted,
+    theme_text_primary,
+    color_success,
+    color_error,
+    color_info,
+    color_warning,
 )
 
 
@@ -96,12 +105,12 @@ async def compare_page() -> None:
             "Select two experiments to compare side-by-side",
         )
 
-        with ui.row().classes("kpi-card p-4 mb-6 w-full gap-4"):
+        with ui.row().classes(f"kpi-card p-4 {SPACE_SECTION} w-full {SPACE_GRID_DEFAULT}"):
             with ui.column().classes("flex-1"):
                 exp1_label_id = "exp1-label"
                 ui.label("Experiment A").props(f'id="{exp1_label_id}"').classes(
-                    "text-sm font-medium mb-2"
-                ).style(f"color: {THEME['text_secondary']};")
+                    f"text-sm font-medium {SPACE_SM}"
+                ).style(f"color: {theme_text_secondary()};")
 
                 def on_exp1_change(e):
                     selected["exp1"] = e.value
@@ -121,8 +130,8 @@ async def compare_page() -> None:
             with ui.column().classes("flex-1"):
                 exp2_label_id = "exp2-label"
                 ui.label("Experiment B").props(f'id="{exp2_label_id}"').classes(
-                    "text-sm font-medium mb-2"
-                ).style(f"color: {THEME['text_secondary']};")
+                    f"text-sm font-medium {SPACE_SM}"
+                ).style(f"color: {theme_text_secondary()};")
 
                 def on_exp2_change(e):
                     selected["exp2"] = e.value
@@ -140,7 +149,7 @@ async def compare_page() -> None:
                 )
 
         # Accessibility: Live region for dynamic comparison updates
-        with ui.row().props('aria-live="polite" aria-atomic="true').classes("sr-only"):
+        with ui.row().props('aria-live="polite" aria-atomic="true"').classes("sr-only"):
             ui.label("Comparison results will update here")
 
         @ui.refreshable
@@ -153,7 +162,7 @@ async def compare_page() -> None:
             if not exp1_label or not exp2_label:
                 ui.label("Select two experiments above to compare them.").classes(
                     "text-center py-8"
-                ).style(f"color: {THEME['text_muted']};")
+                ).style(f"color: {theme_text_muted()};")
                 return
 
             exp1_id = exp_options.get(exp1_label)
@@ -162,14 +171,14 @@ async def compare_page() -> None:
             if exp1_id == exp2_id:
                 ui.label("Please select different experiments to compare.").classes(
                     "text-center py-8"
-                ).style(f"color: {COLORS['warning']};")
+                ).style(f"color: {color_warning()};")
                 return
 
             exp1 = get_experiment(exp1_id)
             exp2 = get_experiment(exp2_id)
 
             if not exp1 or not exp2:
-                ui.label("Could not load experiment details.").style(f"color: {COLORS['error']};")
+                ui.label("Could not load experiment details.").style(f"color: {color_error()};")
                 return
 
             metrics_to_show = [
@@ -214,8 +223,8 @@ async def compare_page() -> None:
 
             divider()
 
-            ui.label("Visual Comparison").classes("text-xl font-semibold mb-4").style(
-                f"color: {THEME['text_primary']};"
+            ui.label("Visual Comparison").classes(f"text-xl font-semibold {SPACE_XL}").style(
+                f"color: {theme_text_primary()};"
             )
 
             fig = go.Figure()
@@ -227,7 +236,7 @@ async def compare_page() -> None:
                         name=label,
                         x=["Experiment A", "Experiment B"],
                         y=values,
-                        marker_color=[COLORS["info"], COLORS["success"]][i % 2],
+                        marker_color=[color_info(), color_success()][i % 2],
                     )
                 )
 

@@ -19,14 +19,28 @@ if str(_apps_root) not in sys.path:
 from nicegui import ui
 
 from apps.nicegui.components import (
-    COLORS,
-    THEME,
+    color_error,
+    color_info,
+    color_primary,
+    color_success,
+    color_warning,
     divider,
     empty_state,
     info_box,
     kpi_grid,
     page_layout,
     paginated_table,
+    SPACE_GRID_DEFAULT,
+    SPACE_LG,
+    SPACE_MD,
+    SPACE_SECTION,
+    SPACE_SM,
+    SPACE_XS,
+    theme_surface_border,
+    theme_surface_hover,
+    theme_text_muted,
+    theme_text_primary,
+    theme_text_secondary,
 )
 from apps.nicegui.pages.paper_ledger import (
     _decision_reason_label,
@@ -119,17 +133,17 @@ async def walk_forward_page() -> None:
     """Render the dedicated walk-forward validation page."""
 
     with page_layout("Walk Forward", "view_week"):
-        ui.label("Walk-Forward Validation").classes("text-3xl font-bold mb-1").style(
-            f"color: {THEME['text_primary']};"
+        ui.label("Walk-Forward Validation").classes(f"text-3xl font-bold {SPACE_XS}").style(
+            f"color: {theme_text_primary()};"
         )
         ui.label(
             "Dedicated history for rolling validation runs. This page keeps promotion-gate "
             "review separate from replay/live paper trading."
-        ).classes("text-lg mb-3").style(f"color: {THEME['text_secondary']};")
+        ).classes(f"text-lg {SPACE_MD}").style(f"color: {theme_text_secondary()};")
         ui.label(
             "Use this view to inspect fold summaries, lineage, and rerun commands after cleaning "
             "stale validation sessions."
-        ).classes("text-sm mb-4").style(f"color: {THEME['text_muted']};")
+        ).classes(f"text-sm {SPACE_LG}").style(f"color: {theme_text_muted()};")
 
         divider()
 
@@ -148,22 +162,22 @@ async def walk_forward_page() -> None:
             if str(session.get("mode") or "").strip().lower() == "walk_forward"
         ]
 
-        commands_card = ui.column().classes("kpi-card p-5 mb-6")
+        commands_card = ui.column().classes(f"kpi-card p-5 {SPACE_SECTION}")
         with commands_card:
-            ui.label("Validation Commands").classes("text-lg font-semibold mb-2").style(
-                f"color: {THEME['text_primary']};"
+            ui.label("Validation Commands").classes(f"text-lg font-semibold {SPACE_SM}").style(
+                f"color: {theme_text_primary()};"
             )
             ui.label(
                 "Run a clean walk-forward cycle from the CLI, then come back here to review the "
                 "persisted fold rows and promotion decision."
-            ).classes("text-sm mb-3").style(f"color: {THEME['text_secondary']};")
+            ).classes(f"text-sm {SPACE_MD}").style(f"color: {theme_text_secondary()};")
             for command in _walk_forward_command_lines({}):
-                with ui.row().classes("w-full items-center gap-2 mb-2"):
-                    ui.label("$").classes("font-mono").style(f"color: {COLORS['success']};")
+                with ui.row().classes(f"w-full items-center {SPACE_SM} {SPACE_XS}"):
+                    ui.label("$").classes("font-mono").style(f"color: {color_success()};")
                     ui.label(command).classes(
                         "flex-grow font-mono text-sm px-3 py-2 rounded"
                     ).style(
-                        f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
+                        f"background: {theme_surface_hover()}; border: 1px solid {theme_surface_border()}; color: {theme_text_primary()}; border-radius: 6px;"
                     )
 
         if not walk_forward_sessions:
@@ -221,35 +235,35 @@ async def walk_forward_page() -> None:
                 decision_reason = _decision_reason_label(wf_decision.get("reason"))
                 session_color = _status_color(session.get("status"))
                 decision_color = (
-                    COLORS["success"]
+                    color_success()
                     if str(wf_decision.get("status") or "").upper() == "PASS"
-                    else COLORS["warning"]
+                    else color_warning()
                 )
 
                 commands_card.clear()
                 with commands_card:
-                    ui.label("Validation Commands").classes("text-lg font-semibold mb-2").style(
-                        f"color: {THEME['text_primary']};"
-                    )
+                    ui.label("Validation Commands").classes(
+                        f"text-lg font-semibold {SPACE_SM}"
+                    ).style(f"color: {theme_text_primary()};")
                     ui.label(
                         "Run the selected validation protocol again from the CLI, then return here "
                         "to review the persisted fold rows and promotion decision."
-                    ).classes("text-sm mb-3").style(f"color: {THEME['text_secondary']};")
+                    ).classes(f"text-sm {SPACE_MD}").style(f"color: {theme_text_secondary()};")
                     for command in _walk_forward_command_lines(session):
-                        with ui.row().classes("w-full items-center gap-2 mb-2"):
-                            ui.label("$").classes("font-mono").style(f"color: {COLORS['success']};")
+                        with ui.row().classes(f"w-full items-center {SPACE_SM} {SPACE_XS}"):
+                            ui.label("$").classes("font-mono").style(f"color: {color_success()};")
                             ui.label(command).classes(
                                 "flex-grow font-mono text-sm px-3 py-2 rounded"
                             ).style(
-                                f"background: {THEME['surface_hover']}; border: 1px solid {THEME['surface_border']}; color: {THEME['text_primary']}; border-radius: 6px;"
+                                f"background: {theme_surface_hover()}; border: 1px solid {theme_surface_border()}; color: {theme_text_primary()}; border-radius: 6px;"
                             )
 
-                ui.label("What This Validation Means").classes("text-lg font-semibold mb-2").style(
-                    f"color: {THEME['text_primary']};"
-                )
+                ui.label("What This Validation Means").classes(
+                    f"text-lg font-semibold {SPACE_SM}"
+                ).style(f"color: {theme_text_primary()};")
                 ui.label(_format_walk_forward_summary_text(session)).classes(
-                    "leading-6 mb-4"
-                ).style(f"color: {THEME['text_secondary']};")
+                    f"leading-6 {SPACE_LG}"
+                ).style(f"color: {theme_text_secondary()};")
 
                 kpi_grid(
                     [
@@ -272,42 +286,42 @@ async def walk_forward_page() -> None:
                             value=int(wf_summary.get("folds_total", 0) or 0),
                             subtitle=f"Completed: {int(wf_summary.get('folds_completed', 0) or 0)}",
                             icon="view_week",
-                            color=COLORS["info"],
+                            color=color_info(),
                         ),
                         dict(
                             title="Avg Return",
                             value=f"{_fmt_float(wf_summary.get('avg_return_pct'))}%",
                             subtitle=f"Profitable: {int(wf_summary.get('folds_profitable', 0) or 0)}",
                             icon="trending_up",
-                            color=COLORS["success"]
+                            color=color_success()
                             if float(wf_summary.get("avg_return_pct") or 0) >= 0
-                            else COLORS["error"],
+                            else color_error(),
                         ),
                         dict(
                             title="Worst Drawdown",
                             value=f"{_fmt_float(wf_summary.get('worst_drawdown_pct'))}%",
                             subtitle="Fold maximum DD",
                             icon="south_east",
-                            color=COLORS["warning"],
+                            color=color_warning(),
                         ),
                         dict(
                             title="Total Trades",
                             value=int(wf_summary.get("total_trades", 0) or 0),
                             subtitle=f"Window pairs: {len(walk_forward.get('test_ranges') or [])}",
                             icon="swap_horiz",
-                            color=COLORS["primary"],
+                            color=color_primary(),
                         ),
                     ],
                     columns=6,
                 )
 
                 with ui.expansion("Validation Details", icon="info").classes(
-                    "kpi-card p-5 mb-6 w-full"
+                    f"kpi-card p-5 {SPACE_SECTION} w-full"
                 ):
-                    with ui.grid(columns=2).classes("w-full gap-4"):
+                    with ui.grid(columns=2).classes(f"w-full {SPACE_GRID_DEFAULT}"):
                         with ui.column().classes("h-full"):
-                            ui.label("Session").classes("text-lg font-semibold mb-3").style(
-                                f"color: {THEME['text_primary']};"
+                            ui.label("Session").classes(f"text-lg font-semibold {SPACE_MD}").style(
+                                f"color: {theme_text_primary()};"
                             )
                             requested_range = walk_forward.get("requested_date_range") or {}
                             lineage = walk_forward.get("lineage") or {}
@@ -337,16 +351,18 @@ async def walk_forward_page() -> None:
                                     ", ".join((lineage.get("code_hashes") or [])[:3]) or "-",
                                 ),
                             ]:
-                                with ui.row().classes("justify-between w-full gap-4"):
-                                    ui.label(label).style(f"color: {THEME['text_secondary']};")
+                                with ui.row().classes(
+                                    f"justify-between w-full {SPACE_GRID_DEFAULT}"
+                                ):
+                                    ui.label(label).style(f"color: {theme_text_secondary()};")
                                     ui.label(str(value or "-")).classes("font-mono").style(
-                                        f"color: {THEME['text_primary']};"
+                                        f"color: {theme_text_primary()};"
                                     )
 
                         with ui.column().classes("h-full"):
                             ui.label("Validation Summary").classes(
-                                "text-lg font-semibold mb-3"
-                            ).style(f"color: {THEME['text_primary']};")
+                                f"text-lg font-semibold {SPACE_MD}"
+                            ).style(f"color: {theme_text_primary()};")
                             for label, value in [
                                 ("Average Return", _fmt_float(wf_summary.get("avg_return_pct"))),
                                 ("Median Return", _fmt_float(wf_summary.get("median_return_pct"))),
@@ -363,14 +379,16 @@ async def walk_forward_page() -> None:
                                 ),
                                 ("Total Trades", wf_summary.get("total_trades")),
                             ]:
-                                with ui.row().classes("justify-between w-full gap-4"):
-                                    ui.label(label).style(f"color: {THEME['text_secondary']};")
+                                with ui.row().classes(
+                                    f"justify-between w-full {SPACE_GRID_DEFAULT}"
+                                ):
+                                    ui.label(label).style(f"color: {theme_text_secondary()};")
                                     ui.label(str(value or "-")).classes("font-mono").style(
-                                        f"color: {THEME['text_primary']};"
+                                        f"color: {theme_text_primary()};"
                                     )
 
                 with ui.expansion("Validation Folds", icon="table_view").classes(
-                    "kpi-card p-5 mb-6 w-full"
+                    f"kpi-card p-5 {SPACE_SECTION} w-full"
                 ):
                     fold_rows = (
                         _walk_forward_rows_from_db(db_folds)
@@ -406,9 +424,9 @@ async def walk_forward_page() -> None:
                 if db_folds:
                     ui.label(f"Fold rows loaded from PostgreSQL: {len(db_folds)}").classes(
                         "text-xs mt-2"
-                    ).style(f"color: {THEME['text_muted']};")
+                    ).style(f"color: {theme_text_muted()};")
 
-        with ui.row().classes("items-center gap-3 mb-6 w-full"):
+        with ui.row().classes(f"items-center {SPACE_MD} {SPACE_SECTION} w-full"):
 
             async def handle_session_change(event) -> None:
                 current["label"] = str(event.value)
@@ -428,7 +446,7 @@ async def walk_forward_page() -> None:
             ).props("outline")
             ui.label(f"{len(walk_forward_sessions):,} validation session(s) available").classes(
                 "text-sm"
-            ).style(f"color: {THEME['text_muted']};")
+            ).style(f"color: {theme_text_muted()};")
 
         content = ui.column().classes("w-full")
         await render_session(current["session_id"])

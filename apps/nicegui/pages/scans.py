@@ -16,7 +16,7 @@ if str(_apps_root) not in sys.path:
 
 from nicegui import ui
 
-from apps.nicegui.components import page_layout, info_box, THEME, empty_state
+from apps.nicegui.components import page_layout, info_box, empty_state, theme_text_muted
 
 
 def scans_page() -> None:
@@ -36,5 +36,5 @@ def scans_page() -> None:
 
         with ui.column().classes("items-center mt-8"):
             ui.label("Direct DuckDB scan results coming soon.").classes("text-sm").style(
-                f"color: {THEME['text_muted']};"
+                f"color: {theme_text_muted()};"
             )

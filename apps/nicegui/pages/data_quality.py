@@ -17,7 +17,21 @@ if str(_apps_root) not in sys.path:
 from nicegui import ui
 
 from apps.nicegui.state import get_db_status
-from apps.nicegui.components import page_layout, kpi_grid, divider, COLORS, THEME
+from apps.nicegui.components import (
+    color_gray,
+    color_info,
+    color_success,
+    color_warning,
+    divider,
+    kpi_grid,
+    page_layout,
+    SPACE_SM,
+    SPACE_XL,
+    SPACE_XS,
+    theme_text_muted,
+    theme_text_primary,
+    theme_text_secondary,
+)
 
 
 def data_quality_page() -> None:
@@ -26,8 +40,8 @@ def data_quality_page() -> None:
         status = get_db_status()
 
         # Coverage summary
-        ui.label("Coverage Summary").classes("text-xl font-semibold mb-4").style(
-            f"color: {THEME['text_primary']};"
+        ui.label("Coverage Summary").classes(f"text-xl font-semibold {SPACE_XL}").style(
+            f"color: {theme_text_primary()};"
         )
 
         kpi_grid(
@@ -36,25 +50,25 @@ def data_quality_page() -> None:
                     title="Symbols",
                     value=f"{int(status.get('symbols', 0)):,}",
                     icon="show_chart",
-                    color=COLORS["info"],
+                    color=color_info(),
                 ),
                 dict(
                     title="Total Candles",
                     value=f"{int(status.get('total_candles', 0)):,}",
                     icon="candlestick_chart",
-                    color=COLORS["warning"],
+                    color=color_warning(),
                 ),
                 dict(
                     title="Date Range",
                     value=status.get("date_range", "-"),
                     icon="date_range",
-                    color=COLORS["gray"],
+                    color=color_gray(),
                 ),
                 dict(
                     title="Data Source",
                     value=status.get("data_source", "unknown").upper(),
                     icon="storage",
-                    color=COLORS["success"],
+                    color=color_success(),
                 ),
             ]
         )
@@ -62,21 +76,21 @@ def data_quality_page() -> None:
         divider()
 
         # Validation info
-        ui.label("Data Validation").classes("text-lg font-semibold mb-2").style(
-            f"color: {THEME['text_primary']};"
+        ui.label("Data Validation").classes(f"text-lg font-semibold {SPACE_SM}").style(
+            f"color: {theme_text_primary()};"
         )
 
         with ui.column().classes("kpi-card"):
-            ui.label("Dataset Information").classes("text-sm font-medium mb-2").style(
-                f"color: {THEME['text_secondary']};"
+            ui.label("Dataset Information").classes(f"text-sm font-medium {SPACE_SM}").style(
+                f"color: {theme_text_secondary()};"
             )
             if status.get("dataset_hash"):
                 ui.label(f"Dataset Hash: {status.get('dataset_hash')}").classes(
-                    "text-xs font-mono mb-1"
-                ).style(f"color: {THEME['text_muted']};")
+                    f"text-xs font-mono {SPACE_XS}"
+                ).style(f"color: {theme_text_muted()};")
             ui.label(
                 "All data is validated before backtesting. Use this page to verify data integrity."
-            ).classes("text-sm").style(f"color: {THEME['text_muted']};")
+            ).classes("text-sm").style(f"color: {theme_text_muted()};")
 
         divider()
 
@@ -87,4 +101,4 @@ def data_quality_page() -> None:
                 "Frequency: Daily candles",
                 "Adjustments: Corporate actions applied",
             ]:
-                ui.label(text).classes("mb-2").style(f"color: {THEME['text_secondary']};")
+                ui.label(text).classes(SPACE_SM).style(f"color: {theme_text_secondary()};")
