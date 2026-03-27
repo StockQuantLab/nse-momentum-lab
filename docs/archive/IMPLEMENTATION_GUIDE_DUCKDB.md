@@ -187,32 +187,23 @@ def close_market_db() -> None:
 
 ## Step 4: Build Features
 
-Create `scripts/build_features.py`:
+Use the current CLI instead:
 
-```python
-"""Build feature materialized tables in DuckDB."""
+```bash
+doppler run -- uv run nseml-build-features
+```
 
-from nse_momentum_lab.db.market_db import get_market_db
+For an exceptional full rebuild:
 
-
-def main():
-    db = get_market_db()
-    db.build_feat_daily_table(force=True)
-    print("\nStatus:")
-    status = db.get_status()
-    for key, value in status.items():
-        print(f"  {key}: {value}")
-
-
-if __name__ == "__main__":
-    main()
+```bash
+doppler run -- uv run nseml-build-features --force --allow-full-rebuild
 ```
 
 Add to `pyproject.toml`:
 
 ```toml
 [project.scripts]
-nseml-build-features = "scripts.build_features:main"
+nseml-build-features = "nse_momentum_lab.cli.build_features:main"
 ```
 
 Run:

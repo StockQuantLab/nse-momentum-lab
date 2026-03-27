@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 from nse_momentum_lab.db.market_db import get_backtest_db
@@ -14,6 +15,23 @@ from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
 from nse_momentum_lab.services.backtest.strategy_registry import list_strategies
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
+
+
+def _estimate_cost(params: BacktestParams) -> int:
+    """Estimate total years to run."""
+    if params.start_date and params.end_date:
+        return 1
+    return max(0, params.end_year - params.start_year + 1)
+
+
+def _confirm_large_run(years: int, threshold: int = 10) -> bool:
+    """Prompt user for confirmation if run is large."""
+    if years <= threshold:
+        return True
+    if not sys.stdin.isatty():
+        return False
+    response = input(f"Running {years} year(s). Continue? [y/N] ").strip().lower()
+    return response in ("y", "yes")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="List available strategies and exit",
     )
     parser.add_argument("--force", action="store_true", help="Re-run even if cached")
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip confirmation prompt for large runs (for CI/scripts)",
+    )
     parser.add_argument(
         "--snapshot",
         action="store_true",
@@ -209,6 +232,14 @@ def main() -> None:
         short_same_day_r_ladder_start_r=args.short_same_day_r_ladder_start_r,
         short_same_day_take_profit_pct=args.short_same_day_take_profit_pct,
     )
+
+    # CLI safeguard: estimate cost and confirm for large runs
+    estimated_years = _estimate_cost(params)
+    total_runs = estimated_years * params.universe_size
+    if total_runs > 1000 and not args.yes:
+        if not _confirm_large_run(estimated_years):
+            print("Aborted.")
+            return
 
     progress_file = Path(args.progress_file).expanduser() if args.progress_file else None
     try:

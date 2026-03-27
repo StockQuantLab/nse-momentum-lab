@@ -20,41 +20,35 @@ NSE Momentum Lab uses a layered data architecture:
 
 ## Adding New Daily Data
 
-### 1. Prepare Raw Data Files
+### 1. Ingest the date window
 
-Place new daily OHLCV CSV files in the bronze layer:
-
-```bash
-# Bronze data location (adjust based on DATA_LAKE_MODE)
-data/bronze/daily/<SYMBOL>/YYYY/<SYMBOL>_YYYY_MM_DD.csv
-```
-
-Example file structure:
-```csv
-symbol,date,open,high,low,close,volume,value_traded
-RELIANCE,2026-01-02,2345.50,2380.00,2330.00,2375.00,1250000,2950000000
-```
-
-### 2. Run the Ingestion Pipeline
+Use the current CLI directly. There is no `--dataset` flag.
 
 ```bash
-# Ingest new daily data
-doppler run -- uv run python -m nse_momentum_lab.cli.ingest \
-  --dataset daily \
-  --start-date 2026-01-01 \
-  --end-date 2026-01-31
+# Today
+doppler run -- uv run nseml-kite-ingest --today
+
+# Specific date
+doppler run -- uv run nseml-kite-ingest --date 2026-03-27
+
+# Range
+doppler run -- uv run nseml-kite-ingest --from 2026-03-24 --to 2026-03-27
+
+# Optional raw CSV snapshots
+doppler run -- uv run nseml-kite-ingest --today --save-raw
 ```
 
-The ingestion job will:
-- Validate data quality (OHLC constraints, price ranges)
-- Normalize to adjusted prices
-- Publish to Silver layer as partitioned Parquet
-- Update dataset manifest in Postgres
-
-### 3. Verify Ingestion
+### 2. Refresh dependent tables
 
 ```bash
-# Check latest available date
+doppler run -- uv run nseml-build-features --since 2026-03-27
+doppler run -- uv run nseml-market-monitor --incremental --since 2026-03-27
+doppler run -- uv run nseml-db-verify
+```
+
+### 3. Verify latest coverage
+
+```bash
 doppler run -- uv run python -c "
 from nse_momentum_lab.db.market_db import get_market_db
 db = get_market_db()
@@ -63,73 +57,45 @@ print(f'Latest daily date: {latest[0]}')
 "
 ```
 
-### 4. Incremental Feature Rebuild
-
-For daily features with 252-day rolling windows, only rebuild:
-- New partitions (2026 data)
-- Late-2025 overlap (for rolling window warmup)
-
-```bash
-# Rebuild affected feature sets
-doppler run -- uv run python -m nse_momentum_lab.cli.build_features \
-  --feature-set feat_daily_core \
-  --incremental \
-  --start-date 2025-10-01  # Warmup period
-```
-
-The materializer will:
-1. Check current materialization state
-2. Determine affected date ranges
-3. Build only affected partitions
-4. Update `bt_materialization_state`
-
-### 5. Backtest Rerun Strategy
-
-**Option A: Rerun only affected date ranges**
-
-```bash
-doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
-  --strategy thresholdbreakout \
-  --start-year 2026 \
-  --end-year 2026
-```
-
-**Option B: Full rerun (recommended if features changed)**
-
-```bash
-doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
-  --strategy thresholdbreakout \
-  --start-year 2015 \
-  --end-year 2026
-```
+Walk-forward consumes the same loaded runtime coverage as replay/live validation. If the
+walk-forward preflight fails on stale `market_day_state`, `strategy_day_state`, or
+`intraday_day_pack` tables, refresh the runtime tables first and rerun the window.
 
 ---
 
 ## Adding New 5-Minute Data
 
-### 1. Prepare 5-Minute Files
+### 1. Run the 5-minute catch-up
 
 ```bash
-data/bronze/5min/<SYMBOL>/YYYY/MM/<SYMBOL>_YYYY_MM_DD_5min.csv
+# Current day
+doppler run -- uv run nseml-kite-ingest --today --5min --resume
+
+# Short catch-up window
+doppler run -- uv run nseml-kite-ingest --from 2026-03-24 --to 2026-03-27 --5min --resume
 ```
 
-### 2. Ingest with Correct Grain
+### 2. Refresh intraday features
 
 ```bash
-doppler run -- uv run python -m nse_momentum_lab.cli.ingest \
-  --dataset 5min \
-  --start-date 2026-03-01 \
-  --end-date 2026-03-31
+doppler run -- uv run nseml-build-features --since 2026-03-27
+doppler run -- uv run nseml-market-monitor --incremental --since 2026-03-27
 ```
 
-### 3. Rebuild Intraday Features
+### 3. Verify 5-minute coverage
 
 ```bash
-doppler run -- uv run python -m nse_momentum_lab.cli.build_features \
-  --feature-set feat_intraday_core \
-  --incremental \
-  --start-date 2026-02-15  # Short lookback for intraday
+doppler run -- uv run python -c "
+from nse_momentum_lab.db.market_db import get_market_db
+db = get_market_db()
+latest = db.con.execute('SELECT MAX(date) FROM v_5min').fetchone()
+print(f'Latest 5-min date: {latest[0]}')
+"
 ```
+
+As of `2026-03-27`, the local lake is caught up through that date for both daily and 5-minute
+data. Future runs should be incremental catch-up only unless you intentionally need a historical
+backfill.
 
 ---
 
@@ -162,42 +128,31 @@ doppler run -- uv run python -m nse_momentum_lab.cli.research_status \
   --stale-only
 
 # Rerun specific stale experiment
-doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+doppler run -- uv run nseml-backtest \
   --rerun <exp_hash>
 ```
 
 ---
 
-## Repair Mode
+## Corrections and Re-runs
 
-When data corrections are needed (not appends):
+The current CLI does not expose a separate `--repair` mode.
 
-### Repair a Specific Date Range
+When you need to correct a date window:
 
-```bash
-doppler run -- uv run python -m nse_momentum_lab.cli.ingest \
-  --dataset daily \
-  --start-date 2024-03-01 \
-  --end-date 2024-03-31 \
-  --repair
-```
+1. Re-run the affected date range with `nseml-kite-ingest`.
+2. Use `--no-resume` only when you intentionally want to overwrite the same window from scratch.
+3. Refresh dependent tables with `nseml-build-features --since <YYYY-MM-DD>` and `nseml-market-monitor --incremental --since <YYYY-MM-DD>`.
 
-### Repair a Single Symbol
+Example:
 
 ```bash
-doppler run -- uv run python -m nse_momentum_lab.cli.ingest \
-  --dataset daily \
-  --symbol RELIANCE \
-  --repair
+doppler run -- uv run nseml-kite-ingest --from 2026-03-24 --to 2026-03-27 --5min --resume
+doppler run -- uv run nseml-build-features --since 2026-03-24
+doppler run -- uv run nseml-market-monitor --incremental --since 2026-03-24
 ```
 
-### Full Rebuild (Last Resort)
-
-```bash
-# CAUTION: This rebuilds everything
-doppler run -- uv run python -m nse_momentum_lab.cli.build_features \
-  --force-all
-```
+For the operator-facing table inventory and load modes, see `docs/operations/TABLE_LOAD_MATRIX.md`.
 
 ---
 
@@ -246,7 +201,7 @@ ORDER BY updated_at DESC;
    SELECT MAX(trading_date) FROM feat_daily_core;
    ```
 
-3. Rebuild features with `--force` if state is inconsistent
+3. Rebuild features only with `--force --allow-full-rebuild` if state is inconsistent
 
 ### "Stale run detection not working"
 
@@ -267,7 +222,7 @@ ORDER BY updated_at DESC;
 
 ## Best Practices
 
-1. **Test on single symbol first**: Before full ingestion, test with `--symbol RELIANCE`
+1. **Test on a short date window first**: Before full ingestion, test with `--from YYYY-MM-DD --to YYYY-MM-DD` on a small window
 
 2. **Monitor manifest changes**: Always check manifests after ingestion completes
 
@@ -275,9 +230,7 @@ ORDER BY updated_at DESC;
 
 4. **Version control schema changes**: When feature schemas change, bump `FEAT_DAILY_QUERY_VERSION`
 
-5. **Document repair reasons**: When using `--repair`, add notes to `nseml.dataset_manifest.metadata_json`
-
-6. **Incremental > Full**: Always prefer incremental rebuilds unless schema changed
+5. **Incremental > Full**: Always prefer incremental rebuilds unless schema changed
 
 ---
 

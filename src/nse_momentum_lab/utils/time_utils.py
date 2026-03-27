@@ -7,6 +7,9 @@ Consolidates time handling logic from:
 
 from datetime import time
 from typing import Any
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 # NSE Trading Hours
 NSE_OPEN_HOUR = 9

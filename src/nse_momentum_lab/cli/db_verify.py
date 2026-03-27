@@ -2,7 +2,7 @@
 """
 Verify database state for NSE Momentum Lab.
 
-Checks both PostgreSQL and DuckDB are properly initialized.
+Checks both PostgreSQL and DuckDB runtime coverage are properly initialized.
 
 Usage:
     doppler run -- uv run nseml-db-verify
@@ -104,7 +104,7 @@ def verify_duckdb() -> bool:
         db = get_market_db()
         status = db.get_status()
 
-        print("\nParquet data:")
+        print("\nRuntime coverage:")
         if status.get("parquet_5min"):
             print("  [OK] 5-min data available")
         else:
@@ -123,6 +123,7 @@ def verify_duckdb() -> bool:
         else:
             print("  [FAIL] feat_daily: NOT built")
             print("    Run: doppler run -- uv run nseml-db-init --duckdb-only")
+            print("    For an intentional full rebuild: add --force --allow-full-rebuild")
             return False
 
         print("\nDataset summary:")
@@ -133,7 +134,7 @@ def verify_duckdb() -> bool:
         if "date_range" in status:
             print(f"  Date range: {status['date_range']}")
 
-        print("\n[OK] DuckDB verification passed")
+        print("\n[OK] DuckDB runtime coverage verification passed")
         return True
     except Exception as e:
         print(f"\n[FAIL] DuckDB verification failed: {e}")
@@ -150,7 +151,7 @@ def main():
     print("Summary")
     print("=" * 60)
     print(f"  PostgreSQL: {'[OK]' if pg_ok else '[FAIL]'}")
-    print(f"  DuckDB:     {'[OK]' if duckdb_ok else '[FAIL]'}")
+    print(f"  DuckDB:     {'[OK]' if duckdb_ok else '[FAIL]'} (runtime coverage)")
 
     if pg_ok and duckdb_ok:
         print("\n[OK] All databases verified successfully")

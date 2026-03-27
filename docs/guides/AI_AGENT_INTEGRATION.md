@@ -230,7 +230,7 @@ async def safe_run_ingestion(date: date) -> dict[str, Any]:
     if existing:
         return {
             "warning": f"Data already exists for {date}",
-            "suggestion": "Use --force flag to re-ingest"
+            "suggestion": "Re-run the requested date window; reserve --allow-full-rebuild for exceptional full rebuilds."
         }
 
     # Run ingestion

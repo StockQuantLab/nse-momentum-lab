@@ -182,7 +182,7 @@ GitHub Actions validates:
 |------|--------|----------|
 | ruff | ✅ 0 errors | 2026-03-06 |
 | mypy | ✅ 0 errors (88 files) | 2026-03-06 |
-| pytest | ✅ 323 passed | 2026-03-06 |
+| pytest | ✅ unit suite passes | 2026-03-27 |
 
 ---
 

@@ -50,12 +50,26 @@ doppler run -- uv run nseml-kite-ingest --from 2025-04-01 --to 2025-05-31 --5min
 doppler run -- uv run python scripts/kite_data_quality_report.py --start-date 2025-04-01 --end-date 2026-03-09
 ```
 
+Short catch-up windows should stay incremental:
+
+```powershell
+doppler run -- uv run nseml-kite-ingest --from YYYY-MM-DD --to YYYY-MM-DD
+doppler run -- uv run nseml-kite-ingest --from YYYY-MM-DD --to YYYY-MM-DD --5min --resume
+doppler run -- uv run nseml-build-features --since YYYY-MM-DD
+doppler run -- uv run nseml-market-monitor --incremental --since YYYY-MM-DD
+doppler run -- uv run nseml-db-verify
+```
+
 Operational notes:
 
 - The restored Kite ingestion files now live under `src/nse_momentum_lab/services/kite/` and `src/nse_momentum_lab/cli/`.
 - Daily data writes to `data/parquet/daily/<SYMBOL>/kite.parquet`.
 - Five-minute data writes to `data/parquet/5min/<SYMBOL>/<YEAR>.parquet`.
 - Symbol-level resume checkpoints are stored in `data/raw/kite/checkpoints/`.
+- `nseml-kite-ingest` loads only the requested date window; it does not backfill the full archive unless you ask it to.
+- `nseml-db-verify` checks loaded runtime coverage and materialized tables; it does not ingest data.
+- Any destructive full rebuild now requires an explicit `--allow-full-rebuild` acknowledgment.
+- Use `docs/operations/TABLE_LOAD_MATRIX.md` for the table/load inventory instead of reading code.
 
 ## Storage Model
 
@@ -91,13 +105,17 @@ doppler run -- uv run nseml-backtest-status --watch --interval 15
 Walk-forward is the promotion gate for replay and live paper sessions.
 
 ```powershell
-doppler run -- uv run nseml-paper cleanup-walk-forward --yes
+doppler run -- uv run nseml-paper walk-forward-cleanup --wf-run-id <SESSION_ID>
+doppler run -- uv run nseml-paper walk-forward-cleanup --wf-run-id <SESSION_ID> --apply
 doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date 2025-04-01 --end-date 2026-03-09
 doppler run -- uv run nseml-paper replay-day --session-id <SESSION_ID> --trade-date 2026-03-09 --skip-gate
 doppler run -- uv run nseml-paper live --session-id <SESSION_ID> --trade-date 2026-03-22 --execute --run
 doppler run -- uv run nseml-paper qualify --session-id <SESSION_ID> --max-rank 10
 doppler run -- uv run nseml-paper alert --session-id <SESSION_ID> --signal-ids <ID1,ID2>
 ```
+
+Cleanup is dry-run by default. Use `--apply` only when you intend to delete the parent walk-forward session, its folds, and the linked DuckDB backtest rows.
+`nseml-paper walk-forward` uses the loaded local runtime coverage for the requested window and fails fast if `market_day_state`, `strategy_day_state`, or `intraday_day_pack` are stale. After a short Kite catch-up window, rerun `nseml-kite-ingest`, `nseml-build-features --since <YYYY-MM-DD>`, and `nseml-market-monitor --incremental --since <YYYY-MM-DD>` before retrying walk-forward.
 
 The `/paper_ledger` page now emphasizes:
 

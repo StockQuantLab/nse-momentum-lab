@@ -17,6 +17,7 @@ When event data becomes available, this module will be expanded.
 from __future__ import annotations
 
 import logging
+from datetime import date
 
 from nse_momentum_lab.features.registry import (
     FeatureDefinition,
@@ -53,15 +54,86 @@ SELECT
     NULL::VARCHAR AS event_sentiment,
     NULL::BOOLEAN AS is_earnings_event,
     NULL::BOOLEAN AS is_corporate_action,
-    NULL::BOOLEAN EXISTS AS has_event_today
+    NULL::BOOLEAN AS has_event_today
 FROM daily_dates
 """
+
+
+def _sql_date_literal(value: date) -> str:
+    return f"DATE '{value.isoformat()}'"
+
+
+def _event_core_sql_for_source(source_view: str) -> str:
+    return FEAT_EVENT_CORE_SQL.replace("CREATE TABLE feat_event_core AS\n", "").replace(
+        "FROM v_daily", f"FROM {source_view}"
+    )
+
+
+def _build_feat_event_core_incremental(con, *, since_date: date, dataset_hash: str) -> int:
+    source_view = "_feat_event_core_src"
+    delta_table = "_feat_event_core_delta"
+    table_exists = True
+
+    try:
+        con.execute("SELECT 1 FROM feat_event_core LIMIT 1").fetchone()
+    except Exception:
+        table_exists = False
+
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW {source_view} AS "
+        f"SELECT * FROM v_daily WHERE date >= {_sql_date_literal(since_date)}"
+    )
+    try:
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+        con.execute(f"CREATE TEMP TABLE {delta_table} AS {_event_core_sql_for_source(source_view)}")
+        if table_exists:
+            con.execute("DELETE FROM feat_event_core WHERE trading_date >= ?", [since_date])
+            con.execute(
+                f"""
+                INSERT INTO feat_event_core
+                SELECT *
+                FROM {delta_table}
+                WHERE trading_date >= ?
+                """,
+                [since_date],
+            )
+        else:
+            con.execute(
+                f"""
+                CREATE TABLE feat_event_core AS
+                SELECT *
+                FROM {delta_table}
+                WHERE trading_date >= {_sql_date_literal(since_date)}
+                """
+            )
+    finally:
+        con.execute(f"DROP VIEW IF EXISTS {source_view}")
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+
+    if not table_exists:
+        con.execute(
+            "CREATE INDEX idx_feat_event_core_symbol_date ON feat_event_core(symbol, trading_date)"
+        )
+
+    row = con.execute("SELECT COUNT(*) FROM feat_event_core").fetchone()
+    n = int(row[0]) if row and row[0] is not None else 0
+    con.execute(
+        """
+        INSERT OR REPLACE INTO bt_materialization_state
+        (table_name, dataset_hash, query_version, row_count, updated_at)
+        VALUES (?, ?, ?, ?, current_timestamp)
+    """,
+        ["feat_event_core", dataset_hash, FEAT_EVENT_CORE_VERSION, n],
+    )
+    logger.info("feat_event_core incrementally refreshed from %s: %d rows", since_date, n)
+    return n
 
 
 def build_feat_event_core(
     con,  # DuckDBPyConnection
     force: bool = False,
     dataset_hash: str | None = None,
+    since_date: date | None = None,
 ) -> int:
     """
     Build the feat_event_core materialized table.
@@ -77,16 +149,53 @@ def build_feat_event_core(
     Returns:
         Number of rows in the built table
     """
+    # Check if v_daily exists before trying to hash the source snapshot.
+    try:
+        con.execute("SELECT 1 FROM v_daily LIMIT 1").fetchone()
+    except Exception:
+        logger.warning("v_daily view not available, skipping feat_event_core")
+        return 0
+
+    if dataset_hash is None:
+        snapshot_row = con.execute("""
+            SELECT
+                COUNT(*)::BIGINT AS rows,
+                COUNT(DISTINCT symbol)::BIGINT AS symbols,
+                MIN(date)::VARCHAR AS min_date,
+                MAX(date)::VARCHAR AS max_date
+            FROM v_daily
+        """).fetchone()
+        import hashlib
+        import json
+
+        snapshot = {
+            "rows": int(snapshot_row[0]) if snapshot_row and snapshot_row[0] else 0,
+            "symbols": int(snapshot_row[1]) if snapshot_row and snapshot_row[1] else 0,
+            "min_date": snapshot_row[2] if snapshot_row else None,
+            "max_date": snapshot_row[3] if snapshot_row else None,
+        }
+        dataset_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[
+            :16
+        ]
+
+    if since_date is not None and not force:
+        return _build_feat_event_core_incremental(
+            con, since_date=since_date, dataset_hash=dataset_hash
+        )
+
     # Check if already built
     if not force:
         try:
             row = con.execute(
-                "SELECT table_name, query_version, row_count FROM bt_materialization_state "
+                "SELECT table_name, dataset_hash, query_version, row_count FROM bt_materialization_state "
                 "WHERE table_name = 'feat_event_core'"
             ).fetchone()
             if row:
-                _table_name, query_version, row_count = row
-                if query_version == FEAT_EVENT_CORE_VERSION:
+                _table_name, current_dataset_hash, query_version, row_count = row
+                if (
+                    query_version == FEAT_EVENT_CORE_VERSION
+                    and current_dataset_hash == dataset_hash
+                ):
                     logger.info("feat_event_core is up-to-date (%d rows).", row_count)
                     return int(row_count)
         except Exception:
@@ -106,29 +215,6 @@ def build_feat_event_core(
     n = int(row[0]) if row and row[0] is not None else 0
 
     # Update materialization state
-    if dataset_hash is None:
-        # Generate a simple hash from v_daily
-        snapshot_row = con.execute("""
-            SELECT
-                COUNT(*)::BIGINT AS rows,
-                COUNT(DISTINCT symbol)::BIGINT AS symbols,
-                MIN(date)::VARCHAR AS min_date,
-                MAX(date)::VARCHAR AS max_date
-            FROM v_daily
-        """).fetchone()
-        import hashlib
-        import json
-
-        snapshot = {
-            "rows": int(snapshot_row[0]) if snapshot_row[0] else 0,
-            "symbols": int(snapshot_row[1]) if snapshot_row[1] else 0,
-            "min_date": snapshot_row[2],
-            "max_date": snapshot_row[3],
-        }
-        dataset_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[
-            :16
-        ]
-
     con.execute(
         """
         INSERT OR REPLACE INTO bt_materialization_state

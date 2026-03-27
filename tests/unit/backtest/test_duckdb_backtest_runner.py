@@ -27,6 +27,49 @@ def _make_in_memory_market_db() -> MarketDataDB:
     return db
 
 
+def _make_legacy_in_memory_market_db() -> MarketDataDB:
+    db = MarketDataDB.__new__(MarketDataDB)
+    db.con = duckdb.connect(":memory:")
+    db._data_source = "local"
+    db._has_daily = False
+    db._has_5min = False
+    db._daily_glob = "local://daily"
+    db._five_min_glob = "local://5min"
+    db.con.execute(
+        """
+        CREATE TABLE bt_experiment (
+            exp_id          VARCHAR PRIMARY KEY,
+            strategy_name   VARCHAR NOT NULL,
+            params_json     VARCHAR NOT NULL,
+            params_hash     VARCHAR,
+            dataset_hash    VARCHAR,
+            code_hash       VARCHAR,
+            data_source     VARCHAR DEFAULT 'local',
+            dataset_snapshot_json VARCHAR DEFAULT '{}',
+            start_year      INTEGER NOT NULL,
+            end_year        INTEGER NOT NULL,
+            total_return_pct    DOUBLE DEFAULT 0,
+            annualized_return_pct DOUBLE DEFAULT 0,
+            total_trades    INTEGER DEFAULT 0,
+            win_rate_pct    DOUBLE DEFAULT 0,
+            max_drawdown_pct DOUBLE DEFAULT 0,
+            profit_factor   DOUBLE DEFAULT 0,
+            status          VARCHAR DEFAULT 'running',
+            created_at      TIMESTAMP DEFAULT current_timestamp
+        )
+        """
+    )
+    db.con.execute(
+        """
+        INSERT INTO bt_experiment (
+            exp_id, strategy_name, params_json, start_year, end_year, created_at
+        ) VALUES (?, ?, ?, ?, ?, current_timestamp)
+        """,
+        ["exp-legacy", "thresholdbreakout", "{}", 2025, 2025],
+    )
+    return db
+
+
 def test_backtest_params_hash_is_deterministic() -> None:
     assert BacktestParams().to_hash() == BacktestParams().to_hash()
 
@@ -246,12 +289,100 @@ def test_delete_experiment_removes_trades_and_yearly_metrics() -> None:
                 "exit_reasons": {"TIME_STOP": 1},
             },
         )
+        db.save_execution_diagnostics(
+            exp_id,
+            [
+                {
+                    "year": 2021,
+                    "signal_date": date(2021, 1, 4),
+                    "symbol": "INFY",
+                    "status": "executed",
+                    "reason": "entry",
+                }
+            ],
+        )
 
         db.delete_experiment(exp_id)
 
         assert db.get_experiment(exp_id) is None
         assert db.get_experiment_trades(exp_id).is_empty()
         assert db.get_experiment_yearly_metrics(exp_id).is_empty()
+        assert db.get_experiment_execution_diagnostics(exp_id).is_empty()
+    finally:
+        db.con.close()
+
+
+def test_market_db_persists_wf_run_id_and_cleanup_summary() -> None:
+    db = _make_in_memory_market_db()
+    try:
+        exp_id = "exp_wf_linked"
+        db.save_experiment(
+            exp_id=exp_id,
+            strategy_name="thresholdbreakout",
+            params_json="{}",
+            start_year=2022,
+            end_year=2022,
+            wf_run_id="wf-2026-03-21",
+        )
+        db.save_trades(
+            exp_id,
+            [
+                {
+                    "symbol": "TCS",
+                    "entry_date": date(2022, 2, 1),
+                    "exit_date": date(2022, 2, 4),
+                    "year": 2022,
+                }
+            ],
+        )
+        db.save_yearly_metric(
+            exp_id,
+            {
+                "year": 2022,
+                "signals": 1,
+                "trades": 1,
+                "wins": 1,
+                "losses": 0,
+                "return_pct": 2.0,
+            },
+        )
+        db.save_execution_diagnostics(
+            exp_id,
+            [
+                {
+                    "year": 2022,
+                    "signal_date": date(2022, 2, 1),
+                    "symbol": "TCS",
+                    "status": "executed",
+                    "reason": "entry",
+                }
+            ],
+        )
+
+        experiment = db.get_experiment(exp_id)
+        summary = db.get_experiment_cleanup_summary(exp_id)
+
+        assert experiment is not None
+        assert experiment["wf_run_id"] == "wf-2026-03-21"
+        assert summary is not None
+        assert summary["wf_run_id"] == "wf-2026-03-21"
+        assert summary["experiment_rows"] == 1
+        assert summary["trade_rows"] == 1
+        assert summary["yearly_metric_rows"] == 1
+        assert summary["diagnostic_rows"] == 1
+        assert summary["total_rows"] == 4
+    finally:
+        db.con.close()
+
+
+def test_list_experiments_backfills_missing_wf_run_id_column() -> None:
+    db = _make_legacy_in_memory_market_db()
+    try:
+        experiments = db.list_experiments()
+
+        assert "wf_run_id" in experiments.columns
+        assert experiments["wf_run_id"].to_list() == [None]
+        assert db.list_experiments_for_wf_run_id("wf-legacy") == []
     finally:
         db.con.close()
 

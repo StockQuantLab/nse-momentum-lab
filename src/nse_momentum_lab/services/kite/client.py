@@ -173,6 +173,12 @@ class KiteConnectClient:
         return list(payload) if isinstance(payload, list) else []
 
     def place_order(self, **payload: Any) -> dict[str, Any]:
+        from nse_momentum_lab.config import get_settings
+
+        if not get_settings().broker_order_execution_enabled:
+            raise RuntimeError(
+                "Broker order execution is disabled. Set BROKER_ORDER_EXECUTION_ENABLED=true to enable."
+            )
         variety = payload.pop("variety")
         return self._request_json("POST", f"/orders/{variety}", data=self._clean_payload(payload))
 

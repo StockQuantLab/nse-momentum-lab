@@ -1,6 +1,6 @@
 # Zerodha Kite API Ingestion Layer — Plan & Status
 
-**Last updated**: 2026-03-10
+**Last updated**: 2026-03-27
 **Goal**: Ingest daily OHLCV and 5-minute OHLCV from Kite Connect without touching existing 10-year baseline parquet.
 
 ---
@@ -30,7 +30,7 @@ DuckDB daily view globs `data/parquet/daily/*/*.parquet`, so both baseline and k
 | Symbol resolution | Local parquet universe first, Kite fallback | ✅ |
 | Instrument master caching | `data/raw/kite/instruments/NSE.csv` + in-memory map | ✅ |
 | Cache miss behavior | One per-exchange API refresh, then miss cache | ✅ |
-| Retry/backoff | Exponential retry for transient Kite errors | ✅ |
+| Retry/backoff | Shared token-bucket pacing + exponential retry for transient Kite errors | ✅ |
 | Resume/checkpoint | Symbol-level checkpoint JSON with resume default | ✅ |
 | Checkpoint I/O | Batched checkpoint flush (`CHECKPOINT_FLUSH_EVERY=25`) | ✅ |
 | Daily feature update | Decoupled; enabled via `--update-features` | ✅ |
@@ -54,6 +54,15 @@ DuckDB daily view globs `data/parquet/daily/*/*.parquet`, so both baseline and k
 3. Resolve instrument token from memory cache, then `NSE.csv`, then API refresh-on-miss.
 4. Fetch with retry/backoff and write parquet with dedup.
 5. Persist checkpoint progress and resume on rerun.
+
+The daily ingest command loads only the requested date window. It does not backfill the full
+archive unless you pass a broad range or `--backfill`.
+
+Current operational state as of `2026-03-27`:
+- Daily ingestion is caught up through `2026-03-27`.
+- 5-minute ingestion is caught up through `2026-03-27`.
+- Runtime feature tables and market monitor are refreshed through the same date.
+- Future runs should be incremental catch-up only unless you intentionally need a historical backfill.
 
 ### Result accounting
 
@@ -84,8 +93,19 @@ doppler run -- uv run nseml-kite-ingest --refresh-instruments --exchange NSE
 ```bash
 doppler run -- uv run nseml-kite-ingest --today
 doppler run -- uv run nseml-kite-ingest --today --update-features
+doppler run -- uv run nseml-kite-ingest --today --5min --resume
 doppler run -- uv run nseml-kite-ingest --date 2026-03-06
 doppler run -- uv run nseml-kite-ingest --from 2026-03-05 --to 2026-03-06 --save-raw
+```
+
+Short catch-up windows should stay incremental:
+
+```bash
+doppler run -- uv run nseml-kite-ingest --from YYYY-MM-DD --to YYYY-MM-DD
+doppler run -- uv run nseml-kite-ingest --from YYYY-MM-DD --to YYYY-MM-DD --5min --resume
+doppler run -- uv run nseml-build-features
+doppler run -- uv run nseml-market-monitor --incremental --since YYYY-MM-DD
+doppler run -- uv run nseml-db-verify
 ```
 
 ### 5-min ingestion (recommended chunked backfill)
@@ -96,14 +116,11 @@ doppler run -- uv run nseml-kite-ingest --from 2025-06-01 --to 2025-07-31 --5min
 doppler run -- uv run nseml-kite-ingest --from 2025-08-01 --to 2025-09-30 --5min --resume
 doppler run -- uv run nseml-kite-ingest --from 2025-10-01 --to 2025-11-30 --5min --resume
 doppler run -- uv run nseml-kite-ingest --from 2025-12-01 --to 2026-01-31 --5min --resume
-doppler run -- uv run nseml-kite-ingest --from 2026-02-01 --to 2026-03-09 --5min --resume
+doppler run -- uv run nseml-kite-ingest --from 2026-02-01 --to 2026-03-27 --5min --resume
 ```
 
-Fallback one-shot command is still available:
-
-```bash
-doppler run -- uv run nseml-kite-ingest --backfill --5min
-```
+The historical 5-minute backfill is now complete through `2026-03-27`. Use chunked catch-up only
+for future windows.
 
 ---
 
@@ -122,6 +139,9 @@ Recommended quick checks after each chunk:
 2. Spot-check symbol files under `data/parquet/5min/<SYMBOL>/2025.parquet`.
 3. Track missing-token and zero-row symbols from report CSVs.
 
+`nseml-db-verify` checks the loaded runtime coverage and materialized tables. It does not ingest
+new Kite data.
+
 ---
 
 ## FastAPI Endpoints (Retained)
@@ -138,7 +158,7 @@ Recommended quick checks after each chunk:
 
 | Item | Value |
 |---|---|
-| Base request spacing | `0.35s` |
+| Base request spacing | Shared token bucket, target `2.85 req/sec` with burst `3` |
 | Max retries | `5` |
 | Backoff | Exponential (`1s` base, `30s` cap, jitter) |
 | Daily chunk size | up to `2000` days per request |
@@ -147,13 +167,13 @@ Recommended quick checks after each chunk:
 
 ---
 
-## Current Operational To-Dos (as of 2026-03-13)
+## Current Operational To-Dos (as of 2026-03-27)
 
-1. Backfill campaign status:
-   - Daily and 5-min historical backfill through `2026-03-09` is complete.
-2. Next ingestion catch-up window:
-   - Ingest from `2026-03-10` through current date (daily + 5-min) in the next ops run.
-3. Post-catch-up validation:
-   - Run focused DQ report on the catch-up window and reconcile any new missing-token / duplicate issues.
-4. Scheduler hardening:
-   - Configure Windows Task Scheduler for daily ingestion after 2-3 consecutive clean daily runs.
+1. Ingestion status:
+   - Daily and 5-min historical coverage is caught up through `2026-03-27`.
+2. Ongoing cadence:
+   - Future Kite jobs should be incremental daily/5-minute catch-up only.
+3. Post-ingest validation:
+   - Run `nseml-build-features --since <YYYY-MM-DD>` and `nseml-market-monitor --incremental --since <YYYY-MM-DD>` after each new catch-up window.
+4. Rate-limit tuning:
+   - Keep the shared historical token bucket conservative enough to avoid Kite 429s while staying close to the 3 req/sec cap.

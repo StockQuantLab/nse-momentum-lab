@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine
+import sys
+import threading
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -51,10 +53,12 @@ class KiteStreamRunner:
         sessionmaker: async_sessionmaker[Any],
         session_id: str,
         config: KiteStreamConfig,
+        tick_handler: Callable[[list[dict[str, Any]]], Awaitable[None]] | None = None,
     ) -> None:
         self.sessionmaker = sessionmaker
         self.session_id = session_id
         self.config = config
+        self.tick_handler = tick_handler
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ticker: Any | None = None
         self._stop_requested = False
@@ -98,6 +102,14 @@ class KiteStreamRunner:
                 "to run the live websocket loop."
             )
 
+        # Windows guard: KiteTicker uses Twisted, which calls signal.signal() —
+        # this only works in the main thread. Detect early and fail with a clear message.
+        if sys.platform == "win32" and threading.current_thread() is not threading.main_thread():
+            raise RuntimeError(
+                "KiteTicker must be started from the main thread on Windows. "
+                "The Twisted reactor calls signal.signal() which is main-thread-only."
+            )
+
         await self.bootstrap()
         self._loop = asyncio.get_running_loop()
         self._ticker = KiteTicker(
@@ -114,12 +126,26 @@ class KiteStreamRunner:
         self._ticker.on_close = self._on_close
         self._ticker.on_error = self._on_error
 
+        token_count = len(self.config.instrument_tokens)
         logger.info(
-            "Starting Kite stream for session %s with %d tokens",
+            "[WS-START] session=%s tokens=%d mode=%s threaded=True",
             self.session_id,
-            len(self.config.instrument_tokens),
+            token_count,
+            self.config.mode,
         )
-        await asyncio.to_thread(self._ticker.connect, threaded=False)
+        try:
+            self._ticker.connect(threaded=True)
+        except Exception:
+            logger.exception(
+                "[WS-START] KiteTicker.connect() failed for session %s", self.session_id
+            )
+            await self._touch_feed_state("ERROR", is_stale=True)
+            raise
+        try:
+            while not self._stop_requested:
+                await asyncio.sleep(1)
+        finally:
+            await self.stop()
 
     async def stop(self) -> None:
         self._stop_requested = True
@@ -141,6 +167,7 @@ class KiteStreamRunner:
 
     def _on_connect(self, ws: Any, _response: Any) -> None:
         try:
+            subscribed_total = 0
             for batch in plan_subscription_batches(
                 self.config.instrument_tokens, mode=self.config.mode
             ):
@@ -148,23 +175,39 @@ class KiteStreamRunner:
                     continue
                 ws.subscribe(batch.tokens)
                 ws.set_mode(self._resolve_mode_constant(ws, batch.mode), batch.tokens)
+                subscribed_total += len(batch.tokens)
+            logger.info(
+                "[WS-CONNECT] session=%s subscribed=%d batches=%d",
+                self.session_id,
+                subscribed_total,
+                max(
+                    1,
+                    len(
+                        list(
+                            plan_subscription_batches(
+                                self.config.instrument_tokens, mode=self.config.mode
+                            )
+                        )
+                    ),
+                ),
+            )
             self._submit(self._touch_feed_state("CONNECTED", is_stale=False))
         except Exception:
-            logger.exception("Kite on_connect failed")
+            logger.exception("[WS-CONNECT] Kite on_connect failed for session %s", self.session_id)
             self._submit(self._touch_feed_state("ERROR", is_stale=True))
 
     def _on_ticks(self, _ws: Any, ticks: list[dict[str, Any]]) -> None:
-        self._submit(self._record_ticks(ticks))
+        self._submit(self._handle_ticks(ticks))
 
     def _on_order_update(self, _ws: Any, order_update: dict[str, Any]) -> None:
         self._submit(self._record_order_update(order_update))
 
     def _on_close(self, _ws: Any, _code: int, reason: str) -> None:
-        logger.warning("Kite stream closed: %s", reason)
+        logger.warning("[WS-CLOSE] session=%s code=%s reason=%s", self.session_id, _code, reason)
         self._submit(self._touch_feed_state("DISCONNECTED", is_stale=True))
 
     def _on_error(self, _ws: Any, code: Any, reason: Any) -> None:
-        logger.error("Kite stream error: %s %s", code, reason)
+        logger.error("[WS-ERROR] session=%s code=%s reason=%s", self.session_id, code, reason)
         self._submit(self._touch_feed_state("ERROR", is_stale=True))
 
     async def _touch_feed_state(
@@ -222,6 +265,17 @@ class KiteStreamRunner:
                     "mode": self.config.mode,
                 },
             )
+
+    async def _handle_ticks(self, ticks: list[dict[str, Any]]) -> None:
+        await self._record_ticks(ticks)
+        if self.tick_handler is not None:
+            try:
+                await self.tick_handler(ticks)
+            except Exception:
+                logger.exception(
+                    "[WS-TICKS] Tick handler failed for session %s",
+                    self.session_id,
+                )
 
     async def _record_order_update(self, order_update: dict[str, Any]) -> None:
         broker_order_id = str(

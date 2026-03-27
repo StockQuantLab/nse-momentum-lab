@@ -4,7 +4,7 @@ from nse_momentum_lab.services.kite.token_workflow import _decode_subprocess_out
 
 
 def test_decode_subprocess_output_handles_utf8() -> None:
-    assert _decode_subprocess_output("ok".encode("utf-8")) == "ok"
+    assert _decode_subprocess_output(b"ok") == "ok"
 
 
 def test_decode_subprocess_output_handles_cp1252_bytes() -> None:

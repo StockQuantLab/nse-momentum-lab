@@ -1,38 +1,39 @@
-# Paper Trading And Walk-Forward Plan
+# Paper Trading And Walk-Forward Reference
 
-**Last updated**: 2026-03-21
-**Goal**: turn the current research-heavy stack into a clean, repeatable walk-forward validation loop and a crash-safe paper-trading runtime without contaminating backtest code or storage.
+**Last updated**: 2026-03-27
+**Goal**: document the implemented walk-forward, replay, and daily live paper workflow for NSE Momentum Lab.
 
 ---
 
 ## Current Repo State
 
-The repo already has part of the paper-trading foundation, but the pieces are uneven:
+The repo now has the core paper-trading foundation implemented; this page documents the
+current operating model and the remaining operator caveats:
 
 | Area | Current state | Assessment |
 |---|---|---|
-| Strategy/backtest engine | Mature breakout and breakdown research path with 5-minute entry-day execution | Strong base |
-| Walk-forward support | `src/nse_momentum_lab/services/backtest/walkforward.py` and optimizer fold loop exist | Too generic and lightly integrated |
-| Paper-trading schema | `signal`, `paper_order`, `paper_fill`, `paper_position` exist in PostgreSQL | Insufficient for live sessions and recovery |
-| Paper engine | `src/nse_momentum_lab/services/paper/engine.py` processes signals and simulates fills | EOD-style, in-memory, not session-safe |
-| API | `GET /api/paper/positions` exists | Too narrow for operator workflow |
-| Dashboard | `/paper_ledger` route exists | Still placeholder copy |
-| Tests | unit coverage for paper engine and basic walk-forward window generation | Missing workflow/runtime coverage |
-| Kite scaffold | `services/kite/` now contains REST, websocket, and batch-planning helpers | Ready for live feed wiring |
+| Strategy/backtest engine | Mature breakout and breakdown research path with 5-minute entry-day execution | Operational |
+| Walk-forward support | `src/nse_momentum_lab/services/backtest/walkforward.py` and optimizer fold loop exist | Operational promotion gate |
+| Paper-trading schema | Session-aware paper tables and legacy compatibility tables exist in PostgreSQL | Operational |
+| Paper runtime | `src/nse_momentum_lab/services/paper/runtime.py` manages daily prepare, replay, and live sessions | Operational |
+| API | Paper session and feed-state endpoints exist | Operational |
+| Dashboard | `/paper_ledger` is session-aware and hides archived clutter | Operational |
+| Tests | unit coverage exists for walk-forward, replay/live bootstrap, runtime, and Kite pacing | Operational |
+| Kite scaffold | `services/kite/` contains REST, websocket, pacing, and batch-planning helpers | Operational |
 
-### Concrete gaps
+### Remaining caveats
 
-1. Walk-forward evaluation is not the operating gate for paper trading.
-2. The paper engine has no durable session concept, no resume path, and no live candle loop.
-3. PostgreSQL tables are centered on trades, not on a paper session lifecycle.
-4. The dashboard does not expose actionable paper-trading state.
-5. There is no CLI or scheduler path for `prepare -> walk-forward -> replay/live paper -> archive`.
+1. Walk-forward is still the research/promotion gate, not the same thing as a daily live-readiness check.
+2. Replay/live can still be misconfigured if the selected universe or runtime tables are stale.
+3. The canonical operational threshold and session config should be changed deliberately, not ad hoc.
+4. Older sessions can clutter the ledger if they are not archived.
+5. Any new transport or queue change should be validated on the Windows host path, not only in unit tests.
 
 ---
 
 ## Reference Pattern From `cpr-pivot-lab`
 
-The useful parts to copy from `cpr-pivot-lab` are architectural, not strategy-specific:
+The implementation here mirrors the useful parts of `cpr-pivot-lab`:
 
 1. A session-oriented paper runtime with explicit commands for `prepare`, `walk-forward`, `replay`, `live`, `pause`, `resume`, `flatten`, and `stop`.
 2. PostgreSQL ownership of mutable paper state such as sessions, open positions, order events, and feed status.
@@ -41,7 +42,7 @@ The useful parts to copy from `cpr-pivot-lab` are architectural, not strategy-sp
 5. A dual-mode ledger view: active live session state first, archived paper results second.
 6. Zerodha Kite v4 should be the single broker API surface for paper/live market data and order routing.
 
-This separation is the right fit here too.
+This separation is the operating model now used in NSE Momentum Lab.
 
 ---
 
@@ -94,107 +95,71 @@ No custom strategy logic should live in the orchestration layer.
 
 ---
 
-## Required Changes In `nse-momentum-lab`
+## Implemented Workflow
 
-### 1. Replace generic walk-forward with an operating protocol
+### 1. Walk-forward promotion gate
 
-Current issue:
+Walk-forward is implemented as the research/promotion gate:
 
-- `services/backtest/walkforward.py` only splits date windows and reruns backtests.
-- Tests verify window mechanics but not the operating decision.
-- Fold results are not persisted as a first-class promotion artifact.
+- generates folds from actual trading sessions in `v_daily`
+- persists fold outputs and lineage
+- supports cleanup and rerun of stale sessions
+- remains separate from daily paper bootstrapping
 
-Required outcome:
+Current command examples:
 
-- add an operating walk-forward runner that persists:
-  - fold windows
-  - parameter set chosen on each fold
-  - out-of-sample metrics
-  - approval status
-  - comparison against the current canonical experiment
+```text
+doppler run -- uv run nseml-paper walk-forward-cleanup --wf-run-id <SESSION_ID>
+doppler run -- uv run nseml-paper walk-forward-cleanup --wf-run-id <SESSION_ID> --apply
+doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date YYYY-MM-DD --end-date YYYY-MM-DD
+doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date YYYY-MM-DD --end-date YYYY-MM-DD --train-days 5 --test-days 3 --roll-interval-days 1
+```
 
-Recommended location:
+### 2. Session-aware paper trading
 
-- `src/nse_momentum_lab/services/backtest/walkforward.py`
-- `src/nse_momentum_lab/services/backtest/registry.py`
-- `src/nse_momentum_lab/cli/` as a dedicated walk-forward entrypoint
-
-### 2. Introduce a session model for paper trading
-
-Current issue:
-
-- `signal`, `paper_order`, `paper_fill`, and `paper_position` are not enough for:
-  - multi-day recovery
-  - live feed status
-  - multiple sessions
-  - explicit operator controls
-
-Required PostgreSQL additions:
+The paper runtime now uses a session model:
 
 - `paper_session`
-  - session id, strategy family, experiment id, trade date, mode, status, risk config, notes
 - `paper_session_signal`
-  - session-linked candidate ledger with dedupe key, ranking, advisory status, decision status
 - `paper_order_event`
-  - append-only lifecycle for requested, acknowledged, filled, cancelled, rejected
 - `paper_feed_state`
-  - last bar time, last quote time, stale flag, heartbeat status
-- optional `paper_bar_checkpoint`
-  - durable candle-builder recovery state if live mode needs restart safety
 
-Current tables can remain, but they should either become session-linked or be superseded by session-aware tables.
+Session state is persisted in PostgreSQL and mirrored into the dashboard. The operational queue is now built from runtime data for replay/live workflows instead of relying on backtest diagnostics for the normal path.
 
-### 3. Extract shared execution decisions
+### 3. Shared execution decisions
 
-Current issue:
-
-- backtest execution logic and paper execution logic are not aligned tightly enough.
-- `services/paper/engine.py` uses simplified close-based behavior and in-memory positions.
-
-Required shared logic boundary:
+Backtest and paper execution now share the same decision boundary where practical:
 
 - candidate admission
 - entry confirmation
-- initial stop creation
-- stop progression and trail rules
+- stop creation and progression
 - exit classification
 - reason-code generation
 
-Recommended location:
+The paper runtime uses shared helpers rather than reimplementing strategy math in the websocket runner.
 
-- `src/nse_momentum_lab/services/backtest/intraday_execution.py`
-- `src/nse_momentum_lab/services/backtest/signal_models.py`
-- a new shared module under `src/nse_momentum_lab/services/paper/` only for orchestration and persistence
+### 4. Kite Connect transport
 
-The paper runtime should call the same decision functions used in backtest execution.
+The current live/broker transport uses Kite Connect v4 helpers under `src/nse_momentum_lab/services/kite/` and keeps request-token / access-token handling server-side only.
 
-### 3b. Use Kite Connect v4 as the live/broker transport
+Operational constraints remain:
 
-Official Kite Connect constraints to respect in the scaffold:
+- websocket connections are token-bound
+- subscriptions are batched
+- snapshot requests are batched
+- historical ingestion uses shared token-bucket pacing close to the documented cap
 
-- websocket connections are token-bound and should be planned in batches
-- instrument subscription batching should stay under the documented per-connection limit
-- quote / ltp / ohlc snapshot requests should be batched, not brute-forced one symbol at a time
-- request-token and access-token handling must stay server-side only
+### 5. Paper session CLI
 
-Recommended location:
-
-- `src/nse_momentum_lab/services/kite/`
-- `src/nse_momentum_lab/services/paper/runtime.py`
-
-### 4. Add a paper session CLI
-
-Current issue:
-
-- there is no operational CLI comparable to the `cpr-pivot-lab` session controller.
-
-Required commands:
+The operational CLI now includes:
 
 ```text
 nseml-paper prepare
 nseml-paper walk-forward
 nseml-paper replay-day
-nseml-paper live
+nseml-paper daily-prepare
+nseml-paper daily-replay
+nseml-paper daily-live
 nseml-paper status
 nseml-paper pause
 nseml-paper resume
@@ -202,120 +167,22 @@ nseml-paper flatten
 nseml-paper archive
 ```
 
-Minimum viable behavior:
-
-- `prepare`: validate dataset availability, selected experiment, and symbol universe
-- `walk-forward`: run the promotion gate and emit a machine-readable decision
-- `replay-day`: execute one historical date through the paper runtime
-- `live`: start the live session loop
-- `status`: show active session, positions, orders, feed state, and kill-switch status
-
-Current command examples:
+Current daily workflow examples:
 
 ```text
-doppler run -- uv run nseml-paper cleanup-walk-forward --yes
-doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date 2025-04-01 --end-date 2026-03-09
-doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date 2026-03-01 --end-date 2026-03-09 --train-days 5 --test-days 3 --roll-interval-days 1
-doppler run -- uv run nseml-paper replay-day --trade-date 2026-03-09 --experiment-id <EXP_ID> --execute
-doppler run -- uv run nseml-paper live --trade-date 2026-03-23 --experiment-id <EXP_ID> --execute
-doppler run -- uv run nseml-paper stream --trade-date 2026-03-23 --experiment-id <EXP_ID>
+doppler run -- uv run nseml-paper daily-prepare --trade-date YYYY-MM-DD --mode replay --all-symbols
+doppler run -- uv run nseml-paper daily-replay --trade-date YYYY-MM-DD --all-symbols
+doppler run -- uv run nseml-paper daily-live --trade-date YYYY-MM-DD --all-symbols --execute
 doppler run -- uv run nseml-paper status --session-id <SESSION_ID>
 ```
 
-Operational note:
+### 6. Dashboard
 
-- the default rolling walk-forward window is `252` train days and `63` test days
-- a short window like `2026-03-01` to `2026-03-09` requires explicit smaller overrides such as `--train-days 5 --test-days 3 --roll-interval-days 1`
-
-### 5. Upgrade the dashboard from placeholder to operator console
-
-Current issue:
-
-- `/paper_ledger` is still a static placeholder page.
-
-Required dashboard views:
-
-- active session summary
-- session state and risk guardrails
-- advisory queue with rank and decision status
-- open positions
-- order/fill timeline
-- realized and unrealized PnL
-- archived session list
-- replay vs live mode indicator
-
-This page should not wait for full broker automation. It should become useful as soon as replay-day sessions exist.
+`/paper_ledger` is now session-aware and can show active and archived paper state without the old placeholder-only UX.
 
 ---
 
-## Recommended Delivery Phases
-
-### Phase 1. Walk-forward promotion path
-
-Scope:
-
-- formalize rolling walk-forward runner
-- persist fold outputs and approval decision
-- add CLI entrypoint
-
-Exit criteria:
-
-- a selected operating configuration can be reproduced from saved fold artifacts
-- paper trading can consume that saved selection without re-running research logic ad hoc
-
-### Phase 2. Paper session schema and repositories
-
-Scope:
-
-- add `paper_session` and session-aware paper tables
-- add repository helpers
-- keep current trade tables readable during migration
-
-Exit criteria:
-
-- session state can be created, resumed, queried, and completed without touching DuckDB
-
-### Phase 3. Replay-day paper runtime
-
-Scope:
-
-- implement session orchestrator for a single historical day
-- reuse current 5-minute execution semantics
-- persist queue, orders, fills, and exits
-
-Exit criteria:
-
-- one historical trade date can run end to end via the paper session path
-- archived results can be compared against the source backtest experiment
-
-### Phase 4. Live paper runtime
-
-Scope:
-
-- add Kite-backed or polled bar adapter
-- add heartbeat and stale-feed policy
-- add pause/flatten controls
-
-Exit criteria:
-
-- a live session survives disconnects safely
-- stale-feed policy is explicit and test-covered
-
-### Phase 5. Dashboard and API consolidation
-
-Scope:
-
-- replace placeholder `/paper_ledger`
-- add active-session APIs
-- unify archived paper reporting with backtest reporting where practical
-
-Exit criteria:
-
-- operators can inspect session health and trade state without direct DB access
-
----
-
-## Verification Plan
+## Current Validation
 
 ### Required tests
 
@@ -329,18 +196,18 @@ Exit criteria:
 ### Required manual checks
 
 1. Replay one known date from a canonical experiment and compare results against the audit tools
-2. Pause and resume a paper session mid-run
-3. Force stale-feed handling and confirm safe session behavior
-4. Confirm archived paper session is visible after completion
+2. Run `daily-prepare` and `daily-live` for the current trade date and confirm feed + queue state in `/paper_ledger`
+3. Pause and resume a paper session mid-run
+4. Force stale-feed handling and confirm safe session behavior
+5. Confirm archived paper session is visible after completion
 
 ---
 
-## Immediate Next Work
+## Remaining Limits
 
-If this repo is the implementation target, the next three concrete tasks should be:
+The implemented workflow is usable, but the following are still operator concerns:
 
-1. add the paper-session schema and repository layer
-2. add an `nseml-paper` CLI with `prepare`, `walk-forward`, `replay-day`, and `status`
-3. replace `/paper_ledger` with a session-aware operator page backed by active and archived session reads
-
-This sequence gives a usable replayable paper path first, then live-mode hardening second.
+1. live paper depends on fresh daily and 5-minute runtime tables
+2. the selected threshold/config should be deliberate, not ad hoc
+3. stale sessions should be archived so the ledger stays readable
+4. any transport or queue change should be validated on the Windows host path

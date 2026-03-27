@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import UTC, date, datetime
+import logging
+from datetime import date, datetime
+from math import ceil
+from typing import Any
 
 from nse_momentum_lab.services.kite.auth import get_kite_auth
+from nse_momentum_lab.services.kite.fetcher import HISTORICAL_REQUESTS_PER_SECOND
 from nse_momentum_lab.services.kite.scheduler import BACKFILL_START_DATE, get_kite_scheduler
+from nse_momentum_lab.utils.constants import IngestionDataset
+from nse_momentum_lab.utils.time_utils import IST
 
 
 def validate_symbols_csv(symbols_csv: str | None, max_symbols: int = 50) -> list[str] | None:
@@ -25,7 +31,43 @@ def _parse_date(value: str | None) -> date | None:
     return date.fromisoformat(value.strip())
 
 
+def _estimate_backfill_cost(
+    symbols: list[str] | None, start_date: date, end_date: date, is_5min: bool
+) -> dict[str, Any]:
+    """Estimate API calls and time for backfill."""
+    scheduler = get_kite_scheduler()
+    resolved = scheduler._resolve_symbols(
+        symbols=symbols,
+        dataset=IngestionDataset.FIVE_MIN if is_5min else IngestionDataset.DAILY,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    symbol_count = len(resolved)
+    days = (end_date - start_date).days + 1
+
+    if is_5min:
+        chunks = ceil(days / 60)
+        requests = symbol_count * chunks
+    else:
+        requests = symbol_count
+    estimated_seconds = requests / HISTORICAL_REQUESTS_PER_SECOND
+
+    return {
+        "symbols": symbol_count,
+        "days": days,
+        "requests": requests,
+        "estimated_seconds": round(estimated_seconds, 1),
+        "estimated_minutes": round(estimated_seconds / 60, 1),
+        "is_5min": is_5min,
+    }
+
+
 def main() -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     parser = argparse.ArgumentParser(description="Ingest Kite OHLCV into local parquet")
     parser.add_argument("--date", dest="single_date", help="Specific trading date (YYYY-MM-DD)")
     parser.add_argument("--from", dest="start_date", help="Range start date (YYYY-MM-DD)")
@@ -59,7 +101,7 @@ def main() -> int:
         return 0
 
     symbols = validate_symbols_csv(args.symbols)
-    today = datetime.now(UTC).date()
+    today = datetime.now(IST).date()
     if args.backfill:
         start_date = BACKFILL_START_DATE
         end_date = today
@@ -77,6 +119,17 @@ def main() -> int:
         parser.error("Provide --today, --date, --from/--to, or --backfill")
     if start_date > end_date:
         parser.error("--from must be on or before --to")
+
+    cost_estimate = _estimate_backfill_cost(symbols, start_date, end_date, args.use_5min)
+    logging.info(
+        "Backfill cost estimate: %d symbols, %d days, ~%d requests, ~%.1f min",
+        cost_estimate["symbols"],
+        cost_estimate["days"],
+        cost_estimate["requests"],
+        cost_estimate["estimated_minutes"],
+    )
+    if cost_estimate["estimated_minutes"] > 5:
+        logging.warning("Estimated time >5 minutes. Use --5min for daily mode.")
 
     if args.use_5min:
         result = scheduler.run_5min_ingestion(

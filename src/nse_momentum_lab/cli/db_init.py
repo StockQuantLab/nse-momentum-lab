@@ -8,6 +8,7 @@ Initialize databases for NSE Momentum Lab.
 Usage:
     doppler run -- uv run nseml-db-init
     doppler run -- uv run nseml-db-init --duckdb-only
+    doppler run -- uv run nseml-db-init --duckdb-only --force --allow-full-rebuild
     doppler run -- uv run nseml-db-init --postgres-only
 """
 
@@ -99,8 +100,24 @@ def main():
     parser = argparse.ArgumentParser(description="Initialize NSE Momentum Lab databases")
     parser.add_argument("--postgres-only", action="store_true", help="Only initialize PostgreSQL")
     parser.add_argument("--duckdb-only", action="store_true", help="Only initialize DuckDB")
-    parser.add_argument("--force", action="store_true", help="Force rebuild DuckDB tables")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force rebuild DuckDB tables (requires --allow-full-rebuild)",
+    )
+    parser.add_argument(
+        "--allow-full-rebuild",
+        action="store_true",
+        help="Acknowledge a destructive full DuckDB rebuild when used with --force.",
+    )
     args = parser.parse_args()
+
+    if args.force and not args.allow_full_rebuild and not args.postgres_only:
+        parser.error(
+            "nseml-db-init --duckdb-only --force is destructive and expensive. "
+            "Use nseml-db-init --duckdb-only without --force for normal rebuilds. "
+            "If you intentionally want the full rebuild, add --allow-full-rebuild."
+        )
 
     success = True
 

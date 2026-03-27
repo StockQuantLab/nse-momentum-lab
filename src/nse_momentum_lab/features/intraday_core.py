@@ -20,6 +20,7 @@ precise intraday entry timing (like FEE - Find and Enter Early).
 from __future__ import annotations
 
 import logging
+from datetime import date, timedelta
 
 from nse_momentum_lab.features.registry import (
     FeatureDefinition,
@@ -91,36 +92,36 @@ opening_ranges AS (
         rn_5min,
         candles_per_day,
         -- Opening range metrics
-        MAX(high) OVER (
+        MAX(high) FILTER (WHERE rn_5min <= 3) OVER (
             PARTITION BY symbol, trading_date
             ORDER BY candle_time
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) FILTER (WHERE rn_5min <= 3) AS or_15min_high,  -- First 15 min (3 candles)
-        MAX(high) OVER (
+        ) AS or_15min_high,  -- First 15 min (3 candles)
+        MAX(high) FILTER (WHERE rn_5min <= 6) OVER (
             PARTITION BY symbol, trading_date
             ORDER BY candle_time
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) FILTER (WHERE rn_5min <= 6) AS or_30min_high,  -- First 30 min (6 candles)
-        MAX(high) OVER (
+        ) AS or_30min_high,  -- First 30 min (6 candles)
+        MAX(high) FILTER (WHERE rn_5min <= 12) OVER (
             PARTITION BY symbol, trading_date
             ORDER BY candle_time
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) FILTER (WHERE rn_5min <= 12) AS or_60min_high,  -- First 60 min (12 candles)
-        MIN(low) OVER (
+        ) AS or_60min_high,  -- First 60 min (12 candles)
+        MIN(low) FILTER (WHERE rn_5min <= 3) OVER (
             PARTITION BY symbol, trading_date
             ORDER BY candle_time
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) FILTER (WHERE rn_5min <= 3) AS or_15min_low,
-        MIN(low) OVER (
+        ) AS or_15min_low,
+        MIN(low) FILTER (WHERE rn_5min <= 6) OVER (
             PARTITION BY symbol, trading_date
             ORDER BY candle_time
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) FILTER (WHERE rn_5min <= 6) AS or_30min_low,
-        MIN(low) OVER (
+        ) AS or_30min_low,
+        MIN(low) FILTER (WHERE rn_5min <= 12) OVER (
             PARTITION BY symbol, trading_date
             ORDER BY candle_time
             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-        ) FILTER (WHERE rn_5min <= 12) AS or_60min_low
+        ) AS or_60min_low
     FROM with_prior_day
 ),
 first_hour AS (
@@ -146,15 +147,15 @@ first_hour AS (
         or_30min_low,
         or_60min_low,
         -- First hour metrics
-        MAX(high) OVER (
+        MAX(high) FILTER (WHERE rn_5min <= 12) OVER (
             PARTITION BY symbol, trading_date
-        ) FILTER (WHERE rn_5min <= 12) AS first_hour_high,
-        MIN(low) OVER (
+        ) AS first_hour_high,
+        MIN(low) FILTER (WHERE rn_5min <= 12) OVER (
             PARTITION BY symbol, trading_date
-        ) FILTER (WHERE rn_5min <= 12) AS first_hour_low,
-        AVG(volume) OVER (
+        ) AS first_hour_low,
+        AVG(volume) FILTER (WHERE rn_5min <= 12) OVER (
             PARTITION BY symbol, trading_date
-        ) FILTER (WHERE rn_5min <= 12) AS first_hour_avg_vol
+        ) AS first_hour_avg_vol
     FROM opening_ranges
 ),
 breakout_detection AS (
@@ -185,21 +186,21 @@ breakout_detection AS (
         -- First breakout of prior high (time when it happened)
         CASE
             WHEN prior_day_high IS NOT NULL AND high > prior_day_high THEN
-                MIN(candle_time) OVER (
+                MIN(candle_time) FILTER (WHERE high > prior_day_high) OVER (
                     PARTITION BY symbol, trading_date
                     ORDER BY candle_time
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                ) FILTER (WHERE high > prior_day_high)
+                )
             ELSE NULL
         END AS first_breakout_time,
         -- First breakdown of prior low
         CASE
             WHEN prior_day_low IS NOT NULL AND low < prior_day_low THEN
-                MIN(candle_time) OVER (
+                MIN(candle_time) FILTER (WHERE low < prior_day_low) OVER (
                     PARTITION BY symbol, trading_date
                     ORDER BY candle_time
                     ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                ) FILTER (WHERE low < prior_day_low)
+                )
             ELSE NULL
         END AS first_breakdown_time,
         -- Gap at open
@@ -290,10 +291,95 @@ SELECT * FROM final
 """
 
 
+def _sql_date_literal(value: date) -> str:
+    return f"DATE '{value.isoformat()}'"
+
+
+def _intraday_core_sql_for_sources(source_5min_view: str, source_daily_view: str) -> str:
+    return (
+        FEAT_INTRADAY_CORE_SQL.replace("CREATE TABLE feat_intraday_core AS\n", "")
+        .replace("FROM v_5min", f"FROM {source_5min_view}")
+        .replace("FROM v_daily", f"FROM {source_daily_view}")
+    )
+
+
+def _build_feat_intraday_core_incremental(con, *, since_date: date, dataset_hash: str) -> int:
+    source_5min_view = "_feat_intraday_core_5min_src"
+    source_daily_view = "_feat_intraday_core_daily_src"
+    delta_table = "_feat_intraday_core_delta"
+    table_exists = True
+
+    try:
+        con.execute("SELECT 1 FROM feat_intraday_core LIMIT 1").fetchone()
+    except Exception:
+        table_exists = False
+
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW {source_5min_view} AS "
+        f"SELECT * FROM v_5min WHERE date >= {_sql_date_literal(since_date)}"
+    )
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW {source_daily_view} AS "
+        f"SELECT * FROM v_daily WHERE date >= {_sql_date_literal(since_date - timedelta(days=1))}"
+    )
+    try:
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+        con.execute(
+            f"CREATE TEMP TABLE {delta_table} AS "
+            f"{_intraday_core_sql_for_sources(source_5min_view, source_daily_view)}"
+        )
+        if table_exists:
+            con.execute("DELETE FROM feat_intraday_core WHERE trading_date >= ?", [since_date])
+            con.execute(
+                f"""
+                INSERT INTO feat_intraday_core
+                SELECT *
+                FROM {delta_table}
+                WHERE trading_date >= ?
+                """,
+                [since_date],
+            )
+        else:
+            con.execute(
+                f"""
+                CREATE TABLE feat_intraday_core AS
+                SELECT *
+                FROM {delta_table}
+                WHERE trading_date >= {_sql_date_literal(since_date)}
+                """
+            )
+    finally:
+        con.execute(f"DROP VIEW IF EXISTS {source_5min_view}")
+        con.execute(f"DROP VIEW IF EXISTS {source_daily_view}")
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+
+    if not table_exists:
+        con.execute(
+            "CREATE INDEX idx_feat_intraday_core_symbol_date ON feat_intraday_core(symbol, trading_date)"
+        )
+        con.execute(
+            "CREATE INDEX idx_feat_intraday_core_date_time ON feat_intraday_core(trading_date, candle_time)"
+        )
+
+    row = con.execute("SELECT COUNT(*) FROM feat_intraday_core").fetchone()
+    n = int(row[0]) if row and row[0] is not None else 0
+    con.execute(
+        """
+        INSERT OR REPLACE INTO bt_materialization_state
+        (table_name, dataset_hash, query_version, row_count, updated_at)
+        VALUES (?, ?, ?, ?, current_timestamp)
+    """,
+        ["feat_intraday_core", dataset_hash, FEAT_INTRADAY_CORE_VERSION, n],
+    )
+    logger.info("feat_intraday_core incrementally refreshed from %s: %d rows", since_date, n)
+    return n
+
+
 def build_feat_intraday_core(
     con,  # DuckDBPyConnection
     force: bool = False,
     dataset_hash: str | None = None,
+    since_date: date | None = None,
 ) -> int:
     """
     Build the feat_intraday_core materialized table.
@@ -306,27 +392,57 @@ def build_feat_intraday_core(
     Returns:
         Number of rows in the built table
     """
-    # Check if already built
-    if not force:
-        try:
-            row = con.execute(
-                "SELECT table_name, query_version, row_count FROM bt_materialization_state "
-                "WHERE table_name = 'feat_intraday_core'"
-            ).fetchone()
-            if row:
-                _table_name, query_version, row_count = row
-                if query_version == FEAT_INTRADAY_CORE_VERSION:
-                    logger.info("feat_intraday_core is up-to-date (%d rows).", row_count)
-                    return int(row_count)
-        except Exception:
-            pass  # Table doesn't exist yet
-
-    # Check if v_5min exists
+    # Check if v_5min exists before trying to hash the source snapshot.
     try:
         con.execute("SELECT 1 FROM v_5min LIMIT 1").fetchone()
     except Exception:
         logger.warning("v_5min view not available, skipping feat_intraday_core")
         return 0
+
+    if dataset_hash is None:
+        snapshot_row = con.execute("""
+            SELECT
+                COUNT(*)::BIGINT AS rows,
+                COUNT(DISTINCT symbol)::BIGINT AS symbols,
+                MIN(date)::VARCHAR AS min_date,
+                MAX(date)::VARCHAR AS max_date
+            FROM v_5min
+        """).fetchone()
+        import hashlib
+        import json
+
+        snapshot = {
+            "rows": int(snapshot_row[0]) if snapshot_row and snapshot_row[0] else 0,
+            "symbols": int(snapshot_row[1]) if snapshot_row and snapshot_row[1] else 0,
+            "min_date": snapshot_row[2] if snapshot_row else None,
+            "max_date": snapshot_row[3] if snapshot_row else None,
+        }
+        dataset_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[
+            :16
+        ]
+
+    if since_date is not None and not force:
+        return _build_feat_intraday_core_incremental(
+            con, since_date=since_date, dataset_hash=dataset_hash
+        )
+
+    # Check if already built
+    if not force:
+        try:
+            row = con.execute(
+                "SELECT table_name, dataset_hash, query_version, row_count FROM bt_materialization_state "
+                "WHERE table_name = 'feat_intraday_core'"
+            ).fetchone()
+            if row:
+                _table_name, current_dataset_hash, query_version, row_count = row
+                if (
+                    query_version == FEAT_INTRADAY_CORE_VERSION
+                    and current_dataset_hash == dataset_hash
+                ):
+                    logger.info("feat_intraday_core is up-to-date (%d rows).", row_count)
+                    return int(row_count)
+        except Exception:
+            pass  # Table doesn't exist yet
 
     # Drop and rebuild
     logger.info("Building feat_intraday_core materialized table...")
@@ -345,29 +461,6 @@ def build_feat_intraday_core(
     n = int(row[0]) if row and row[0] is not None else 0
 
     # Update materialization state
-    if dataset_hash is None:
-        # Generate a simple hash from v_5min
-        snapshot_row = con.execute("""
-            SELECT
-                COUNT(*)::BIGINT AS rows,
-                COUNT(DISTINCT symbol)::BIGINT AS symbols,
-                MIN(date)::VARCHAR AS min_date,
-                MAX(date)::VARCHAR AS max_date
-            FROM v_5min
-        """).fetchone()
-        import hashlib
-        import json
-
-        snapshot = {
-            "rows": int(snapshot_row[0]) if snapshot_row[0] else 0,
-            "symbols": int(snapshot_row[1]) if snapshot_row[1] else 0,
-            "min_date": snapshot_row[2],
-            "max_date": snapshot_row[3],
-        }
-        dataset_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[
-            :16
-        ]
-
     con.execute(
         """
         INSERT OR REPLACE INTO bt_materialization_state

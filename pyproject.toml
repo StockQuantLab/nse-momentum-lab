@@ -76,6 +76,7 @@ dev = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
+cache_dir = "C:/Users/kanna/.codex/memories/pytest-cache"
 
 [tool.coverage.run]
 source = ["src"]

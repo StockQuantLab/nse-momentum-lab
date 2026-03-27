@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 .pytest_cache/
 .pytest-tmp/
+.pytest-btemp/
+.unit-tmp/
 pytest-cache-files-*/
 .ruff_cache/
 .mypy_cache/
@@ -13,6 +15,7 @@ dist/
 build/
 
 # Local outputs
+.tmp_logs/
 logs/
 output/
 artifacts/

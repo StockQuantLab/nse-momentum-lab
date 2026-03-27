@@ -94,9 +94,9 @@ def _build_threshold_breakout_candidate_query(
                 f_prev.atr_compress_ratio AS prev_atr_compress_ratio,
                 f_prev.range_percentile AS prev_range_percentile
             FROM breakout_days g
-            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.trading_date
+            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.date
             LEFT JOIN feat_daily f_prev
-              ON g.symbol = f_prev.symbol AND g.prev_trading_date = f_prev.trading_date
+              ON g.symbol = f_prev.symbol AND g.prev_trading_date = f_prev.date
         )
         SELECT
             symbol, trading_date, open, high, low, close, prev_close, prev_high, prev_low, prev_open, gap_pct,
@@ -238,7 +238,7 @@ def _build_threshold_breakdown_candidate_query(
                 FROM v_daily d
                 LEFT JOIN feat_daily f
                     ON d.symbol = f.symbol
-                    AND d.date = f.trading_date
+                    AND d.date = f.date
                 WHERE d.date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                 GROUP BY d.date
             )
@@ -301,7 +301,7 @@ def _build_threshold_breakdown_candidate_query(
                 f.ma_7, f.ma_65_sma, f.rs_252
                 {breadth_select}
             FROM breakdown_days g
-            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.trading_date
+            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.date
         )
         SELECT
             symbol, trading_date, open, high, low, close, prev_close, prev_high, gap_pct,
@@ -393,7 +393,7 @@ def _build_episodic_pivot_candidate_query(
                 f.prior_breakouts_30d, f.prior_breakouts_90d, f.r2_65,
                 f.ma_7, f.ma_65_sma
             FROM pivot_candidates g
-            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.trading_date
+            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.date
         )
         SELECT
             symbol, trading_date, open, high, low, close, prev_close, prev_high, prev_low, prev_open, gap_pct,

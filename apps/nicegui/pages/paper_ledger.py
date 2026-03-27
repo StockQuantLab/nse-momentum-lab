@@ -377,6 +377,7 @@ async def paper_ledger_page() -> None:
             session
             for session in sessions
             if str(session.get("mode") or "").strip().lower() != "walk_forward"
+            and str(session.get("status") or "").strip().upper() != "ARCHIVED"
         ]
         if not paper_sessions:
             empty_state(

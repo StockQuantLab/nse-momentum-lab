@@ -5,11 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 
 import psycopg
 
 from nse_momentum_lab.config import get_settings
+from nse_momentum_lab.utils.time_utils import IST
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,11 +51,11 @@ def fetch_backtest_status(exp_id: str | None) -> dict | None:
             if row is None:
                 return None
 
-    now = datetime.now(UTC)
+    now = datetime.now(IST)
     heartbeat_at = row[6]
     heartbeat_age_seconds = None
     if heartbeat_at is not None:
-        heartbeat_age_seconds = max(0.0, (now - heartbeat_at.astimezone(UTC)).total_seconds())
+        heartbeat_age_seconds = max(0.0, (now - heartbeat_at).total_seconds())
 
     return {
         "exp_id": row[0],

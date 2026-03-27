@@ -8,8 +8,16 @@ Current operator-facing workflows that agents should understand:
 - The NiceGUI `/walk_forward` page is the operator view for validation history, fold results, reruns, and promotion-gate review
 - The NiceGUI `/paper_ledger` page is the operator view for replay sessions, live sessions, watchlist state, and recent activity
 - Canonical breakout strategy name for paper/backtest flows is `thresholdbreakout`; `2lynchbreakout` remains the legacy alias for historical sessions.
-- Use `nseml-paper cleanup-walk-forward --yes` before rerunning a fresh validation window when you need to wipe stale walk-forward sessions.
+- For routine table inventory, load modes, and refresh behavior, use the operator docs instead of implementation code:
+  - `docs/operations/TABLE_LOAD_MATRIX.md`
+  - `docs/operations/DATA_APPEND_GUIDE.md`
+  - `docs/reference/COMMANDS.md`
+- Use `nseml-paper walk-forward-cleanup --wf-run-id <SESSION_ID>` before rerunning a fresh validation window to preview stale walk-forward cleanup.
+- Apply cleanup only with `--apply` when you intend to delete the parent walk-forward session, its folds, and the linked DuckDB backtest rows.
+- Do not use hand-written SQL or ad hoc Python for normal walk-forward cleanup.
 - Walk-forward windows are built from actual trading sessions, not calendar-day approximations, and the replay/live gate also checks trade-date coverage plus experiment lineage when an experiment is supplied.
+- Walk-forward also preflights the loaded runtime coverage for `market_day_state`, `strategy_day_state`, and `intraday_day_pack`; it fails fast if the requested window is stale.
+- After a short Kite catch-up window, refresh the runtime tables first with `nseml-kite-ingest`, `nseml-build-features --since <YYYY-MM-DD>`, and `nseml-market-monitor --incremental --since <YYYY-MM-DD>` before trying walk-forward again.
 
 Important constraint:
 - **LLMs never compute price series, indicators, or trades.**

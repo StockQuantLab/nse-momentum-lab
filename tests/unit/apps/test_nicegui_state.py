@@ -7,7 +7,7 @@ _project_root = Path(__file__).resolve().parents[3]
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-import apps.nicegui.state as state
+import apps.nicegui.state as state  # noqa: E402
 
 
 class _DummyExecutor:

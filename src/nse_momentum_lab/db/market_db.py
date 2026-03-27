@@ -19,6 +19,7 @@ import os
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import duckdb
@@ -34,7 +35,7 @@ BACKTEST_DUCKDB_FILE = DATA_DIR / "backtest.duckdb"
 BACKTEST_DASHBOARD_DUCKDB_FILE = DATA_DIR / "backtest_dashboard.duckdb"
 
 # Bump when feat_daily SQL logic changes.
-FEAT_DAILY_QUERY_VERSION = "feat_daily_v2lynch_ti65_2026_03_14_breakdown"
+FEAT_DAILY_QUERY_VERSION = "feat_daily_v2lynch_ti65_2026_03_27_true_range"
 MARKET_MONITOR_QUERY_VERSION = "market_monitor_v3_2026_03_20_ma40_t2108"
 MARKET_MONITOR_INCREMENTAL_LOOKBACK_SESSIONS = 130
 
@@ -235,6 +236,47 @@ class MarketDataDB:
         if column not in existing:
             self.con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_sql}")
 
+    def _table_columns(self, table: str) -> set[str]:
+        """Return the current column names for a table, or an empty set if it is missing."""
+        try:
+            rows = self.con.execute(f"PRAGMA table_info('{table}')").fetchall()
+        except duckdb.CatalogException:
+            return set()
+        except Exception as exc:
+            logger.warning("Unexpected error reading columns for '%s': %s", table, exc)
+            return set()
+        return {str(row[1]) for row in rows if len(row) > 1 and row[1]}
+
+    def _select_existing_columns(
+        self,
+        table: str,
+        desired_columns: list[str],
+        *,
+        order_by: str | None = None,
+        where_clause: str | None = None,
+        params: list[Any] | None = None,
+    ) -> pl.DataFrame:
+        """Select a stable projection while tolerating older catalogs missing new columns."""
+        existing_columns = self._table_columns(table)
+        if not existing_columns:
+            return pl.DataFrame()
+
+        selected_columns = [column for column in desired_columns if column in existing_columns]
+        if not selected_columns:
+            return pl.DataFrame()
+
+        query = f"SELECT {', '.join(selected_columns)} FROM {table}"
+        if where_clause:
+            query += f" WHERE {where_clause}"
+        if order_by:
+            query += f" ORDER BY {order_by}"
+
+        frame = self.con.execute(query, params or []).pl()
+        missing_columns = [column for column in desired_columns if column not in frame.columns]
+        if missing_columns:
+            frame = frame.with_columns([pl.lit(None).alias(column) for column in missing_columns])
+        return frame.select(desired_columns)
+
     def _ensure_backtest_tables(self) -> None:
         """Create backtest result and state tables if they do not exist."""
         self.con.execute("""
@@ -245,6 +287,7 @@ class MarketDataDB:
                 params_hash     VARCHAR,
                 dataset_hash    VARCHAR,
                 code_hash       VARCHAR,
+                wf_run_id       VARCHAR,
                 data_source     VARCHAR DEFAULT 'local',
                 dataset_snapshot_json VARCHAR DEFAULT '{}',
                 start_year      INTEGER NOT NULL,
@@ -264,6 +307,7 @@ class MarketDataDB:
         self._ensure_column("bt_experiment", "params_hash", "VARCHAR")
         self._ensure_column("bt_experiment", "dataset_hash", "VARCHAR")
         self._ensure_column("bt_experiment", "code_hash", "VARCHAR")
+        self._ensure_column("bt_experiment", "wf_run_id", "VARCHAR")
         self._ensure_column("bt_experiment", "data_source", "VARCHAR DEFAULT 'local'")
         self._ensure_column(
             "bt_experiment",
@@ -375,6 +419,10 @@ class MarketDataDB:
             CREATE INDEX IF NOT EXISTS idx_bt_experiment_params_dataset
             ON bt_experiment(params_hash, dataset_hash)
         """)
+        self.con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_bt_experiment_wf_run_id
+            ON bt_experiment(wf_run_id)
+        """)
 
     def refresh_backtest_read_snapshot(self) -> None:
         """Refresh read-only dashboard copy of backtest tables."""
@@ -453,6 +501,13 @@ class MarketDataDB:
             "dataset_hash": dataset_hash,
         }
 
+    @staticmethod
+    def _snapshot_component_hash(snapshot: dict[str, object] | None) -> str:
+        if not snapshot:
+            return ""
+        blob = json.dumps(snapshot, sort_keys=True)
+        return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
     def register_dataset_snapshot(self, snapshot: dict[str, object]) -> None:
         self.con.execute(
             """INSERT OR REPLACE INTO bt_dataset_snapshot
@@ -513,15 +568,17 @@ class MarketDataDB:
         params_hash: str | None = None,
         dataset_hash: str | None = None,
         code_hash: str | None = None,
+        wf_run_id: str | None = None,
         data_source: str | None = None,
         dataset_snapshot: dict[str, object] | None = None,
     ) -> None:
         """Insert a new experiment record (status='running')."""
         self.con.execute(
             """INSERT INTO bt_experiment
-               (exp_id, strategy_name, params_json, params_hash, dataset_hash, code_hash, data_source,
+               (exp_id, strategy_name, params_json, params_hash, dataset_hash, code_hash, wf_run_id,
+                data_source,
                 dataset_snapshot_json, start_year, end_year)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             [
                 exp_id,
                 strategy_name,
@@ -529,6 +586,7 @@ class MarketDataDB:
                 params_hash,
                 dataset_hash,
                 code_hash,
+                wf_run_id,
                 data_source or self._data_source,
                 json.dumps(dataset_snapshot or {}, sort_keys=True),
                 start_year,
@@ -679,6 +737,57 @@ class MarketDataDB:
         cols = [d[0] for d in self.con.description]
         return dict(zip(cols, row, strict=False))
 
+    def list_experiments_for_wf_run_id(self, wf_run_id: str) -> list[dict[str, Any]]:
+        """Return all experiments linked to a walk-forward run."""
+        if "wf_run_id" not in self._table_columns("bt_experiment"):
+            return []
+
+        order_by = (
+            "created_at DESC"
+            if "created_at" in self._table_columns("bt_experiment")
+            else "exp_id DESC"
+        )
+        result = self.con.execute(
+            f"""SELECT *
+                FROM bt_experiment
+                WHERE wf_run_id = ?
+                ORDER BY {order_by}""",
+            [wf_run_id],
+        )
+        rows = result.fetchall()
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    def get_experiment_cleanup_summary(self, exp_id: str) -> dict[str, Any] | None:
+        """Return row counts for all DuckDB tables tied to one experiment."""
+        exp = self.get_experiment(exp_id)
+        if exp is None:
+            return None
+
+        counts_row = self.con.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM bt_trade WHERE exp_id = ?) AS trade_rows,
+                (SELECT COUNT(*) FROM bt_yearly_metric WHERE exp_id = ?) AS yearly_metric_rows,
+                (SELECT COUNT(*) FROM bt_execution_diagnostic WHERE exp_id = ?) AS diagnostic_rows
+            """,
+            [exp_id, exp_id, exp_id],
+        ).fetchone()
+        trade_rows = int(counts_row[0] or 0) if counts_row else 0
+        yearly_metric_rows = int(counts_row[1] or 0) if counts_row else 0
+        diagnostic_rows = int(counts_row[2] or 0) if counts_row else 0
+        return {
+            "exp_id": exp_id,
+            "wf_run_id": exp.get("wf_run_id"),
+            "strategy_name": exp.get("strategy_name"),
+            "status": exp.get("status"),
+            "trade_rows": trade_rows,
+            "yearly_metric_rows": yearly_metric_rows,
+            "diagnostic_rows": diagnostic_rows,
+            "experiment_rows": 1,
+            "total_rows": 1 + trade_rows + yearly_metric_rows + diagnostic_rows,
+        }
+
     def get_experiment_trades(self, exp_id: str) -> pl.DataFrame:
         """Fetch all trades for an experiment as a Polars DataFrame."""
         return self.con.execute(
@@ -700,12 +809,31 @@ class MarketDataDB:
 
     def list_experiments(self) -> pl.DataFrame:
         """List all experiments ordered by creation time."""
-        return self.con.execute(
-            """SELECT exp_id, strategy_name, params_json, params_hash, dataset_hash, code_hash,
-                      data_source, start_year, end_year, total_return_pct, annualized_return_pct,
-                      total_trades, win_rate_pct, max_drawdown_pct, status, created_at
-               FROM bt_experiment ORDER BY created_at DESC"""
-        ).pl()
+        return self._select_existing_columns(
+            "bt_experiment",
+            [
+                "exp_id",
+                "strategy_name",
+                "params_json",
+                "params_hash",
+                "dataset_hash",
+                "code_hash",
+                "wf_run_id",
+                "data_source",
+                "start_year",
+                "end_year",
+                "total_return_pct",
+                "annualized_return_pct",
+                "total_trades",
+                "win_rate_pct",
+                "max_drawdown_pct",
+                "status",
+                "created_at",
+            ],
+            order_by="created_at DESC"
+            if "created_at" in self._table_columns("bt_experiment")
+            else "exp_id DESC",
+        )
 
     def delete_experiment(self, exp_id: str) -> None:
         """Delete an experiment and its trades/metrics."""
@@ -713,6 +841,7 @@ class MarketDataDB:
         try:
             self.con.execute("DELETE FROM bt_trade WHERE exp_id = ?", [exp_id])
             self.con.execute("DELETE FROM bt_yearly_metric WHERE exp_id = ?", [exp_id])
+            self.con.execute("DELETE FROM bt_execution_diagnostic WHERE exp_id = ?", [exp_id])
             self.con.execute("DELETE FROM bt_experiment WHERE exp_id = ?", [exp_id])
             self.con.execute("COMMIT")
         except Exception as e:
@@ -882,7 +1011,11 @@ class MarketDataDB:
                     trading_date,
                     (close / NULLIF(close_1d, 0)) - 1 AS ret_1d,
                     (close / NULLIF(close_5d, 0)) - 1 AS ret_5d,
-                    (high - low) AS true_range,
+                    GREATEST(
+                        high - low,
+                        ABS(high - close_1d),
+                        ABS(low - close_1d)
+                    ) AS true_range,
                     (high - low) / NULLIF(close, 0) AS range_pct,
                     (close - low) / NULLIF(high - low, 0) AS close_pos_in_range,
                     close_20d AS ma_20,
@@ -1012,7 +1145,12 @@ class MarketDataDB:
             FROM breakouts
         """)
 
-    def build_all(self, force: bool = False, use_modular: bool = True) -> None:
+    def build_all(
+        self,
+        force: bool = False,
+        use_modular: bool = True,
+        since_date: date | None = None,
+    ) -> None:
         """Build all materialized tables.
 
         Args:
@@ -1022,29 +1160,49 @@ class MarketDataDB:
         """
         logger.info("Building materialized feature tables...")
         if use_modular:
-            self._build_modular_features(force=force)
+            self._build_modular_features(force=force, since_date=since_date)
         else:
             self.build_feat_daily_table(force=force)
-        self.build_market_monitor_table(force=force)
+        if since_date is not None:
+            self.build_market_monitor_incremental(since_date=since_date, force=force)
+        else:
+            self.build_market_monitor_table(force=force)
         logger.info("Done: market.duckdb is ready for backtesting.")
 
-    def _build_modular_features(self, force: bool = False) -> None:
+    def _build_modular_features(
+        self,
+        force: bool = False,
+        since_date: date | None = None,
+    ) -> None:
         """Build modular feature store (feat_daily_core, feat_intraday_core, etc.)."""
-        from nse_momentum_lab.features import (
-            IncrementalFeatureMaterializer,
-            create_legacy_feat_daily_view,
-        )
+        from nse_momentum_lab.features import create_legacy_feat_daily_view
 
-        materializer = IncrementalFeatureMaterializer()
-        summary = materializer.build_all(self.con, force=force, stop_on_error=False)
+        if since_date is not None and not force:
+            daily_rows = self.build_feat_daily_core(force=force, since_date=since_date)
+            intraday_rows = self.build_feat_intraday_core(force=force, since_date=since_date)
+            event_rows = self.build_feat_event_core(force=force, since_date=since_date)
+            derived_rows = self.build_2lynch_derived(force=force, since_date=since_date)
+            logger.info(
+                "Incremental feature build complete since %s: daily=%d intraday=%d event=%d derived=%d",
+                since_date,
+                daily_rows,
+                intraday_rows,
+                event_rows,
+                derived_rows,
+            )
+        else:
+            from nse_momentum_lab.features import IncrementalFeatureMaterializer
 
-        logger.info(
-            "Feature build complete: %d success, %d skipped, %d failed in %.1fs",
-            summary.successful,
-            summary.skipped,
-            summary.failed,
-            summary.total_duration_seconds,
-        )
+            materializer = IncrementalFeatureMaterializer()
+            summary = materializer.build_all(self.con, force=force, stop_on_error=False)
+
+            logger.info(
+                "Feature build complete: %d success, %d skipped, %d failed in %.1fs",
+                summary.successful,
+                summary.skipped,
+                summary.failed,
+                summary.total_duration_seconds,
+            )
 
         # Create backward-compatible feat_daily view
         create_legacy_feat_daily_view(self.con)
@@ -1054,6 +1212,7 @@ class MarketDataDB:
         self,
         force: bool = False,
         dataset_hash: str | None = None,
+        since_date: date | None = None,
     ) -> int:
         """Build feat_daily_core materialized table.
 
@@ -1062,34 +1221,51 @@ class MarketDataDB:
         """
         from nse_momentum_lab.features.daily_core import build_feat_daily_core
 
-        return build_feat_daily_core(self.con, force=force, dataset_hash=dataset_hash)
+        return build_feat_daily_core(
+            self.con,
+            force=force,
+            dataset_hash=dataset_hash,
+            since_date=since_date,
+        )
 
-    def build_feat_intraday_core(self, force: bool = False) -> int:
+    def build_feat_intraday_core(
+        self,
+        force: bool = False,
+        since_date: date | None = None,
+    ) -> int:
         """Build feat_intraday_core materialized table.
 
         Returns the row count of the built table.
         """
         from nse_momentum_lab.features.intraday_core import build_feat_intraday_core
 
-        return build_feat_intraday_core(self.con, force=force)
+        return build_feat_intraday_core(self.con, force=force, since_date=since_date)
 
-    def build_feat_event_core(self, force: bool = False) -> int:
+    def build_feat_event_core(
+        self,
+        force: bool = False,
+        since_date: date | None = None,
+    ) -> int:
         """Build feat_event_core materialized table (placeholder).
 
         Returns the row count of the built table.
         """
         from nse_momentum_lab.features.event_core import build_feat_event_core
 
-        return build_feat_event_core(self.con, force=force)
+        return build_feat_event_core(self.con, force=force, since_date=since_date)
 
-    def build_2lynch_derived(self, force: bool = False) -> int:
+    def build_2lynch_derived(
+        self,
+        force: bool = False,
+        since_date: date | None = None,
+    ) -> int:
         """Build feat_2lynch_derived materialized table.
 
         Returns the row count of the built table.
         """
         from nse_momentum_lab.features.strategy_derived import build_2lynch_derived
 
-        return build_2lynch_derived(self.con, force=force)
+        return build_2lynch_derived(self.con, force=force, since_date=since_date)
 
     def drop_and_rebuild(self, use_modular: bool = True) -> None:
         """Drop all materialized tables and rebuild from Parquet.
@@ -1485,8 +1661,9 @@ class MarketDataDB:
 
         snapshot = self.get_dataset_snapshot()
         dataset_hash = str(snapshot["dataset_hash"])
+        daily_hash = self._snapshot_component_hash(snapshot.get("daily"))
 
-        self.build_feat_daily_core(force=force, dataset_hash=dataset_hash)
+        self.build_feat_daily_core(force=force, dataset_hash=daily_hash)
 
         if not force and self._table_exists("market_monitor_daily"):
             row = self.con.execute("SELECT COUNT(*) FROM market_monitor_daily").fetchone()
@@ -1584,7 +1761,12 @@ class MarketDataDB:
 
         snapshot = self.get_dataset_snapshot()
         dataset_hash = str(snapshot["dataset_hash"])
-        self.build_feat_daily_core(force=force, dataset_hash=dataset_hash)
+        daily_hash = self._snapshot_component_hash(snapshot.get("daily"))
+        self.build_feat_daily_core(
+            force=force,
+            dataset_hash=daily_hash,
+            since_date=since_date,
+        )
 
         # Determine the first trading date that needs to be rebuilt.
         if since_date is None:
@@ -1600,7 +1782,11 @@ class MarketDataDB:
 
         if not self._table_exists("feat_daily_core"):
             logger.info("feat_daily_core is missing; building it first.")
-            self.build_feat_daily_core(force=force, dataset_hash=dataset_hash)
+            self.build_feat_daily_core(
+                force=force,
+                dataset_hash=daily_hash,
+                since_date=since_date,
+            )
 
         lookback_date = self._market_monitor_incremental_lookback_date(rebuild_start_date)
         logger.info(

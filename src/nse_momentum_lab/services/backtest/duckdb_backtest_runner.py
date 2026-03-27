@@ -40,10 +40,6 @@ from nse_momentum_lab.db.market_db import (
     get_market_db,
 )
 from nse_momentum_lab.services.backtest.engine import ExitReason, PositionSide
-from nse_momentum_lab.services.backtest.intraday_execution import (
-    IntradayExecutionResult,
-    resolve_intraday_execution_from_5min,
-)
 from nse_momentum_lab.services.backtest.persistence import (
     BacktestArtifactPublisher,
     build_strategy_hash,
@@ -72,6 +68,7 @@ from nse_momentum_lab.utils import (
     minutes_from_nse_open,
     normalize_candle_time,
 )
+from nse_momentum_lab.utils.time_utils import IST
 
 logger = logging.getLogger(__name__)
 
@@ -350,101 +347,13 @@ class DuckDBBacktestRunner:
     ) -> tuple[pl.DataFrame, pl.DataFrame]:
         """Rank and budget daily breakdown (short) candidates.
 
-        Scoring rationale (short-specific, revised):
-        The original rs_252-magnitude-dominant formula anti-selected in downtrend markets
-        because every stock has negative rs_252 and picking the "most negative" selects the
-        most beaten-up stocks (mean-reversion risk), not fresh breakdowns.
-
-        v2 formula (H-dominant): picking stocks with extreme close near day-low created a
-        different problem — these stocks have wide stops (session_high far from entry) and
-        are often exhaustion moves rather than trend continuation. High DD resulted.
-
-        v3 formula (R²-primary): prioritises orderly downtrend continuation:
-        - R² quality: orderly 65d downtrend = continuation more likely + tighter stops (primary,
-          0-5000 pts). Orderly = small daily variation → range typically narrower → stop closer
-          to entry → smaller loss when wrong.
-        - H quality: close near the day's low = confirms selling pressure (secondary, 0-2000 pts)
-          close_pos_in_range range after filter_h: 0.0-0.30; lower = closer to low = better
-        - C quality: quieter prior day = better consolidation before breakdown (0-1000 pts)
-          vol_dryup_ratio: lower = more volume compression on prior day = better setup
-        - Freshness: fewer prior breakdowns in 90d = not an exhausted short (0-300 pts)
-          uses prior_breakdowns_90d (downside counter), not prior_breakouts_90d (upside)
-        - rs_252 tiebreaker: moderate negative YTD relative return (0-200 pts, capped at -40%)
-          capped to avoid rewarding the most beaten-up stocks
-        - Liquidity tiebreaker: higher value_traded_inr breaks final ties
+        Delegates to the shared implementation in ``candidate_builder``.
         """
-        if df_filtered.is_empty():
-            return df_filtered, df_filtered
-
-        # R² quality: orderly downtrend (PRIMARY, 0-5000) — orderly trend has tighter typical
-        # stops and higher continuation probability
-        r2_score = (pl.col("r2_65").fill_null(0.0).clip(0.0, 1.0) * 5_000.0).alias(
-            "selection_r2_quality"
+        from nse_momentum_lab.services.paper.candidate_builder import (
+            apply_breakdown_selection_ranking as _shared,
         )
 
-        # H quality: close near day low (SECONDARY, 0-2000) — filter_h ensures <= 0.30
-        h_score = (
-            ((0.30 - pl.col("close_pos_in_range").fill_null(0.30).clip(0.0, 0.30)) / 0.30) * 2_000.0
-        ).alias("selection_h_quality")
-
-        # C quality: quiet prior day (0-1000); lower vol_dryup = more compressed = better
-        c_score = (
-            ((1.3 - pl.col("vol_dryup_ratio").fill_null(1.3).clip(0.0, 1.3)) / 1.3) * 1_000.0
-        ).alias("selection_c_strength")
-
-        # Freshness: fewer prior breakdowns (0-300) using downside counter
-        freshness_score = (
-            pl.when(pl.col("prior_breakdowns_90d").fill_null(0) == 0)
-            .then(300)
-            .when(pl.col("prior_breakdowns_90d").fill_null(0) == 1)
-            .then(200)
-            .when(pl.col("prior_breakdowns_90d").fill_null(0) == 2)
-            .then(100)
-            .otherwise(0)
-        ).alias("selection_freshness")
-
-        # rs_252 tiebreaker: cap at -0.40 to avoid rewarding most-beaten-up stocks (0-200)
-        rs_score = (pl.col("rs_252").fill_null(0.0).clip(-0.40, 0.0).abs() / 0.40 * 200.0).alias(
-            "selection_rs_score"
-        )
-
-        ranked = df_filtered.with_columns(
-            h_score, r2_score, c_score, freshness_score, rs_score
-        ).with_columns(
-            (
-                pl.col("selection_h_quality")
-                + pl.col("selection_r2_quality")
-                + pl.col("selection_c_strength")
-                + pl.col("selection_freshness").cast(pl.Float64)
-                + pl.col("selection_rs_score")
-            )
-            .cast(pl.Float64)
-            .alias("selection_score")
-        )
-
-        ranked = ranked.sort(
-            ["trading_date", "selection_score", "value_traded_inr", "symbol"],
-            descending=[False, True, True, False],
-        ).with_columns(
-            pl.col("symbol").cum_count().over("trading_date").alias("selection_rank"),
-            pl.lit(int(params.breakdown_daily_candidate_budget)).alias("selection_budget"),
-        )
-        # Map to diagnostic component columns (y_score repurposed for freshness/breakdown counter)
-        ranked = ranked.with_columns(
-            pl.col("selection_h_quality").alias("selection_n_score"),
-            pl.col("selection_r2_quality").alias("selection_r2_quality"),
-            pl.col("selection_freshness").alias("selection_y_score"),
-            pl.col("selection_c_strength").alias("selection_c_strength"),
-            pl.col("selection_rs_score").alias("selection_rs_score"),
-        )
-
-        budget = int(params.breakdown_daily_candidate_budget)
-        if budget <= 0:
-            return ranked, ranked.head(0)
-        return (
-            ranked.filter(pl.col("selection_rank") <= budget),
-            ranked.filter(pl.col("selection_rank") > budget),
-        )
+        return _shared(df_filtered, params)
 
     @staticmethod
     def _resolve_short_post_day3_buffer_pct(
@@ -468,13 +377,11 @@ class DuckDBBacktestRunner:
         params: BacktestParams,
         strategy: StrategyDefinition | None = None,
     ) -> int:
-        if strategy is not None and strategy.direction == PositionSide.SHORT:
-            return (
-                params.short_entry_cutoff_minutes
-                if params.short_entry_cutoff_minutes is not None
-                else params.entry_cutoff_minutes
-            )
-        return params.entry_cutoff_minutes
+        from nse_momentum_lab.services.paper.candidate_builder import (
+            resolve_entry_cutoff_minutes as _shared,
+        )
+
+        return _shared(params, strategy)
 
     @staticmethod
     def _resolve_max_stop_dist_pct(
@@ -533,13 +440,11 @@ class DuckDBBacktestRunner:
         params: BacktestParams,
         strategy: StrategyDefinition | None = None,
     ) -> int:
-        if (
-            params.short_same_day_r_ladder_start_r is not None
-            and strategy is not None
-            and strategy.direction == PositionSide.SHORT
-        ):
-            return int(params.short_same_day_r_ladder_start_r)
-        return int(params.same_day_r_ladder_start_r)
+        from nse_momentum_lab.services.paper.candidate_builder import (
+            resolve_same_day_r_ladder_start_r as _shared,
+        )
+
+        return _shared(params, strategy)
 
     @staticmethod
     def _build_backtest_logic_fingerprint() -> str:
@@ -647,95 +552,15 @@ class DuckDBBacktestRunner:
         df_filtered: pl.DataFrame,
         params: BacktestParams,
     ) -> tuple[pl.DataFrame, pl.DataFrame]:
-        if df_filtered.is_empty():
-            return df_filtered, df_filtered
+        """Rank and budget daily breakout (long) candidates.
 
-        use_current_day_c = bool(params.breakout_use_current_day_c_quality)
-
-        # Ensure optional T-1 columns exist for the toggle path.
-        optional_prev_cols = (
-            "prev_vol_dryup_ratio",
-            "prev_atr_compress_ratio",
-            "prev_range_percentile",
-        )
-        for col in optional_prev_cols:
-            if col not in df_filtered.columns:
-                df_filtered = df_filtered.with_columns(pl.lit(None, dtype=pl.Float64).alias(col))
-
-        if use_current_day_c:
-            c_vol_expr = pl.col("vol_dryup_ratio").fill_null(99.0)
-            c_atr_expr = pl.col("atr_compress_ratio").fill_null(99.0)
-            c_rng_expr = pl.col("range_percentile").fill_null(99.0)
-        else:
-            # Prefer T-1 C-quality if present, fallback to breakout-day values.
-            c_vol_expr = pl.coalesce(
-                [pl.col("prev_vol_dryup_ratio"), pl.col("vol_dryup_ratio"), pl.lit(99.0)]
-            )
-            c_atr_expr = pl.coalesce(
-                [pl.col("prev_atr_compress_ratio"), pl.col("atr_compress_ratio"), pl.lit(99.0)]
-            )
-            c_rng_expr = pl.coalesce(
-                [pl.col("prev_range_percentile"), pl.col("range_percentile"), pl.lit(99.0)]
-            )
-
-        ranked = df_filtered.with_columns(
-            (
-                (c_vol_expr <= 1.0).cast(pl.Int64)
-                + (c_atr_expr <= 1.10).cast(pl.Int64)
-                + (c_rng_expr <= 0.60).cast(pl.Int64)
-            ).alias("selection_c_strength"),
-            (
-                pl.when(pl.col("prior_breakouts_30d").fill_null(0) <= 0)
-                .then(3)
-                .when(pl.col("prior_breakouts_30d").fill_null(0) == 1)
-                .then(2)
-                .when(pl.col("prior_breakouts_30d").fill_null(0) == 2)
-                .then(1)
-                .otherwise(0)
-            ).alias("selection_y_score"),
-            (
-                pl.when(
-                    pl.col("prev_close").is_not_null()
-                    & pl.col("prev_open").is_not_null()
-                    & (pl.col("prev_close") < pl.col("prev_open"))
-                )
-                .then(2)
-                .when(
-                    pl.col("prev_high").is_not_null()
-                    & pl.col("prev_low").is_not_null()
-                    & pl.col("atr_20").is_not_null()
-                    & ((pl.col("prev_high") - pl.col("prev_low")) < (pl.col("atr_20") * 0.5))
-                )
-                .then(1)
-                .otherwise(0)
-            ).alias("selection_n_score"),
-            pl.col("r2_65").clip(0.0, 1.0).fill_null(0.0).alias("selection_r2_quality"),
-        ).with_columns(
-            (
-                pl.col("selection_c_strength") * 10_000
-                + pl.col("selection_y_score") * 1_000
-                + ((pl.col("selection_r2_quality") * 100).round(0).cast(pl.Int64) * 5)
-                + pl.col("selection_n_score")
-            )
-            .cast(pl.Float64)
-            .alias("selection_score")
+        Delegates to the shared implementation in ``candidate_builder``.
+        """
+        from nse_momentum_lab.services.paper.candidate_builder import (
+            apply_breakout_selection_ranking as _shared,
         )
 
-        ranked = ranked.sort(
-            ["trading_date", "selection_score", "value_traded_inr", "symbol"],
-            descending=[False, True, True, False],
-        ).with_columns(
-            pl.col("symbol").cum_count().over("trading_date").alias("selection_rank"),
-            pl.lit(int(params.breakout_daily_candidate_budget)).alias("selection_budget"),
-        )
-
-        budget = int(params.breakout_daily_candidate_budget)
-        if budget <= 0:
-            return ranked, ranked.head(0)
-        return (
-            ranked.filter(pl.col("selection_rank") <= budget),
-            ranked.filter(pl.col("selection_rank") > budget),
-        )
+        return _shared(df_filtered, params)
 
     # ------------------------------------------------------------------
     # Public API
@@ -753,13 +578,14 @@ class DuckDBBacktestRunner:
         force: bool = False,
         snapshot: bool = False,
         progress_file: Path | None = None,
+        wf_run_id: str | None = None,
     ) -> str:
         """Run a backtest and persist results. Returns the experiment ID.
 
         If *force* is False and an experiment with the same hash already
         exists, the run is skipped and the existing exp_id is returned.
         """
-        started_at = datetime.now(UTC)
+        started_at = datetime.now(IST)
         params = params or BacktestParams()
         self._active_strategy = resolve_strategy(params.strategy)
         strategy_name = self._active_strategy.name
@@ -845,6 +671,7 @@ class DuckDBBacktestRunner:
                 params_hash=params_hash,
                 dataset_hash=dataset_hash,
                 code_hash=code_hash,
+                wf_run_id=wf_run_id,
                 data_source=str(dataset_snapshot["source_type"]),
                 dataset_snapshot=dataset_snapshot,
             )
@@ -952,7 +779,7 @@ class DuckDBBacktestRunner:
                 message="Publishing run artifacts to MinIO and Postgres",
             )
 
-            finished_at = datetime.now(UTC)
+            finished_at = datetime.now(IST)
             self._persist_postgres_lineage(
                 exp_id=exp_id,
                 params=params,
@@ -968,7 +795,7 @@ class DuckDBBacktestRunner:
                 snapshot=snapshot,
             )
         except Exception as exc:
-            finished_at = datetime.now(UTC)
+            finished_at = datetime.now(IST)
             self._emit_progress(
                 context=progress_context,
                 status="FAILED",
@@ -1049,7 +876,7 @@ class DuckDBBacktestRunner:
         pct_label = "--.-%" if progress_pct is None else f"{progress_pct:5.1f}%"
         logger.info("[PROGRESS] %s [%s] %s", pct_label, stage, message)
 
-        heartbeat_at = datetime.now(UTC)
+        heartbeat_at = datetime.now(IST)
         if context.progress_file is not None:
             context.progress_file.parent.mkdir(parents=True, exist_ok=True)
             payload = {
@@ -2205,10 +2032,14 @@ class DuckDBBacktestRunner:
         short_initial_stop_atr_cap_mult: float | None = None,
         short_same_day_take_profit_pct: float | None = None,
     ) -> IntradayEntry | None:
-        result: IntradayExecutionResult | None = resolve_intraday_execution_from_5min(
+        from nse_momentum_lab.services.paper.candidate_builder import (
+            resolve_intraday_entry_from_5min as _shared,
+        )
+
+        return _shared(
             candles,
-            breakout_price=breakout_price,
-            entry_cutoff_minutes=entry_cutoff_minutes,
+            breakout_price,
+            entry_cutoff_minutes,
             is_short=is_short,
             orh_window_minutes=orh_window_minutes,
             same_day_r_ladder=same_day_r_ladder,
@@ -2217,22 +2048,6 @@ class DuckDBBacktestRunner:
             short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
             short_same_day_take_profit_pct=short_same_day_take_profit_pct,
         )
-        if result is None:
-            return None
-        return {
-            "entry_price": result.entry_price,
-            "initial_stop": result.initial_stop,
-            "same_day_stop_hit": result.same_day_exit_ts is not None,
-            "entry_ts": result.entry_ts,
-            "same_day_exit_price": result.same_day_exit_price,
-            "same_day_exit_ts": result.same_day_exit_ts,
-            "same_day_exit_time": result.same_day_exit_time,
-            "same_day_exit_reason": result.same_day_exit_reason.value
-            if result.same_day_exit_reason is not None
-            else None,
-            "carry_stop_next_session": result.carry_stop_next_session,
-            "entry_time": result.entry_time,
-        }
 
     def _resolve_intraday_entries_bulk(
         self,
@@ -2250,132 +2065,26 @@ class DuckDBBacktestRunner:
     ) -> dict[tuple[str, date], IntradayEntry]:
         """Resolve intraday entries for all signal days with one 5-min batch query.
 
-        Threshold mode (orh_window_minutes=0):
-            LONG: trigger = prev_close * (1 + threshold), look for high >= trigger.
-            SHORT: trigger = prev_close * (1 - threshold), look for low <= trigger.
-
-        ORH mode (orh_window_minutes>0, LONG only):
-            Observe first orh_window_minutes to build ORH, then enter on ORH break.
-            breakout_price stored as prev_close (sanity-check reference only).
+        Delegates to the shared implementation in ``candidate_builder``.
+        The ``heartbeat_cb`` parameter is accepted for backward compatibility
+        but not used by the shared implementation.
         """
-        targets = (
-            df_filtered.select(["symbol", "trading_date", "prev_close", "atr_20"])
-            .drop_nulls(["symbol", "trading_date", "prev_close"])
-            .unique(subset=["symbol", "trading_date"], keep="first", maintain_order=True)
+        from nse_momentum_lab.services.paper.candidate_builder import (
+            resolve_intraday_entries_bulk as _shared,
         )
-        if targets.is_empty():
-            return {}
 
-        breakout_price_by_key: dict[tuple[str, date], float] = {}
-        short_initial_stop_atr_by_key: dict[tuple[str, date], float] = {}
-        for symbol_raw, trading_date_raw, prev_close_raw, atr_20_raw in targets.iter_rows():
-            if trading_date_raw is None or prev_close_raw is None:
-                continue
-            if isinstance(trading_date_raw, datetime):
-                trading_day = trading_date_raw.date()
-            elif isinstance(trading_date_raw, date):
-                trading_day = trading_date_raw
-            else:
-                try:
-                    trading_day = date.fromisoformat(str(trading_date_raw))
-                except ValueError:
-                    continue
-
-            prev_close = float(prev_close_raw)
-            if prev_close <= 0:
-                continue
-            symbol = str(symbol_raw)
-            if orh_window_minutes > 0:
-                # ORH mode: store prev_close as sanity-check reference (trigger is ORH from candles)
-                breakout_price_by_key[(symbol, trading_day)] = prev_close
-            else:
-                # Threshold mode: SHORT trigger below, LONG trigger above prev_close
-                multiplier = (1 - breakout_threshold) if is_short else (1 + breakout_threshold)
-                breakout_price_by_key[(symbol, trading_day)] = prev_close * multiplier
-            if is_short and short_initial_stop_atr_cap_mult is not None and atr_20_raw is not None:
-                atr_20 = float(atr_20_raw)
-                if atr_20 > 0:
-                    short_initial_stop_atr_by_key[(symbol, trading_day)] = atr_20
-        if not breakout_price_by_key:
-            return {}
-
-        join_df = pl.DataFrame(
-            [
-                {"symbol": symbol, "trading_date": trading_day}
-                for symbol, trading_day in breakout_price_by_key
-            ]
+        return _shared(
+            db_con=self.db.con,
+            df_filtered=df_filtered,
+            breakout_threshold=breakout_threshold,
+            entry_cutoff_minutes=entry_cutoff_minutes,
+            is_short=is_short,
+            orh_window_minutes=orh_window_minutes,
+            same_day_r_ladder=same_day_r_ladder,
+            same_day_r_ladder_start_r=same_day_r_ladder_start_r,
+            short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
+            short_same_day_take_profit_pct=short_same_day_take_profit_pct,
         )
-        tmp_name = "tmp_intraday_signal_days"
-        self.db.con.register(tmp_name, join_df.to_arrow())
-        try:
-            candles = self.db.con.execute(
-                f"""
-                SELECT c.symbol, c.date AS trading_date, c.candle_time, c.open, c.high, c.low
-                FROM v_5min c
-                INNER JOIN {tmp_name} t
-                  ON c.symbol = t.symbol
-                 AND c.date = t.trading_date
-                ORDER BY c.symbol, c.date, c.candle_time
-                """
-            ).pl()
-        finally:
-            try:
-                self.db.con.unregister(tmp_name)
-            except Exception:
-                pass
-
-        if candles.is_empty():
-            return {}
-
-        resolved_entries: dict[tuple[str, date], IntradayEntry] = {}
-        grouped = candles.partition_by(
-            ["symbol", "trading_date"], as_dict=True, maintain_order=True
-        )
-        total_groups = len(grouped)
-        with tqdm(
-            total=total_groups, desc="processing 5-min entries", unit="signal-days"
-        ) as entry_bar:
-            for idx, (group_key, group_candles) in enumerate(grouped.items(), start=1):
-                if heartbeat_cb is not None and idx % 250 == 0:
-                    heartbeat_cb(f"processing 5-min entries ({idx}/{total_groups} signal-days)")
-                symbol = str(group_key[0])
-                trading_day_raw = group_key[1]
-                trading_day_from_group: date | None
-                if isinstance(trading_day_raw, datetime):
-                    trading_day_from_group = trading_day_raw.date()
-                elif isinstance(trading_day_raw, date):
-                    trading_day_from_group = trading_day_raw
-                else:
-                    try:
-                        trading_day_from_group = date.fromisoformat(str(trading_day_raw))
-                    except ValueError:
-                        entry_bar.update(1)
-                        continue
-
-                breakout_price = breakout_price_by_key.get((symbol, trading_day_from_group))
-                if breakout_price is None:
-                    entry_bar.update(1)
-                    continue
-
-                intraday_entry = self._resolve_intraday_entry_from_5min(
-                    group_candles,
-                    breakout_price,
-                    entry_cutoff_minutes,
-                    is_short=is_short,
-                    orh_window_minutes=orh_window_minutes,
-                    same_day_r_ladder=same_day_r_ladder,
-                    same_day_r_ladder_start_r=same_day_r_ladder_start_r,
-                    short_initial_stop_atr=short_initial_stop_atr_by_key.get(
-                        (symbol, trading_day_from_group)
-                    ),
-                    short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
-                    short_same_day_take_profit_pct=short_same_day_take_profit_pct,
-                )
-                if intraday_entry is not None:
-                    resolved_entries[(symbol, trading_day_from_group)] = intraday_entry
-                entry_bar.update(1)
-
-        return resolved_entries
 
     def _resolve_intraday_entry(
         self,
@@ -2512,14 +2221,11 @@ class DuckDBBacktestRunner:
                 }
             )
 
-        equity = (
-            trades_df.sort("entry_date", nulls_last=True)
-            .with_columns(pl.col("pnl_pct").cast(pl.Float64, strict=False).fill_null(0.0))
-            .with_columns(pl.col("pnl_pct").cum_sum().alias("cumulative_return_pct"))
-            .with_columns(pl.col("cumulative_return_pct").cum_max().alias("running_peak_pct"))
-            .with_columns(
-                (pl.col("cumulative_return_pct") - pl.col("running_peak_pct")).alias("drawdown_pct")
-            )
+        equity = trades_df.sort("entry_date", nulls_last=True).with_columns(
+            pl.col("pnl_pct").cast(pl.Float64, strict=False).fill_null(0.0).alias("pnl_pct"),
+            pl.col("pnl_pct").cum_sum().alias("cumulative_return_pct"),
+            pl.col("cumulative_return_pct").cum_max().alias("running_peak_pct"),
+            (pl.col("cumulative_return_pct") - pl.col("running_peak_pct")).alias("drawdown_pct"),
         )
         return equity.select(
             ["entry_date", "symbol", "pnl_pct", "cumulative_return_pct", "drawdown_pct"]

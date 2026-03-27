@@ -330,7 +330,7 @@ doppler run -- uv run nseml-dashboard
 
 ```bash
 # Unit tests (must always pass before any commit)
-doppler run -- uv run pytest tests/unit/ -q    # Expected: 323 passed
+doppler run -- uv run pytest tests/unit/ -q    # Expected: unit suite passes
 
 # Type checking
 doppler run -- uv run mypy src/ --ignore-missing-imports   # Expected: 0 errors

@@ -107,9 +107,9 @@ def _build_2lynch_candidate_query(
                 f_prev.atr_compress_ratio AS prev_atr_compress_ratio,
                 f_prev.range_percentile AS prev_range_percentile
             FROM breakout_days g
-            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.trading_date
+            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.date
             LEFT JOIN feat_daily f_prev
-              ON g.symbol = f_prev.symbol AND g.prev_trading_date = f_prev.trading_date
+              ON g.symbol = f_prev.symbol AND g.prev_trading_date = f_prev.date
         )
         SELECT
             symbol, trading_date, open, high, low, close, prev_close, prev_high, prev_low, prev_open, gap_pct,

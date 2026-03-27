@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import os
 from datetime import date
 from pathlib import Path
+
+# Historical 5-minute parquet files in this lake were written with a fixed-offset
+# timezone annotation (+05:30). Polars validates that metadata on read, so keep
+# the fallback enabled for merge/read-back compatibility.
+os.environ.setdefault("POLARS_IGNORE_TIMEZONE_PARSE_ERROR", "1")
 
 import pandas as pd
 import polars as pl
@@ -36,7 +42,7 @@ PARQUET_DAILY_DTYPE = {
 PARQUET_5MIN_DTYPE = {
     "symbol": pl.Utf8,
     "date": pl.Date,
-    "candle_time": pl.Datetime(time_zone="Asia/Kolkata"),
+    "candle_time": pl.Datetime(time_unit="ns"),
     "open": pl.Float64,
     "high": pl.Float64,
     "low": pl.Float64,
@@ -129,7 +135,9 @@ class KiteWriter:
         if df.empty:
             return pl.DataFrame(schema=PARQUET_5MIN_DTYPE)
         frame = pl.from_pandas(df, include_index=False).select(FIVE_MIN_PARQUET_COLUMNS)
-        return frame.cast(PARQUET_5MIN_DTYPE, strict=False).sort(["symbol", "candle_time"])
+        frame = self._normalize_ist_candle_time(frame)
+        frame = frame.cast(PARQUET_5MIN_DTYPE, strict=False)
+        return frame.sort(["symbol", "candle_time"])
 
     def _merge_existing(
         self,
@@ -144,8 +152,20 @@ class KiteWriter:
             return new_rows.unique(subset=subset, keep="last").sort(sort_columns)
 
         existing = pl.read_parquet(path)
+        existing = self._normalize_ist_candle_time(existing)
         merged = pl.concat([existing, new_rows], how="vertical_relaxed")
         return merged.unique(subset=subset, keep="last").sort(sort_columns)
+
+    def _normalize_ist_candle_time(self, frame: pl.DataFrame) -> pl.DataFrame:
+        if "candle_time" not in frame.columns:
+            return frame
+        candle_type = frame.schema.get("candle_time")
+        candle_expr = pl.col("candle_time")
+        if isinstance(candle_type, pl.Datetime) and candle_type.time_zone:
+            candle_expr = candle_expr.dt.convert_time_zone("Asia/Kolkata").dt.replace_time_zone(
+                None
+            )
+        return frame.with_columns(candle_expr.cast(PARQUET_5MIN_DTYPE["candle_time"], strict=False))
 
     def _write_parquet(self, path: Path, frame: pl.DataFrame) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

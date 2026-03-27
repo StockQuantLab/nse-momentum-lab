@@ -183,7 +183,9 @@ class FeatureRegistry:
             ready = [
                 f
                 for f in remaining
-                if all(dep.name.lower() in built for dep in f.feature_dependencies)
+                if all(
+                    dep.is_dataset or dep.name.lower() in built for dep in f.feature_dependencies
+                )
             ]
 
             if not ready:

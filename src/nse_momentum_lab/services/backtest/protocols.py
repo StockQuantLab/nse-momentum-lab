@@ -26,6 +26,7 @@ from nse_momentum_lab.services.backtest.strategy_registry import (
     resolve_strategy,
 )
 from nse_momentum_lab.utils.hash_utils import compute_short_hash
+from nse_momentum_lab.utils.time_utils import IST
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +189,7 @@ class ResearchProtocol(ABC):
             start_date=self.config.start_date,
             end_date=self.config.end_date,
             objective_metric=self.config.objective_metric,
-            started_at=datetime.utcnow(),
+            started_at=datetime.now(IST),
         )
 
 
@@ -242,7 +243,7 @@ class SingleRunProtocol(ResearchProtocol):
                 result.folds[0].status = "FAILED"
                 result.folds[0].error_message = str(e)
 
-        result.finished_at = datetime.utcnow()
+        result.finished_at = datetime.now(IST)
         self._result = result
         return result
 
@@ -364,7 +365,7 @@ class GridSearchProtocol(ResearchProtocol):
         else:
             result.status = "FAILED"
 
-        result.finished_at = datetime.utcnow()
+        result.finished_at = datetime.now(IST)
         self._result = result
         return result
 
@@ -495,7 +496,7 @@ class RandomSearchProtocol(ResearchProtocol):
         else:
             result.status = "FAILED"
 
-        result.finished_at = datetime.utcnow()
+        result.finished_at = datetime.now(IST)
         self._result = result
         return result
 
@@ -660,7 +661,7 @@ class AnchoredWalkForwardProtocol(WalkForwardProtocol):
 
         result.best_params = best_overall_params
         result.status = "SUCCEEDED" if result.successful_runs > 0 else "FAILED"
-        result.finished_at = datetime.utcnow()
+        result.finished_at = datetime.now(IST)
         self._result = result
         return result
 
@@ -769,7 +770,7 @@ class RollingWalkForwardProtocol(WalkForwardProtocol):
 
         result.best_params = best_overall_params
         result.status = "SUCCEEDED" if result.successful_runs > 0 else "FAILED"
-        result.finished_at = datetime.utcnow()
+        result.finished_at = datetime.now(IST)
         self._result = result
         return result
 
@@ -908,7 +909,7 @@ class SensitivityOATProtocol(ResearchProtocol):
             "parameters_tested": len(sensitivity_results),
         }
         result.status = "SUCCEEDED" if result.successful_runs > 0 else "FAILED"
-        result.finished_at = datetime.utcnow()
+        result.finished_at = datetime.now(IST)
         self._result = result
         return result
 

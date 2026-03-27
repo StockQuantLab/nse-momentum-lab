@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -14,6 +14,7 @@ import psycopg
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.services.ingest.minio import MinioArtifactStore
 from nse_momentum_lab.utils import compute_short_hash
+from nse_momentum_lab.utils.time_utils import IST
 
 
 @dataclass(frozen=True)
@@ -276,13 +277,13 @@ def upsert_exp_run_with_artifacts_sync(
         "dataset_hash": dataset_hash,
         "params_json": params_json,
         "code_sha": code_sha,
-        "started_at": started_at.astimezone(UTC),
-        "finished_at": finished_at.astimezone(UTC) if finished_at else None,
+        "started_at": started_at,
+        "finished_at": finished_at,
         "status": status,
         "progress_stage": progress_stage,
         "progress_message": progress_message,
         "progress_pct": float(progress_pct) if progress_pct is not None else None,
-        "heartbeat_at": (heartbeat_at or datetime.now(UTC)).astimezone(UTC),
+        "heartbeat_at": heartbeat_at or datetime.now(IST),
     }
 
     with psycopg.connect(str(settings.database_url)) as conn:

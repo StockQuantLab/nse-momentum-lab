@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import sys
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from nse_momentum_lab.services.ingest.worker import IngestionWorker
 from nse_momentum_lab.services.rollup.worker import run_daily_rollup
 from nse_momentum_lab.services.scan.worker import ScanWorker
 from nse_momentum_lab.utils import compute_short_hash
+from nse_momentum_lab.utils.time_utils import IST
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,7 +72,7 @@ async def _create_pipeline_job(trading_date: date, skip_ingest: bool = False) ->
                 asof_date=trading_date,
                 idempotency_key=idempotency_key,
                 status="RUNNING",
-                started_at=datetime.now(UTC),
+                started_at=datetime.now(IST),
             )
             session.add(job)
             await session.flush()
@@ -104,7 +105,7 @@ async def _update_job_progress(
                     job.status = status
 
                 if status == "COMPLETED":
-                    job.finished_at = datetime.now(UTC)
+                    job.finished_at = datetime.now(IST)
                     if job.started_at:
                         duration_ms = int((job.finished_at - job.started_at).total_seconds() * 1000)
                         job.duration_ms = duration_ms

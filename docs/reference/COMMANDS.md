@@ -1,7 +1,7 @@
 # Command Reference - nse-momentum-lab
 
 **Version**: Multi-Strategy Platform (Phase 1–7 complete)
-**Last Updated**: 2026-03-07
+**Last Updated**: 2026-03-27
 
 ---
 
@@ -248,18 +248,85 @@ doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
   --universe-size 500
 ```
 
-#### Rebuild feature table (feat_daily)
+#### Refresh feature tables and market monitor
 ```bash
-doppler run -- uv run python -c "
-from nse_momentum_lab.db.market_db import get_market_db
-db = get_market_db()
-db.build_feat_daily_table(force=True)
-"
+# Normal short-window refresh from a known catch-up date
+doppler run -- uv run nseml-build-features --since YYYY-MM-DD
+
+# Explicit full rebuild only when necessary
+doppler run -- uv run nseml-build-features --force --allow-full-rebuild
+
+# Incremental market monitor refresh
+doppler run -- uv run nseml-market-monitor --incremental --since YYYY-MM-DD
 ```
+
+Notes:
+- `nseml-build-features --since` is the normal operator path for short refreshes.
+- `--force` is reserved for exceptional full rebuilds and requires `--allow-full-rebuild`.
+- `nseml-market-monitor --incremental` keeps the breadth table aligned with recent data without dropping the table.
+- For table inventory and load modes, use `docs/operations/TABLE_LOAD_MATRIX.md`.
 
 **Important**: DuckDB is single-writer. Stop the dashboard before running a backtest.
 Backtest results are stored in DuckDB (`bt_experiment`, `bt_trade`, `bt_yearly_metric`) and
 PostgreSQL (`exp_run`, `exp_metric`), and artifacts in MinIO.
+
+---
+
+### Additional Backtest Commands
+
+#### List strategies
+```bash
+doppler run -- uv run nseml-backtest --list-strategies
+```
+
+#### Check backtest status
+```bash
+doppler run -- uv run nseml-backtest-status --exp-id <EXP_ID>
+```
+
+#### Batch backtest run
+```bash
+doppler run -- uv run nseml-backtest-batch --params-json '{\"strategies\": [\"thresholdbreakout\", \"2lynchbreakdown\"]}'
+```
+
+---
+
+### Paper Trading Commands
+
+#### Walk-forward validation
+```bash
+doppler run -- uv run nseml-paper walk-forward --session-id <SESSION_ID> --strategy thresholdbreakout --start-date 2026-03-01 --end-date 2026-03-20 --train-days 5 --test-days 3 --roll-interval-days 1
+```
+
+#### Replay a historical day
+```bash
+doppler run -- uv run nseml-paper replay-day --session-id <SESSION_ID> --trade-date 2026-03-25
+```
+
+#### Daily paper readiness
+```bash
+doppler run -- uv run nseml-paper daily-prepare --trade-date 2026-03-27 --mode live --all-symbols
+```
+
+#### Daily live session
+```bash
+doppler run -- uv run nseml-paper daily-live --trade-date 2026-03-27 --all-symbols --execute
+```
+
+#### Daily replay session
+```bash
+doppler run -- uv run nseml-paper daily-replay --trade-date 2026-03-25 --all-symbols
+```
+
+#### Session status
+```bash
+doppler run -- uv run nseml-paper status --session-id <SESSION_ID>
+```
+
+#### Flatten open positions
+```bash
+doppler run -- uv run nseml-paper flatten --session-id <SESSION_ID>
+```
 
 ---
 
@@ -269,7 +336,7 @@ PostgreSQL (`exp_run`, `exp_metric`), and artifacts in MinIO.
 ```bash
 doppler run -- uv run pytest tests/unit/ -q
 ```
-**Expected**: 323 passed (as of 2026-03-07)
+**Expected**: all unit tests pass; exact count varies with branch and local fixtures
 
 ### Run Specific Test File
 ```bash

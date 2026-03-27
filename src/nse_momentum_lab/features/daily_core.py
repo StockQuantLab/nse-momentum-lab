@@ -19,6 +19,7 @@ These features are universal and do not include strategy-specific filters.
 from __future__ import annotations
 
 import logging
+from datetime import date, timedelta
 
 from nse_momentum_lab.features.registry import (
     FeatureDefinition,
@@ -307,10 +308,92 @@ WHERE close IS NOT NULL
 """
 
 
+def _sql_date_literal(value: date) -> str:
+    return f"DATE '{value.isoformat()}'"
+
+
+def _daily_core_sql_for_source(source_view: str) -> str:
+    return FEAT_DAILY_CORE_SQL.replace("CREATE TABLE feat_daily_core AS\n", "").replace(
+        "FROM v_daily", f"FROM {source_view}"
+    )
+
+
+def _daily_core_incremental_start(since_date: date) -> date:
+    # 252 trading days need roughly 372 calendar days of warm-up.
+    return since_date - timedelta(days=372)
+
+
+def _build_feat_daily_core_incremental(
+    con,
+    *,
+    since_date: date,
+    dataset_hash: str,
+) -> int:
+    source_view = "_feat_daily_core_src"
+    delta_table = "_feat_daily_core_delta"
+    rebuild_start = _daily_core_incremental_start(since_date)
+    table_exists = True
+
+    try:
+        con.execute("SELECT 1 FROM feat_daily_core LIMIT 1").fetchone()
+    except Exception:
+        table_exists = False
+
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW {source_view} AS "
+        f"SELECT * FROM v_daily WHERE date >= {_sql_date_literal(rebuild_start)}"
+    )
+    try:
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+        con.execute(f"CREATE TEMP TABLE {delta_table} AS {_daily_core_sql_for_source(source_view)}")
+        if table_exists:
+            con.execute("DELETE FROM feat_daily_core WHERE trading_date >= ?", [since_date])
+            con.execute(
+                f"""
+                INSERT INTO feat_daily_core
+                SELECT *
+                FROM {delta_table}
+                WHERE trading_date >= ?
+                """,
+                [since_date],
+            )
+        else:
+            con.execute(
+                f"""
+                CREATE TABLE feat_daily_core AS
+                SELECT *
+                FROM {delta_table}
+                WHERE trading_date >= {_sql_date_literal(since_date)}
+                """
+            )
+    finally:
+        con.execute(f"DROP VIEW IF EXISTS {source_view}")
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+
+    if not table_exists:
+        con.execute(
+            "CREATE INDEX idx_feat_daily_core_symbol_date ON feat_daily_core(symbol, trading_date)"
+        )
+
+    row = con.execute("SELECT COUNT(*) FROM feat_daily_core").fetchone()
+    n = int(row[0]) if row and row[0] is not None else 0
+    con.execute(
+        """
+        INSERT OR REPLACE INTO bt_materialization_state
+        (table_name, dataset_hash, query_version, row_count, updated_at)
+        VALUES (?, ?, ?, ?, current_timestamp)
+    """,
+        ["feat_daily_core", dataset_hash, FEAT_DAILY_CORE_VERSION, n],
+    )
+    logger.info("feat_daily_core incrementally refreshed from %s: %d rows", since_date, n)
+    return n
+
+
 def build_feat_daily_core(
     con,  # DuckDBPyConnection
     force: bool = False,
     dataset_hash: str | None = None,
+    since_date: date | None = None,
 ) -> int:
     """
     Build the feat_daily_core materialized table.
@@ -345,6 +428,12 @@ def build_feat_daily_core(
             :16
         ]
 
+    # Incremental path for short catch-up windows.
+    if since_date is not None and not force:
+        return _build_feat_daily_core_incremental(
+            con, since_date=since_date, dataset_hash=dataset_hash
+        )
+
     # Check if already built
     if not force:
         try:
@@ -368,9 +457,15 @@ def build_feat_daily_core(
     con.execute("DROP TABLE IF EXISTS feat_daily_core")
     con.execute(FEAT_DAILY_CORE_SQL)
 
-    # Create index for common queries
+    # Create indexes for common candidate queries
     con.execute(
         "CREATE INDEX idx_feat_daily_core_symbol_date ON feat_daily_core(symbol, trading_date)"
+    )
+    con.execute(
+        "CREATE INDEX idx_feat_daily_core_close_pos_in_range ON feat_daily_core(close_pos_in_range)"
+    )
+    con.execute(
+        "CREATE INDEX idx_feat_daily_core_vol_dryup_ratio ON feat_daily_core(vol_dryup_ratio)"
     )
 
     row = con.execute("SELECT COUNT(*) FROM feat_daily_core").fetchone()

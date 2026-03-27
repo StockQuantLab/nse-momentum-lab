@@ -5,7 +5,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 from nse_momentum_lab.db.paper import (
     alert_session_signals,
+    delete_walk_forward_session,
     delete_walk_forward_sessions,
+    get_walk_forward_session_cleanup_preview,
     qualify_session_signals,
 )
 
@@ -37,6 +39,45 @@ def _signal(signal_id: int, state: str) -> SimpleNamespace:
         planned_entry_date=None,
         initial_stop=None,
         metadata_json={},
+        created_at=None,
+    )
+
+
+def _walk_forward_session(session_id: str = "wf-1") -> SimpleNamespace:
+    return SimpleNamespace(
+        session_id=session_id,
+        trade_date=None,
+        strategy_name="thresholdbreakout",
+        experiment_id=None,
+        mode="walk_forward",
+        status="RUNNING",
+        symbols=[],
+        strategy_params={},
+        risk_config={},
+        notes=None,
+        created_at=None,
+        updated_at=None,
+        started_at=None,
+        finished_at=None,
+        archived_at=None,
+    )
+
+
+def _walk_forward_fold(fold_id: int, *, session_id: str = "wf-1", exp_id: str = "exp-1") -> SimpleNamespace:
+    return SimpleNamespace(
+        fold_id=fold_id,
+        wf_session_id=session_id,
+        fold_index=fold_id,
+        train_start=None,
+        train_end=None,
+        test_start=None,
+        test_end=None,
+        exp_id=exp_id,
+        status="completed",
+        total_return_pct=2.5,
+        max_drawdown_pct=1.0,
+        profit_factor=1.4,
+        total_trades=11,
         created_at=None,
     )
 
@@ -107,6 +148,7 @@ class TestPaperDBHelpers:
         session = AsyncMock()
         session.execute.side_effect = [
             _scalar_result(all_rows=["wf-3", "wf-2", "wf-1"]),
+            _scalar_result(all_rows=["wf-3", "wf-2", "wf-1"]),
             _scalar_result(),
         ]
 
@@ -118,5 +160,33 @@ class TestPaperDBHelpers:
         )
 
         assert result == {"deleted_count": 3, "session_ids": ["wf-3", "wf-2", "wf-1"]}
-        assert session.execute.await_count == 2
+        assert session.execute.await_count == 3
+        session.commit.assert_awaited_once()
+
+    async def test_get_walk_forward_session_cleanup_preview_includes_folds(self) -> None:
+        session = AsyncMock()
+        session.execute.side_effect = [
+            _scalar_result(one_row=_walk_forward_session("wf-1")),
+            _scalar_result(all_rows=[_walk_forward_fold(1), _walk_forward_fold(2)]),
+        ]
+
+        preview = await get_walk_forward_session_cleanup_preview(session, "wf-1")
+
+        assert preview is not None
+        assert preview["session"]["session_id"] == "wf-1"
+        assert preview["fold_count"] == 2
+        assert [row["fold_id"] for row in preview["folds"]] == [1, 2]
+
+    async def test_delete_walk_forward_session_deletes_parent_row(self) -> None:
+        session = AsyncMock()
+        session.execute.side_effect = [
+            _scalar_result(one_row=_walk_forward_session("wf-1")),
+            _scalar_result(all_rows=[_walk_forward_fold(1), _walk_forward_fold(2)]),
+            _scalar_result(),
+        ]
+
+        result = await delete_walk_forward_session(session, "wf-1")
+
+        assert result == {"deleted_count": 1, "session_ids": ["wf-1"]}
+        assert session.execute.await_count == 3
         session.commit.assert_awaited_once()

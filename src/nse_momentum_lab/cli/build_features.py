@@ -4,7 +4,8 @@ Build feature materialized tables in DuckDB.
 
 Usage:
     nseml-build-features                      # Build all feature sets
-    nseml-build-features --force              # Force rebuild all
+    nseml-build-features --force --allow-full-rebuild  # Explicit full rebuild
+    nseml-build-features --since 2026-03-23   # Incremental rebuild from a date
     nseml-build-features --feature-set daily_core  # Build specific feature set
     nseml-build-features --status             # Show feature registry status
     nseml-build-features --legacy             # Use legacy monolithic feat_daily
@@ -14,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+from datetime import date
 
+from nse_momentum_lab.cli.rebuild_guards import require_full_rebuild_ack
 from nse_momentum_lab.db.market_db import get_market_db
 from nse_momentum_lab.features import get_feature_registry
 
@@ -68,7 +71,7 @@ def show_status(db) -> None:
                 ).fetchone()
                 if state:
                     version, count = state
-                    status_icon = "✓" if version == feat.version else "⚠"
+                    status_icon = "OK" if version == feat.version else "WARN"
                     print(f"  [{status_icon}] {feat.name:30s} v{feat.version} ({count:,} rows)")
                 else:
                     print(f"  [ ] {feat.name:30s} v{feat.version} (not built)")
@@ -100,12 +103,26 @@ def main():
         description="Build DuckDB feature tables",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--force", action="store_true", help="Force rebuild")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force rebuild (requires --allow-full-rebuild)",
+    )
+    parser.add_argument(
+        "--allow-full-rebuild",
+        action="store_true",
+        help="Acknowledge a destructive full rebuild when used with --force.",
+    )
     parser.add_argument(
         "--feature-set",
         "-f",
         dest="feature_set",
         help="Specific feature set to build (daily_core, intraday_core, event_core, 2lynch, all)",
+    )
+    parser.add_argument(
+        "--since",
+        type=date.fromisoformat,
+        help="Incrementally rebuild from this date (YYYY-MM-DD), inclusive.",
     )
     parser.add_argument("--status", "-s", action="store_true", help="Show feature registry status")
     parser.add_argument("--list", "-l", action="store_true", help="List available feature sets")
@@ -116,11 +133,28 @@ def main():
     )
 
     args = parser.parse_args()
+    since_date = getattr(args, "since", None)
 
     # Handle --list
     if args.list:
         show_feature_list()
         return
+
+    feature_set = args.feature_set.lower() if args.feature_set else None
+    resolved_feature_set = (
+        FEATURE_SET_ALIASES.get(feature_set, feature_set) if feature_set else None
+    )
+    full_rebuild_requested = args.legacy or feature_set is None or resolved_feature_set == "all"
+    incremental_mode = since_date is not None
+
+    if not args.status and not incremental_mode and full_rebuild_requested:
+        require_full_rebuild_ack(
+            parser,
+            force=args.force,
+            allow_full_rebuild=args.allow_full_rebuild,
+            operation="nseml-build-features",
+            incremental_hint="nseml-build-features without --force",
+        )
 
     db = get_market_db()
 
@@ -136,41 +170,49 @@ def main():
         db.build_feat_daily_table(force=args.force)
     elif args.feature_set:
         # Build specific feature set(s)
-        feature_set = args.feature_set.lower()
-        feature_set = FEATURE_SET_ALIASES.get(feature_set, feature_set)
+        feature_set = resolved_feature_set
 
         if feature_set == "all" or feature_set is None:
-            print("Building all feature sets...")
-            db._build_modular_features(force=args.force)
+            if incremental_mode:
+                print(f"Incrementally building all feature sets since {since_date.isoformat()}...")
+                db._build_modular_features(force=args.force, since_date=since_date)
+                db.build_market_monitor_incremental(since_date=since_date, force=args.force)
+            else:
+                print("Building all feature sets...")
+                db._build_modular_features(force=args.force)
         else:
-            # Build specific feature
-            registry = get_feature_registry()
-            feat_def = registry.get(feature_set)
-
-            if feat_def is None:
+            print(f"Building {feature_set}...")
+            builders = {
+                "feat_daily_core": lambda: db.build_feat_daily_core(
+                    force=args.force, since_date=since_date
+                ),
+                "feat_intraday_core": lambda: db.build_feat_intraday_core(
+                    force=args.force, since_date=since_date
+                ),
+                "feat_event_core": lambda: db.build_feat_event_core(
+                    force=args.force, since_date=since_date
+                ),
+                "feat_2lynch_derived": lambda: db.build_2lynch_derived(
+                    force=args.force, since_date=since_date
+                ),
+            }
+            builder = builders.get(feature_set)
+            if builder is None:
                 print(f"Unknown feature set: {args.feature_set}")
                 show_feature_list()
                 return 1
 
-            print(f"Building {feat_def.name}...")
-            from nse_momentum_lab.features import IncrementalFeatureMaterializer
-
-            materializer = IncrementalFeatureMaterializer()
-            result = materializer.build_one(db.con, feat_def.name, force=args.force)
-
-            if result.status == "success":
-                print(
-                    f"✓ Built {feat_def.name}: {result.row_count:,} rows in {result.duration_seconds:.1f}s"
-                )
-            elif result.status == "skipped":
-                print(f"⊘ Skipped {feat_def.name}: already up-to-date")
-            else:
-                print(f"✗ Failed {feat_def.name}: {result.error_message}")
-                return 1
+            rows = builder()
+            print(f"[OK] Built {feature_set}: {rows:,} rows")
     else:
         # Default: build all with modular approach
-        print("Building all feature sets (modular approach)...")
-        db._build_modular_features(force=args.force)
+        if incremental_mode:
+            print(f"Incrementally building all feature sets since {since_date.isoformat()}...")
+            db._build_modular_features(force=args.force, since_date=since_date)
+            db.build_market_monitor_incremental(since_date=since_date, force=args.force)
+        else:
+            print("Building all feature sets (modular approach)...")
+            db._build_modular_features(force=args.force)
 
     print("\n" + "=" * 60)
     print("Status:")

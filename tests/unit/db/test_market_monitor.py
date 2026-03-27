@@ -64,7 +64,7 @@ def test_build_market_monitor_table_uses_feat_daily_core() -> None:
         """
     )
     db.build_feat_daily_core = MethodType(
-        lambda self, force=False, dataset_hash=None: self.con.execute(
+        lambda self, force=False, dataset_hash=None, since_date=None: self.con.execute(
             "SELECT COUNT(*) FROM feat_daily_core"
         ).fetchone()[0],
         db,
@@ -217,7 +217,7 @@ def test_build_market_monitor_incremental_matches_full_build() -> None:
     )
 
     db.build_feat_daily_core = MethodType(
-        lambda self, force=False, dataset_hash=None: self.con.execute(
+        lambda self, force=False, dataset_hash=None, since_date=None: self.con.execute(
             "SELECT COUNT(*) FROM feat_daily_core"
         ).fetchone()[0],
         db,

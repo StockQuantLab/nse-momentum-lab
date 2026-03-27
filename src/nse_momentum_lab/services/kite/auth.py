@@ -25,6 +25,7 @@ class KiteAuth:
         self._instrument_rows: dict[str, list[dict[str, Any]]] = {}
         self._instrument_tokens: dict[tuple[str, str], int] = {}
         self._miss_cache: set[tuple[str, str]] = set()
+        self._refresh_attempted: set[str] = set()
 
     def is_authenticated(self) -> bool:
         return bool(self._settings.kite_api_key and self._settings.kite_access_token)
@@ -58,6 +59,7 @@ class KiteAuth:
         self._instrument_rows.pop(exchange_key, None)
         self._rebuild_token_cache(exchange_key, filtered_rows)
         self._miss_cache = {key for key in self._miss_cache if key[0] != exchange_key}
+        self._refresh_attempted.discard(exchange_key)
         logger.info(
             "Refreshed Kite instrument cache for %s: %d rows", exchange_key, len(filtered_rows)
         )
@@ -99,6 +101,11 @@ class KiteAuth:
         if cache_key in self._miss_cache or not self.is_authenticated():
             return None
 
+        if exchange_key in self._refresh_attempted:
+            self._miss_cache.add(cache_key)
+            return None
+
+        self._refresh_attempted.add(exchange_key)
         self.refresh_instruments(exchange_key)
         token = self._instrument_tokens.get(cache_key)
         if token is None:

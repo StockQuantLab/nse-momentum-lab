@@ -26,7 +26,13 @@ def test_market_monitor_status_uses_read_only_db(monkeypatch) -> None:
     monkeypatch.setattr(
         market_monitor.argparse.ArgumentParser,
         "parse_args",
-        lambda self: Namespace(force=False, status=True, incremental=False, since=None),
+        lambda self: Namespace(
+            force=True,
+            allow_full_rebuild=False,
+            status=True,
+            incremental=False,
+            since=None,
+        ),
     )
 
     def _get_market_db(*, read_only: bool = False) -> DummyDB:
@@ -65,7 +71,13 @@ def test_market_monitor_incremental_uses_incremental_build(monkeypatch) -> None:
     monkeypatch.setattr(
         market_monitor.argparse.ArgumentParser,
         "parse_args",
-        lambda self: Namespace(force=True, status=False, incremental=True, since=None),
+        lambda self: Namespace(
+            force=True,
+            allow_full_rebuild=False,
+            status=False,
+            incremental=True,
+            since=None,
+        ),
     )
     monkeypatch.setattr(
         market_monitor,

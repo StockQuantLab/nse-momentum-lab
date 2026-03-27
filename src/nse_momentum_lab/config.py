@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     kite_login_url: str = "https://kite.zerodha.com/connect/login?v=3"
     kite_api_root: str = "https://api.kite.trade"
 
+    # Broker order execution guard (disabled by default)
+    broker_order_execution_enabled: bool = False
+
     # Data lake contract (DuckDB + Parquet)
     data_lake_mode: str = "local"  # local|minio
     data_lake_local_dir: str = "data/parquet"

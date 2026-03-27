@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -18,7 +20,52 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 CHECKPOINT_DIR = PROJECT_ROOT / "data" / "raw" / "kite" / "checkpoints"
 PARQUET_DAILY_DIR = PROJECT_ROOT / "data" / "parquet" / "daily"
 CHECKPOINT_FLUSH_EVERY = 25
+PROGRESS_LOG_EVERY = 10
 BACKFILL_START_DATE = date(2025, 4, 1)
+
+LOCK_FILE_PATH = PROJECT_ROOT / "data" / "raw" / "kite" / "checkpoints" / ".ingestion.lock"
+
+PLATFORM_HAS_LOCK = False
+
+if os.name == "nt":
+    try:
+        import msvcrt
+
+        PLATFORM_HAS_LOCK = True
+    except ImportError:
+        msvcrt = None
+
+
+def _try_acquire_lock() -> tuple[int, bool]:
+    """Attempt to acquire file lock. Returns (fd, acquired)."""
+    if not PLATFORM_HAS_LOCK or msvcrt is None:
+        return -1, True
+    try:
+        LOCK_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(LOCK_FILE_PATH), os.O_CREAT | os.O_RDWR)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        return fd, True
+    except OSError:
+        return -1, False
+
+
+def _release_lock(fd: int) -> None:
+    """Release file lock and close fd."""
+    if fd < 0:
+        return
+    if PLATFORM_HAS_LOCK and msvcrt is not None:
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 @dataclass(slots=True)
@@ -36,7 +83,7 @@ class KiteScheduler:
         market_db = get_market_db(read_only=True)
         daily_range = None
         five_min_range = None
-        if market_db.has_daily:
+        if getattr(market_db, "_has_daily", False):
             row = market_db.con.execute(
                 "SELECT MIN(date), MAX(date), COUNT(DISTINCT symbol) FROM v_daily"
             ).fetchone()
@@ -46,7 +93,7 @@ class KiteScheduler:
                     "max_date": row[1].isoformat() if row[1] else None,
                     "symbols": int(row[2] or 0),
                 }
-        if market_db.has_5min:
+        if getattr(market_db, "_has_5min", False):
             row = market_db.con.execute(
                 "SELECT MIN(date), MAX(date), COUNT(DISTINCT symbol) FROM v_5min"
             ).fetchone()
@@ -169,7 +216,42 @@ class KiteScheduler:
         mode: str,
         update_features: bool,
     ) -> dict[str, Any]:
-        resolved_symbols = self._resolve_symbols(symbols)
+        lock_fd, acquired = _try_acquire_lock()
+        if not acquired:
+            logger.warning("Kite ingestion already running; skipping")
+            return {"error": "concurrent_ingestion_blocked"}
+        try:
+            return self._run_ingestion_inner(
+                dataset=dataset,
+                symbols=symbols,
+                start_date=start_date,
+                end_date=end_date,
+                save_raw=save_raw,
+                resume=resume,
+                mode=mode,
+                update_features=update_features,
+            )
+        finally:
+            _release_lock(lock_fd)
+
+    def _run_ingestion_inner(
+        self,
+        *,
+        dataset: IngestionDataset,
+        symbols: list[str] | None,
+        start_date: date,
+        end_date: date,
+        save_raw: bool,
+        resume: bool,
+        mode: str,
+        update_features: bool,
+    ) -> dict[str, Any]:
+        resolved_symbols = self._resolve_symbols(
+            symbols=symbols,
+            dataset=dataset,
+            start_date=start_date,
+            end_date=end_date,
+        )
         checkpoint = self._load_checkpoint(
             dataset=dataset,
             start_date=start_date,
@@ -196,17 +278,43 @@ class KiteScheduler:
         }
 
         if not pending_symbols:
+            logger.info(
+                "Kite %s ingestion already complete for %s to %s; nothing pending.",
+                dataset.value,
+                start_date,
+                end_date,
+            )
             summary["checkpoint_cleared"] = True
             self._clear_checkpoint(checkpoint.path)
             return summary
 
+        logger.info(
+            "Starting Kite %s ingestion for %s to %s: total=%d pending=%d resume=%s checkpoint=%s",
+            dataset.value,
+            start_date,
+            end_date,
+            len(resolved_symbols),
+            len(pending_symbols),
+            resume,
+            checkpoint.path,
+        )
+
         completed_since_flush = 0
+        started_at = time.monotonic()
         for symbol in pending_symbols:
             summary["processed_symbols"] += 1
             try:
                 if self.auth.get_instrument_token(symbol) is None:
                     summary["failed"] += 1
                     summary["missing_tokens"].append(symbol)
+                    logger.warning(
+                        "Skipping %s for Kite %s ingestion: missing instrument token (%d/%d)",
+                        symbol,
+                        dataset.value,
+                        summary["processed_symbols"],
+                        len(pending_symbols),
+                    )
+                    self._log_progress(dataset, summary, len(pending_symbols), started_at)
                     continue
 
                 if dataset is IngestionDataset.DAILY:
@@ -235,11 +343,19 @@ class KiteScheduler:
                 completed_since_flush += 1
                 if resume and completed_since_flush >= CHECKPOINT_FLUSH_EVERY:
                     self._persist_checkpoint(checkpoint)
+                    logger.info(
+                        "Persisted Kite %s checkpoint after %d processed symbols: %s",
+                        dataset.value,
+                        summary["processed_symbols"],
+                        checkpoint.path,
+                    )
                     completed_since_flush = 0
+                self._log_progress(dataset, summary, len(pending_symbols), started_at)
             except Exception as exc:
                 logger.exception("Kite %s ingestion failed for %s", dataset.value, symbol)
                 summary["failed"] += 1
                 summary["errors"].append({"symbol": symbol, "error": str(exc)})
+                self._log_progress(dataset, summary, len(pending_symbols), started_at)
 
         if resume and checkpoint.completed_symbols:
             self._persist_checkpoint(checkpoint)
@@ -249,19 +365,97 @@ class KiteScheduler:
             self._clear_checkpoint(checkpoint.path)
 
         if dataset is IngestionDataset.DAILY and update_features and summary["succeeded"] > 0:
-            self._refresh_features(summary)
+            self._refresh_features(summary, start_date=start_date)
 
+        logger.info(
+            "Completed Kite %s ingestion for %s to %s: processed=%d/%d succeeded=%d failed=%d zero_rows=%d elapsed=%.1fs",
+            dataset.value,
+            start_date,
+            end_date,
+            summary["processed_symbols"],
+            len(pending_symbols),
+            summary["succeeded"],
+            summary["failed"],
+            summary["zero_rows"],
+            time.monotonic() - started_at,
+        )
         return summary
 
-    def _resolve_symbols(self, symbols: list[str] | None) -> list[str]:
+    def _resolve_symbols(
+        self,
+        *,
+        symbols: list[str] | None,
+        dataset: IngestionDataset,
+        start_date: date,
+        end_date: date,
+    ) -> list[str]:
         if symbols:
             cleaned = [symbol.strip().upper() for symbol in symbols if symbol.strip()]
             return list(dict.fromkeys(cleaned))
 
+        if dataset is IngestionDataset.FIVE_MIN:
+            daily_window_symbols = self.get_symbols_from_daily_range(
+                start_date=start_date, end_date=end_date
+            )
+            kite_symbols = self.get_symbols_from_kite(exchange="NSE", segment="NSE")
+            if daily_window_symbols and kite_symbols:
+                kite_symbol_set = set(kite_symbols)
+                intersected = [
+                    symbol for symbol in daily_window_symbols if symbol in kite_symbol_set
+                ]
+                if intersected:
+                    logger.info(
+                        "Resolved Kite 5min ingestion universe via daily-window/current intersection: daily_window=%d current=%d selected=%d",
+                        len(daily_window_symbols),
+                        len(kite_symbols),
+                        len(intersected),
+                    )
+                    return intersected
+            if daily_window_symbols:
+                logger.info(
+                    "Resolved Kite 5min ingestion universe from daily-window symbols: %d",
+                    len(daily_window_symbols),
+                )
+                return daily_window_symbols
+
         local_symbols = self.get_symbols_from_local_parquet()
+        kite_symbols = self.get_symbols_from_kite(exchange="NSE", segment="NSE")
+        if local_symbols and kite_symbols:
+            kite_symbol_set = set(kite_symbols)
+            intersected = [symbol for symbol in local_symbols if symbol in kite_symbol_set]
+            if intersected:
+                logger.info(
+                    "Resolved Kite ingestion universe via local/current intersection: local=%d current=%d selected=%d",
+                    len(local_symbols),
+                    len(kite_symbols),
+                    len(intersected),
+                )
+                return intersected
         if local_symbols:
+            logger.info(
+                "Resolved Kite ingestion universe from local parquet symbols: %d",
+                len(local_symbols),
+            )
             return local_symbols
-        return self.get_symbols_from_kite(exchange="NSE", segment="NSE")
+        logger.info(
+            "Resolved Kite ingestion universe from current Kite instruments: %d", len(kite_symbols)
+        )
+        return kite_symbols
+
+    def get_symbols_from_daily_range(self, *, start_date: date, end_date: date) -> list[str]:
+        market_db = get_market_db(read_only=True)
+        if not getattr(market_db, "_has_daily", False):
+            return []
+        rows = market_db.con.execute(
+            """
+            SELECT DISTINCT symbol
+            FROM v_daily
+            WHERE date >= ? AND date <= ?
+            ORDER BY symbol
+            """,
+            [start_date, end_date],
+        ).fetchall()
+        return [str(row[0]).strip().upper() for row in rows if row and str(row[0]).strip()]
 
     def _checkpoint_path(
         self,
@@ -305,11 +499,40 @@ class KiteScheduler:
         if path.exists():
             path.unlink()
 
-    def _refresh_features(self, summary: dict[str, Any]) -> None:
+    def _log_progress(
+        self,
+        dataset: IngestionDataset,
+        summary: dict[str, Any],
+        pending_total: int,
+        started_at: float,
+    ) -> None:
+        processed = int(summary["processed_symbols"])
+        if processed != 1 and processed % PROGRESS_LOG_EVERY != 0 and processed != pending_total:
+            return
+
+        elapsed = max(time.monotonic() - started_at, 0.0)
+        rate = processed / elapsed if elapsed > 0 else 0.0
+        logger.info(
+            "Kite %s progress %d/%d succeeded=%d failed=%d zero_rows=%d elapsed=%.1fs rate=%.2f symbols/s",
+            dataset.value,
+            processed,
+            pending_total,
+            summary["succeeded"],
+            summary["failed"],
+            summary["zero_rows"],
+            elapsed,
+            rate,
+        )
+
+    def _refresh_features(self, summary: dict[str, Any], *, start_date: date) -> None:
         market_db = get_market_db()
-        row_count = market_db.build_feat_daily_table(force=True)
+        market_db._build_modular_features(force=False, since_date=start_date)
+        monitor_rows = market_db.build_market_monitor_incremental(
+            since_date=start_date, force=False
+        )
         summary["features_refreshed"] = True
-        summary["feat_daily_rows"] = row_count
+        summary["market_monitor_refreshed"] = True
+        summary["market_monitor_rows"] = monitor_rows
 
 
 _kite_scheduler: KiteScheduler | None = None

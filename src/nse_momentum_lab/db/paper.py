@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
@@ -24,8 +24,12 @@ ACTIVE_SESSION_STATUSES = {"ACTIVE", "RUNNING", "PAUSED", "PLANNING", "STOPPING"
 FINAL_SESSION_STATUSES = {"COMPLETED", "FAILED", "ARCHIVED", "CANCELLED"}
 
 
-def _utc_now() -> datetime:
-    return datetime.now(tz=UTC)
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+# Backward-compatible alias for older tests and call sites.
+_utc_now = _now
 
 
 def _serialize_paper_session(row: PaperSession) -> dict[str, Any]:
@@ -206,7 +210,7 @@ async def upsert_paper_feed_state(
     last_bar_at: datetime | None = None,
     metadata_json: dict[str, Any] | None = None,
 ) -> PaperFeedState:
-    now = _utc_now()
+    now = _now()
     row = await get_paper_feed_state(db_session, session_id)
     if row is None:
         row = PaperFeedState(
@@ -258,7 +262,7 @@ async def touch_paper_feed_state(
     last_bar_at: datetime | None = None,
     metadata_json: dict[str, Any] | None = None,
 ) -> PaperFeedState:
-    now = _utc_now()
+    now = _now()
     row = await get_paper_feed_state(db_session, session_id)
     if row is None:
         row = PaperFeedState(
@@ -367,7 +371,7 @@ async def upsert_signal(
             planned_entry_date=planned_entry_date,
             initial_stop=initial_stop,
             metadata_json=metadata_json or {},
-            created_at=_utc_now(),
+            created_at=_now(),
         )
         db_session.add(row)
     else:
@@ -404,7 +408,7 @@ async def upsert_paper_session_signal(
     decision_reason: str | None = None,
     metadata_json: dict[str, Any] | None = None,
 ) -> PaperSessionSignal:
-    now = _utc_now()
+    now = _now()
     result = await db_session.execute(
         select(PaperSessionSignal).where(
             PaperSessionSignal.session_id == session_id,
@@ -531,7 +535,7 @@ async def upsert_paper_order(
         )
         row = result.scalar_one_or_none()
 
-    now = _utc_now()
+    now = _now()
     if row is None:
         row = PaperOrder(
             session_id=session_id,
@@ -663,7 +667,7 @@ async def upsert_paper_order_event(
         event_status=event_status,
         broker_order_id=broker_order_id,
         payload_json=payload_json or {},
-        created_at=_utc_now(),
+        created_at=_now(),
     )
     db_session.add(row)
     await db_session.commit()
@@ -713,15 +717,15 @@ async def upsert_paper_bar_checkpoint(
             bar_end=bar_end,
             payload_json=payload_json or {},
             processed=processed,
-            created_at=_utc_now(),
-            updated_at=_utc_now(),
+            created_at=_now(),
+            updated_at=_now(),
         )
         db_session.add(row)
     else:
         row.bar_end = bar_end
         row.payload_json = payload_json or {}
         row.processed = processed
-        row.updated_at = _utc_now()
+        row.updated_at = _now()
 
     await db_session.commit()
     await db_session.refresh(row)
@@ -742,7 +746,7 @@ async def create_or_update_paper_session(
     risk_config: dict[str, Any] | None = None,
     notes: str | None = None,
 ) -> PaperSession:
-    now = _utc_now()
+    now = _now()
     existing = await get_paper_session(db_session, session_id)
     if existing is None:
         existing = PaperSession(
@@ -799,7 +803,7 @@ async def update_paper_session(
     if row is None:
         return None
 
-    row.updated_at = _utc_now()
+    row.updated_at = _now()
     if symbols is not None:
         row.symbols = symbols
     if strategy_params is not None:
@@ -825,7 +829,7 @@ async def set_paper_session_status(
     if row is None:
         return None
 
-    now = _utc_now()
+    now = _now()
     row.status = status
     row.notes = notes if notes is not None else row.notes
     row.updated_at = now
@@ -947,7 +951,7 @@ async def insert_walk_forward_fold(
         max_drawdown_pct=max_drawdown_pct,
         profit_factor=profit_factor,
         total_trades=total_trades,
-        created_at=_utc_now(),
+        created_at=_now(),
     )
     db_session.add(row)
     await db_session.flush()
@@ -975,6 +979,70 @@ async def reset_walk_forward_folds(
         delete(WalkForwardFold).where(WalkForwardFold.wf_session_id == wf_session_id)
     )
     await db_session.flush()
+
+
+async def get_walk_forward_session_cleanup_preview(
+    db_session: AsyncSession,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Return the walk-forward parent row and folds that would be removed."""
+    row = await get_paper_session(db_session, session_id)
+    if row is None or row.mode != "walk_forward":
+        return None
+    folds = await list_walk_forward_folds(db_session, session_id)
+    return {
+        "session": _serialize_paper_session(row),
+        "folds": folds,
+        "fold_count": len(folds),
+    }
+
+
+async def delete_walk_forward_session(
+    db_session: AsyncSession,
+    session_id: str,
+) -> dict[str, Any]:
+    """Delete one walk-forward parent session and let FK cascade remove the folds."""
+    preview = await get_walk_forward_session_cleanup_preview(db_session, session_id)
+    if preview is None:
+        return {"deleted_count": 0, "session_ids": []}
+
+    await db_session.execute(
+        delete(PaperSession).where(
+            PaperSession.session_id == session_id,
+            PaperSession.mode == "walk_forward",
+        )
+    )
+    await db_session.commit()
+    return {"deleted_count": 1, "session_ids": [session_id]}
+
+
+async def delete_walk_forward_sessions_by_ids(
+    db_session: AsyncSession,
+    session_ids: list[str],
+) -> dict[str, Any]:
+    """Delete multiple walk-forward parent sessions and cascade their folds."""
+    unique_ids = [session_id for session_id in dict.fromkeys(session_ids) if session_id]
+    if not unique_ids:
+        return {"deleted_count": 0, "session_ids": []}
+
+    result = await db_session.execute(
+        select(PaperSession.session_id).where(
+            PaperSession.session_id.in_(unique_ids),
+            PaperSession.mode == "walk_forward",
+        )
+    )
+    deleted_ids = [str(session_id) for session_id in result.scalars().all()]
+    if not deleted_ids:
+        return {"deleted_count": 0, "session_ids": []}
+
+    await db_session.execute(
+        delete(PaperSession).where(
+            PaperSession.session_id.in_(deleted_ids),
+            PaperSession.mode == "walk_forward",
+        )
+    )
+    await db_session.commit()
+    return {"deleted_count": len(deleted_ids), "session_ids": deleted_ids}
 
 
 async def get_latest_passed_walk_forward(
@@ -1025,12 +1093,7 @@ async def delete_walk_forward_sessions(
 
     result = await db_session.execute(query.order_by(PaperSession.created_at.desc()))
     session_ids = [str(session_id) for session_id in result.scalars().all()]
-    if not session_ids:
-        return {"deleted_count": 0, "session_ids": []}
-
-    await db_session.execute(delete(PaperSession).where(PaperSession.session_id.in_(session_ids)))
-    await db_session.commit()
-    return {"deleted_count": len(session_ids), "session_ids": session_ids}
+    return await delete_walk_forward_sessions_by_ids(db_session, session_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -1053,7 +1116,7 @@ async def flatten_open_positions(
     )
     open_positions = result.scalars().all()
     closed: list[dict[str, Any]] = []
-    now = _utc_now()
+    now = _now()
 
     for position in open_positions:
         metadata = dict(position.metadata_json or {})
@@ -1176,7 +1239,7 @@ async def qualify_session_signals(
                 event_type="SIGNAL_QUALIFIED",
                 event_status="QUALIFIED",
                 payload_json={"rank": rank, "selection_score": score},
-                created_at=_utc_now(),
+                created_at=_now(),
             )
         )
         qualified.append(_serialize_signal(signal))
@@ -1219,10 +1282,115 @@ async def alert_session_signals(
                 event_type="SIGNAL_ALERTED",
                 event_status="ALERTED",
                 payload_json={},
-                created_at=_utc_now(),
+                created_at=_now(),
             )
         )
         alerted.append(_serialize_signal(signal))
 
     await db_session.commit()
     return alerted
+
+
+# ---------------------------------------------------------------------------
+# Session cleanup and archive
+# ---------------------------------------------------------------------------
+
+
+async def list_stale_sessions(
+    db_session: AsyncSession,
+    *,
+    mode: str | None = None,
+    max_age_hours: int = 48,
+    exclude_recent: int = 1,
+) -> list[dict[str, Any]]:
+    """Find sessions that appear stale and should be cleaned up.
+
+    A session is considered stale if:
+    - Its status is in ACTIVE_SESSION_STATUSES
+    - It was created more than *max_age_hours* ago
+    - It is not the most recent session of its mode (reserved by *exclude_recent*)
+
+    Returns serialized session dicts.
+    """
+    cutoff = _now() - timedelta(hours=max_age_hours)
+
+    query = (
+        select(PaperSession)
+        .where(
+            PaperSession.status.in_(ACTIVE_SESSION_STATUSES),
+            PaperSession.created_at < cutoff,
+        )
+        .order_by(PaperSession.created_at.desc())
+    )
+    if mode:
+        query = query.where(PaperSession.mode == mode)
+
+    result = await db_session.execute(query)
+    all_stale = result.scalars().all()
+
+    # Protect the N most recent sessions per mode from accidental cleanup
+    if exclude_recent > 0 and all_stale:
+        protected_ids: set[str] = set()
+        protect_query = (
+            select(PaperSession.session_id)
+            .order_by(PaperSession.created_at.desc())
+            .limit(exclude_recent)
+        )
+        if mode:
+            protect_query = protect_query.where(PaperSession.mode == mode)
+        protect_result = await db_session.execute(protect_query)
+        protected_ids = {row[0] for row in protect_result.fetchall()}
+
+        all_stale = [s for s in all_stale if s.session_id not in protected_ids]
+
+    return [_serialize_paper_session(s) for s in all_stale]
+
+
+async def archive_sessions(
+    db_session: AsyncSession,
+    session_ids: list[str],
+) -> dict[str, Any]:
+    """Archive a list of sessions by setting status to ARCHIVED.
+
+    Returns a summary with counts of archived and not-found sessions.
+    """
+    archived = 0
+    not_found = 0
+    now = _now()
+
+    for session_id in session_ids:
+        row = await get_paper_session(db_session, session_id)
+        if row is None:
+            not_found += 1
+            continue
+        row.status = "ARCHIVED"
+        row.finished_at = row.finished_at or now
+        row.archived_at = now
+        row.updated_at = now
+        archived += 1
+
+    await db_session.commit()
+    return {"archived": archived, "not_found": not_found}
+
+
+async def get_active_session(
+    db_session: AsyncSession,
+    *,
+    mode: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the most recent active (non-archived, non-final) session.
+
+    Useful for operators to identify the current live session at a glance.
+    """
+    query = (
+        select(PaperSession)
+        .where(PaperSession.status.in_(ACTIVE_SESSION_STATUSES))
+        .order_by(PaperSession.created_at.desc())
+        .limit(1)
+    )
+    if mode:
+        query = query.where(PaperSession.mode == mode)
+
+    result = await db_session.execute(query)
+    row = result.scalar_one_or_none()
+    return _serialize_paper_session(row) if row else None
