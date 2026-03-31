@@ -46,7 +46,9 @@ class TestKiteStreamRunner:
             "mode": "full",
         }
         mock_touch.assert_awaited_once()
-        assert mock_touch.await_args.kwargs["metadata_json"] == {
+        await_args = mock_touch.await_args
+        assert await_args is not None
+        assert await_args.kwargs["metadata_json"] == {
             "token_count": 2,
             "mode": "full",
         }
@@ -67,7 +69,9 @@ class TestKiteStreamRunner:
         asyncio.run(runner._record_ticks([{"instrument_token": 102, "last_price": 101.0}]))
 
         mock_touch.assert_awaited_once()
-        assert mock_touch.await_args.kwargs["metadata_json"] == {
+        await_args = mock_touch.await_args
+        assert await_args is not None
+        assert await_args.kwargs["metadata_json"] == {
             "tick_count": 1,
             "token_count": 2,
             "last_tick_tokens": [101],
