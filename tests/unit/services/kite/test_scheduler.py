@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import nse_momentum_lab.services.kite.scheduler as scheduler
 from nse_momentum_lab.services.kite.scheduler import CheckpointState, KiteScheduler
-from nse_momentum_lab.utils.constants import IngestionDataset
+from nse_momentum_lab.utils.constants import IngestionDataset, IngestionUniverse
 
 
 def test_daily_ingestion_refreshes_features_incrementally(monkeypatch) -> None:
@@ -46,6 +46,7 @@ def test_daily_ingestion_refreshes_features_incrementally(monkeypatch) -> None:
         resume=False,
         mode="append",
         update_features=True,
+        universe=IngestionUniverse.LOCAL_FIRST,
     )
 
     assert calls == [date(2026, 3, 21)]
@@ -91,9 +92,13 @@ def test_get_ingestion_status_reads_available_ranges(monkeypatch) -> None:
     class DummyCon:
         def execute(self, query: str):
             if "FROM v_daily" in query:
-                return SimpleNamespace(fetchone=lambda: (date(2026, 3, 21), date(2026, 3, 25), 1435))
+                return SimpleNamespace(
+                    fetchone=lambda: (date(2026, 3, 21), date(2026, 3, 25), 1435)
+                )
             if "FROM v_5min" in query:
-                return SimpleNamespace(fetchone=lambda: (date(2026, 3, 10), date(2026, 3, 20), 1435))
+                return SimpleNamespace(
+                    fetchone=lambda: (date(2026, 3, 10), date(2026, 3, 20), 1435)
+                )
             raise AssertionError(query)
 
     class DummyDB:
@@ -128,8 +133,12 @@ def test_get_ingestion_status_reads_available_ranges(monkeypatch) -> None:
 
 def test_resolve_symbols_uses_local_kite_intersection_for_daily(monkeypatch) -> None:
     scheduler_obj = KiteScheduler(auth=SimpleNamespace(), writer=SimpleNamespace())
-    monkeypatch.setattr(scheduler_obj, "get_symbols_from_local_parquet", lambda: ["AAA", "BBB", "CCC"])
-    monkeypatch.setattr(scheduler_obj, "get_symbols_from_kite", lambda **kwargs: ["BBB", "CCC", "DDD"])
+    monkeypatch.setattr(
+        scheduler_obj, "get_symbols_from_local_parquet", lambda: ["AAA", "BBB", "CCC"]
+    )
+    monkeypatch.setattr(
+        scheduler_obj, "get_symbols_from_kite", lambda **kwargs: ["BBB", "CCC", "DDD"]
+    )
 
     resolved = scheduler_obj._resolve_symbols(
         symbols=None,
@@ -148,7 +157,9 @@ def test_resolve_symbols_uses_daily_window_intersection_for_5min(monkeypatch) ->
         "get_symbols_from_daily_range",
         lambda **kwargs: ["AAA", "BBB", "CCC"],
     )
-    monkeypatch.setattr(scheduler_obj, "get_symbols_from_kite", lambda **kwargs: ["BBB", "CCC", "DDD"])
+    monkeypatch.setattr(
+        scheduler_obj, "get_symbols_from_kite", lambda **kwargs: ["BBB", "CCC", "DDD"]
+    )
 
     resolved = scheduler_obj._resolve_symbols(
         symbols=None,
@@ -158,3 +169,46 @@ def test_resolve_symbols_uses_daily_window_intersection_for_5min(monkeypatch) ->
     )
 
     assert resolved == ["BBB", "CCC"]
+
+
+def test_resolve_symbols_uses_current_master_when_requested(monkeypatch) -> None:
+    scheduler_obj = KiteScheduler(auth=SimpleNamespace(), writer=SimpleNamespace())
+    calls: list[bool] = []
+
+    def _get_symbols_from_kite(**kwargs):
+        calls.append(bool(kwargs.get("refresh")))
+        return ["AAA", "BBB"]
+
+    monkeypatch.setattr(scheduler_obj, "get_symbols_from_kite", _get_symbols_from_kite)
+
+    resolved = scheduler_obj._resolve_symbols(
+        symbols=None,
+        dataset=IngestionDataset.DAILY,
+        start_date=date(2026, 3, 21),
+        end_date=date(2026, 3, 21),
+        universe=IngestionUniverse.CURRENT_MASTER,
+    )
+
+    assert resolved == ["AAA", "BBB"]
+    assert calls == [True]
+
+
+def test_checkpoint_path_is_namespaced_by_universe() -> None:
+    scheduler_obj = KiteScheduler(auth=SimpleNamespace(), writer=SimpleNamespace())
+
+    local_path = scheduler_obj._checkpoint_path(
+        dataset=IngestionDataset.DAILY,
+        start_date=date(2026, 3, 21),
+        end_date=date(2026, 3, 21),
+        universe=IngestionUniverse.LOCAL_FIRST,
+    )
+    master_path = scheduler_obj._checkpoint_path(
+        dataset=IngestionDataset.DAILY,
+        start_date=date(2026, 3, 21),
+        end_date=date(2026, 3, 21),
+        universe=IngestionUniverse.CURRENT_MASTER,
+    )
+
+    assert local_path != master_path
+    assert "local-first" in local_path.name
+    assert "current-master" in master_path.name

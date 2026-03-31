@@ -12,6 +12,7 @@ def main():
 
     # Get first 10 symbols
     from nse_momentum_lab.db.market_db import get_market_db
+
     db = get_market_db()
     symbols = db.get_available_symbols()[:10]
 
@@ -36,16 +37,18 @@ def main():
 
     print(f"\nFound {len(signals)} signals:")
     for signal in signals[:20]:  # Show first 20
-        print(f"  {signal['symbol']}: {signal['trading_date']} | "
-              f"Gap: {signal['gap_pct']:.2%} | "
-              f"Entry: {signal['entry_price']:.2f} | "
-              f"Stop: {signal['initial_stop']:.2f}")
+        print(
+            f"  {signal['symbol']}: {signal['trading_date']} | "
+            f"Gap: {signal['gap_pct']:.2%} | "
+            f"Entry: {signal['entry_price']:.2f} | "
+            f"Stop: {signal['initial_stop']:.2f}"
+        )
 
     # Show statistics
     if signals:
         by_symbol = {}
         for s in signals:
-            by_symbol[s['symbol']] = by_symbol.get(s['symbol'], 0) + 1
+            by_symbol[s["symbol"]] = by_symbol.get(s["symbol"], 0) + 1
 
         print("\nSignals by symbol:")
         for symbol, count in sorted(by_symbol.items(), key=lambda x: x[1], reverse=True):

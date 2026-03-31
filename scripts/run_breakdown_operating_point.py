@@ -62,11 +62,16 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["current", "prev"],
         help="Breakout ranking C-quality source (symmetry flag; breakdown runs ignore breakout ranking).",
     )
-    parser.add_argument("--breakdown-budget", type=int, default=5,
-                        help="Max short candidates per day (default: 5)")
-    parser.add_argument("--breakdown-rs-min", type=float, default=0.0,
-                        help="rs_252 threshold for 2%% BD filter_y (default 0.0 = rs_252<0). "
-                             "E.g. -0.10 requires >= 10%% YTD underperformance.")
+    parser.add_argument(
+        "--breakdown-budget", type=int, default=5, help="Max short candidates per day (default: 5)"
+    )
+    parser.add_argument(
+        "--breakdown-rs-min",
+        type=float,
+        default=0.0,
+        help="rs_252 threshold for 2%% BD filter_y (default 0.0 = rs_252<0). "
+        "E.g. -0.10 requires >= 10%% YTD underperformance.",
+    )
     parser.add_argument(
         "--breakdown-ti65-mode",
         type=str,
@@ -118,11 +123,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Use as a hard freshness gate (off by default)."
         ),
     )
-    parser.add_argument("--short-profile", type=str, default="option-b",
-                        choices=list(SHORT_PROFILES.keys()),
-                        help="Short engine param profile for 2%% BD (default: option-b)")
-    parser.add_argument("--sweep-profiles", action="store_true",
-                        help="Run ALL short profiles for 2%% BD (overrides --short-profile)")
+    parser.add_argument(
+        "--short-profile",
+        type=str,
+        default="option-b",
+        choices=list(SHORT_PROFILES.keys()),
+        help="Short engine param profile for 2%% BD (default: option-b)",
+    )
+    parser.add_argument(
+        "--sweep-profiles",
+        action="store_true",
+        help="Run ALL short profiles for 2%% BD (overrides --short-profile)",
+    )
     parser.add_argument("--force", action="store_true", help="Force rerun even if cached")
     parser.add_argument(
         "--snapshot",
@@ -207,7 +219,8 @@ def main() -> None:
 
         # 2% BD: sweep all profiles or run single profile
         profiles_to_run = (
-            SHORT_PROFILES if args.sweep_profiles
+            SHORT_PROFILES
+            if args.sweep_profiles
             else {args.short_profile: SHORT_PROFILES[args.short_profile]}
         )
 

@@ -16,5 +16,6 @@ async def run():
     print(f"Adjusted {len(results)} symbols")
     await worker.close()
 
+
 if __name__ == "__main__":
     asyncio.run(run(), loop_factory=asyncio.SelectorEventLoop)

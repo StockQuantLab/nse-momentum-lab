@@ -84,7 +84,6 @@ def _title_case_words(value: str) -> str:
 def _mode_label(mode: Any) -> str:
     normalized = str(mode or "").strip().lower()
     labels = {
-        "walk_forward": "Walk-Forward Check",
         "replay": "Replay Session",
         "live": "Live Session",
         "stream": "Live Feed",
@@ -121,35 +120,6 @@ def _feed_label(feed_state: dict[str, Any]) -> tuple[str, str]:
     ]
     subtitle = " / ".join(subtitle_bits) if subtitle_bits else "Feed details available"
     return (status_label, subtitle)
-
-
-def _decision_status_label(status: Any) -> str:
-    normalized = str(status or "").strip().upper()
-    labels = {
-        "PASS": "Ready for Promotion",
-        "FAIL": "Needs Review",
-    }
-    return labels.get(normalized, _title_case_words(normalized.lower()) if normalized else "-")
-
-
-def _decision_reason_label(reason: Any) -> str:
-    normalized = str(reason or "").strip()
-    if not normalized:
-        return "-"
-    if normalized == "all_thresholds_met":
-        return "All walk-forward checks passed"
-    reason_map = {
-        "no_folds": "No test windows were generated",
-        "incomplete_folds": "One or more test windows did not finish",
-        "non_positive_average_return": "Average return was not positive",
-        "insufficient_profitable_folds": "Fewer than half of test windows were profitable",
-        "excessive_drawdown": "Drawdown was above the allowed limit",
-    }
-    parts = [
-        reason_map.get(part.strip(), _title_case_words(part.strip()))
-        for part in normalized.split(",")
-    ]
-    return "; ".join(part for part in parts if part)
 
 
 def _session_summary_text(
@@ -279,51 +249,6 @@ def _position_rows(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _walk_forward_rows(strategy_params: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not strategy_params:
-        return []
-    walk_forward = strategy_params.get("walk_forward")
-    if not isinstance(walk_forward, dict):
-        return []
-    folds = walk_forward.get("folds")
-    if not isinstance(folds, list):
-        return []
-    rows: list[dict[str, Any]] = []
-    for idx, fold in enumerate(folds, start=1):
-        if not isinstance(fold, dict):
-            continue
-        rows.append(
-            {
-                "fold": idx,
-                "train": f"{fold.get('train_start') or '-'} -> {fold.get('train_end') or '-'}",
-                "test": f"{fold.get('test_start') or '-'} -> {fold.get('test_end') or '-'}",
-                "status": _title_case_words(str(fold.get("status") or "-")),
-                "return_pct": _fmt_float(fold.get("total_return_pct")),
-                "drawdown_pct": _fmt_float(fold.get("max_drawdown_pct")),
-                "trades": fold.get("total_trades") or 0,
-                "exp_id": str(fold.get("exp_id") or "")[:12],
-            }
-        )
-    return rows
-
-
-def _walk_forward_rows_from_db(db_folds: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Format DB-sourced WalkForwardFold rows for the paginated table."""
-    return [
-        {
-            "fold": fold.get("fold_index"),
-            "train": f"{fold.get('train_start') or '-'} -> {fold.get('train_end') or '-'}",
-            "test": f"{fold.get('test_start') or '-'} -> {fold.get('test_end') or '-'}",
-            "status": _title_case_words(str(fold.get("status") or "-")),
-            "return_pct": _fmt_float(fold.get("total_return_pct")),
-            "drawdown_pct": _fmt_float(fold.get("max_drawdown_pct")),
-            "trades": fold.get("total_trades") or 0,
-            "exp_id": str(fold.get("exp_id") or "")[:12],
-        }
-        for fold in db_folds
-    ]
-
-
 def _event_rows(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -351,9 +276,8 @@ async def paper_ledger_page() -> None:
                 "sessions can be observed without leaving the dashboard."
             ).classes(SPACE_MD).style(f"color: {theme_text_secondary()};")
             ui.label(
-                "Use the separate /walk_forward page for validation history and reruns. "
-                "Load an approved experiment/date here, execute replay or live once, and "
-                "monitor feed, queue, orders, fills, and positions."
+                "Load an experiment/date here, execute replay or live once, and monitor feed, "
+                "queue, orders, fills, and positions."
             ).style(f"color: {theme_text_muted()};")
 
         try:
@@ -376,13 +300,13 @@ async def paper_ledger_page() -> None:
         paper_sessions = [
             session
             for session in sessions
-            if str(session.get("mode") or "").strip().lower() != "walk_forward"
+            if str(session.get("mode") or "").strip().lower() in {"replay", "live", "stream"}
             and str(session.get("status") or "").strip().upper() != "ARCHIVED"
         ]
         if not paper_sessions:
             empty_state(
                 "No paper sessions yet",
-                "Create a replay or live paper session first. Walk-forward checks now live on the separate validation page.",
+                "Create a replay or live paper session first.",
                 icon="receipt_long",
             )
             return

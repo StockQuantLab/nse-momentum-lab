@@ -245,7 +245,13 @@ class TestAPIApp:
         mock_sm.return_value.return_value = mock_context
         mock_summary.return_value = {
             "session": {"session_id": "paper-1", "status": "ACTIVE"},
-            "counts": {"signals": 3, "open_signals": 1, "open_positions": 1, "orders": 2, "fills": 2},
+            "counts": {
+                "signals": 3,
+                "open_signals": 1,
+                "open_positions": 1,
+                "orders": 2,
+                "fills": 2,
+            },
         }
 
         response = self.client.get("/api/paper/sessions/paper-1")

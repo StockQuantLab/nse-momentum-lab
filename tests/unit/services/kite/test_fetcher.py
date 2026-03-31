@@ -4,6 +4,7 @@ from datetime import date
 from types import SimpleNamespace
 
 import httpx
+import polars as pl
 import pytest
 
 import nse_momentum_lab.services.kite.fetcher as fetcher_module
@@ -84,3 +85,38 @@ def test_token_bucket_rate_limiter_waits_until_tokens_refill(monkeypatch) -> Non
     assert first_wait == 0.0
     assert second_wait == pytest.approx(0.5)
     assert sleeps == [pytest.approx(0.5)]
+
+
+def test_normalize_daily_candles_returns_polars_frame() -> None:
+    fetcher = KiteFetcher(auth=SimpleNamespace())
+
+    frame = fetcher._normalize_daily_candles(
+        "RELIANCE",
+        [{"date": "2026-03-21T00:00:00+05:30", "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 10}],
+    )
+
+    assert isinstance(frame, pl.DataFrame)
+    assert frame.to_dicts() == [
+        {
+            "symbol": "RELIANCE",
+            "date": date(2026, 3, 21),
+            "open": 1.0,
+            "high": 2.0,
+            "low": 0.5,
+            "close": 1.5,
+            "volume": 10,
+        }
+    ]
+
+
+def test_normalize_5min_candles_converts_utc_to_naive_ist() -> None:
+    fetcher = KiteFetcher(auth=SimpleNamespace())
+
+    frame = fetcher._normalize_5min_candles(
+        "RELIANCE",
+        [{"date": "2026-03-21T03:45:00+00:00", "open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 10}],
+    )
+
+    assert isinstance(frame, pl.DataFrame)
+    assert frame.schema["candle_time"] == pl.Datetime("ns")
+    assert frame["candle_time"][0].isoformat() == "2026-03-21T09:15:00"

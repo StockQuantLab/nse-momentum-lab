@@ -43,7 +43,8 @@ def run_backtest_500():
     # Fix encoding for Windows
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     print("\n" + "=" * 80)
     print("2LYNCH BREAKOUT BACKTEST - 500 Liquid Stocks")
@@ -171,22 +172,28 @@ def run_backtest_500():
         df_pl = pl.from_pandas(df)
 
         # Apply filters
-        df_pl = df_pl.with_columns([
-            pl.col("filter_h").fill_null(False),
-            pl.col("filter_n").fill_null(False),
-            pl.col("filter_y").fill_null(True),  # Pass if no data
-            pl.col("filter_c").fill_null(False),
-            pl.col("filter_l").fill_null(False),
-        ])
+        df_pl = df_pl.with_columns(
+            [
+                pl.col("filter_h").fill_null(False),
+                pl.col("filter_n").fill_null(False),
+                pl.col("filter_y").fill_null(True),  # Pass if no data
+                pl.col("filter_c").fill_null(False),
+                pl.col("filter_l").fill_null(False),
+            ]
+        )
 
         # Count filters passed
-        df_pl = df_pl.with_columns([
-            (pl.col("filter_h").cast(int) +
-             pl.col("filter_n").cast(int) +
-             pl.col("filter_y").cast(int) +
-             pl.col("filter_c").cast(int) +
-             pl.col("filter_l").cast(int)).alias("filters_passed")
-        ])
+        df_pl = df_pl.with_columns(
+            [
+                (
+                    pl.col("filter_h").cast(int)
+                    + pl.col("filter_n").cast(int)
+                    + pl.col("filter_y").cast(int)
+                    + pl.col("filter_c").cast(int)
+                    + pl.col("filter_l").cast(int)
+                ).alias("filters_passed")
+            ]
+        )
 
         # Apply minimum filters
         df_filtered = df_pl.filter(pl.col("filters_passed") >= min_filters)
@@ -238,7 +245,9 @@ def run_backtest_500():
                     }
 
                 # Get average value traded
-                vol_df = db.get_features_range([symbol], start_date.isoformat(), end_date.isoformat())
+                vol_df = db.get_features_range(
+                    [symbol], start_date.isoformat(), end_date.isoformat()
+                )
                 if not vol_df.is_empty():
                     avg_vol = vol_df.select(pl.col("dollar_vol_20").drop_nulls().mean()).item()
                     value_traded_inr[symbol_id] = avg_vol if avg_vol else 50_000_000.0
@@ -260,13 +269,15 @@ def run_backtest_500():
             if isinstance(sig_date, datetime):
                 sig_date = sig_date.date()
 
-            vbt_signals.append((
-                sig_date,
-                symbol_id,
-                symbol,
-                row["low"],  # Initial stop at low of day
-                {"gap_pct": row["gap_pct"], "atr": row["atr_20"] if row["atr_20"] else 0.0}
-            ))
+            vbt_signals.append(
+                (
+                    sig_date,
+                    symbol_id,
+                    symbol,
+                    row["low"],  # Initial stop at low of day
+                    {"gap_pct": row["gap_pct"], "atr": row["atr_20"] if row["atr_20"] else 0.0},
+                )
+            )
 
         if not vbt_signals:
             print("  No valid signals after conversion")
@@ -293,19 +304,21 @@ def run_backtest_500():
             delisting_dates=None,
         )
 
-        results.append({
-            "config": config_name,
-            "min_price": min_price,
-            "min_filters": min_filters,
-            "total_signals": len(df),
-            "filtered_signals": len(df_filtered),
-            "trades": len(result.trades),
-            "return": result.total_return * 100,
-            "win_rate": result.win_rate * 100,
-            "sharpe": result.sharpe_ratio,
-            "avg_r": result.avg_r,
-            "max_drawdown": result.max_drawdown * 100,
-        })
+        results.append(
+            {
+                "config": config_name,
+                "min_price": min_price,
+                "min_filters": min_filters,
+                "total_signals": len(df),
+                "filtered_signals": len(df_filtered),
+                "trades": len(result.trades),
+                "return": result.total_return * 100,
+                "win_rate": result.win_rate * 100,
+                "sharpe": result.sharpe_ratio,
+                "avg_r": result.avg_r,
+                "max_drawdown": result.max_drawdown * 100,
+            }
+        )
 
         print("\n  Backtest Results:")
         print(f"    Trades: {len(result.trades)}")
@@ -328,8 +341,9 @@ def run_backtest_500():
             print(f"    {reason}: {count} ({pct:.1f}%)")
 
         # Analyze weak follow-through
-        weak_ft = sum(1 for t in result.trades
-                      if t.exit_reason and "weak" in t.exit_reason.value.lower())
+        weak_ft = sum(
+            1 for t in result.trades if t.exit_reason and "weak" in t.exit_reason.value.lower()
+        )
         weak_ft_pct = weak_ft / len(result.trades) * 100 if result.trades else 0
         print(f"\n  Weak Follow-Through: {weak_ft} trades ({weak_ft_pct:.1f}%)")
 
@@ -338,14 +352,18 @@ def run_backtest_500():
     print("SUMMARY COMPARISON - 500 STOCKS")
     print(f"{'=' * 80}")
 
-    print(f"\n{'Config':<35} {'Signals/yr':>12} {'Return %':>12} {'Win %':>10} {'Sharpe':>8} {'DD%':>8}")
+    print(
+        f"\n{'Config':<35} {'Signals/yr':>12} {'Return %':>12} {'Win %':>10} {'Sharpe':>8} {'DD%':>8}"
+    )
     print(f"{'-' * 90}")
 
     for r in results:
-        signals_per_year = r['filtered_signals'] / 11
-        print(f"{r['config']:<35} {signals_per_year:>11.1f} "
-              f"{r['return']:>11.2f}% {r['win_rate']:>9.1f}% "
-              f"{r['sharpe']:>7.2f} {r['max_drawdown']:>7.1f}%")
+        signals_per_year = r["filtered_signals"] / 11
+        print(
+            f"{r['config']:<35} {signals_per_year:>11.1f} "
+            f"{r['return']:>11.2f}% {r['win_rate']:>9.1f}% "
+            f"{r['sharpe']:>7.2f} {r['max_drawdown']:>7.1f}%"
+        )
 
     # Compare with 100 stock results
     print(f"\n{'=' * 80}")
@@ -367,8 +385,9 @@ def run_backtest_500():
         print(f"    Sharpe: {best['sharpe']:.2f}")
         print(f"    Signals/yr: {best['filtered_signals'] / 11:.1f}")
 
-        weak_ft = sum(1 for t in result.trades
-                      if t.exit_reason and "weak" in t.exit_reason.value.lower())
+        weak_ft = sum(
+            1 for t in result.trades if t.exit_reason and "weak" in t.exit_reason.value.lower()
+        )
         weak_ft_pct = weak_ft / len(result.trades) * 100 if result.trades else 0
         print(f"    Weak FT: {weak_ft_pct:.1f}%")
 

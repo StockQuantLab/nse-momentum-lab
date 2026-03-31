@@ -86,9 +86,9 @@ COLORS_CLEAN = {
     "gray": "#64748b",
 }
 
-# Current active theme (starts with Terminal)
-THEME = THEME_TERMINAL.copy()
-COLORS = COLORS_TERMINAL.copy()
+# Current active theme (starts with Clean)
+THEME = THEME_CLEAN.copy()
+COLORS = COLORS_CLEAN.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +149,23 @@ def color_primary() -> str:
 
 def color_gray() -> str:
     return COLORS["gray"]
+
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """Convert a theme hex color to an rgba string (e.g. for Plotly).
+
+    Handles 3-char and 6-char hex. Returns the original string unchanged
+    if it doesn't look like a valid hex color.
+    """
+    color = hex_color.strip().lstrip("#")
+    if len(color) == 3:
+        color = "".join(ch * 2 for ch in color)
+    if len(color) != 6:
+        return hex_color
+    r = int(color[0:2], 16)
+    g = int(color[2:4], 16)
+    b = int(color[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
 
 
 # ---------------------------------------------------------------------------
@@ -281,19 +298,28 @@ TYPE_PRESET = {
 # ---------------------------------------------------------------------------
 # Navigation definition (single source of truth)
 # ---------------------------------------------------------------------------
-NAV_ITEMS = [
-    {"label": "Home", "icon": "home", "path": "/"},
-    {"label": "Backtest Results", "icon": "bar_chart", "path": "/backtest"},
-    {"label": "Trade Analytics", "icon": "analytics", "path": "/trade_analytics"},
-    {"label": "Compare", "icon": "compare_arrows", "path": "/compare"},
-    {"label": "Strategy", "icon": "tune", "path": "/strategy"},
-    {"label": "Scans", "icon": "radar", "path": "/scans"},
-    {"label": "Data Quality", "icon": "verified", "path": "/data_quality"},
-    {"label": "Pipeline", "icon": "engineering", "path": "/pipeline"},
-    {"label": "Walk Forward", "icon": "view_week", "path": "/walk_forward"},
-    {"label": "Paper Ledger", "icon": "receipt_long", "path": "/paper_ledger"},
-    {"label": "Daily Summary", "icon": "today", "path": "/daily_summary"},
-    {"label": "Market Monitor", "icon": "monitor", "path": "/market_monitor"},
+NAV_ITEMS: list[dict[str, str | None]] = [
+    {"label": "Home", "icon": "home", "path": "/", "group": None},
+    {"label": "Backtest Results", "icon": "bar_chart", "path": "/backtest", "group": "Analysis"},
+    {
+        "label": "Trade Analytics",
+        "icon": "analytics",
+        "path": "/trade_analytics",
+        "group": "Analysis",
+    },
+    {"label": "Compare", "icon": "compare_arrows", "path": "/compare", "group": "Analysis"},
+    {"label": "Strategy", "icon": "tune", "path": "/strategy", "group": "Research"},
+    {"label": "Scans", "icon": "radar", "path": "/scans", "group": "Research"},
+    {"label": "Data Quality", "icon": "verified", "path": "/data_quality", "group": "Research"},
+    {"label": "Market Monitor", "icon": "monitor", "path": "/market_monitor", "group": "Research"},
+    {"label": "Pipeline", "icon": "engineering", "path": "/pipeline", "group": "Operations"},
+    {
+        "label": "Paper Ledger",
+        "icon": "receipt_long",
+        "path": "/paper_ledger",
+        "group": "Operations",
+    },
+    {"label": "Daily Summary", "icon": "today", "path": "/daily_summary", "group": "Operations"},
 ]
 
 # ---------------------------------------------------------------------------
@@ -682,7 +708,7 @@ body.terminal-mode::after {
     border: 1px solid var(--theme-surface-border);
     border-radius: var(--card-radius, 4px);
     padding: 20px 24px;
-    transition: all 0.15s ease;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
     box-shadow: var(--card-shadow, 0 2px 8px rgba(0,0,0,0.4));
     position: relative;
 }
@@ -743,7 +769,7 @@ body.terminal-mode::after {
     border-radius: var(--tile-radius, 2px);
     padding: 20px;
     cursor: pointer;
-    transition: all 0.1s;
+    transition: transform 0.1s ease, border-color 0.1s ease, box-shadow 0.1s ease;
     box-shadow: var(--tile-shadow, 0 2px 4px rgba(0,0,0,0.3));
     position: relative;
 }
@@ -779,7 +805,7 @@ body.terminal-mode::after {
     border: 2px solid var(--theme-primary);
     border-radius: var(--tile-radius, 4px);
     padding: 32px;
-    transition: all 0.15s;
+    transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
     box-shadow: 0 0 20px var(--theme-primary-alpha), var(--tile-shadow, 0 4px 8px rgba(0,0,0,0.3));
     position: relative;
 }
@@ -798,7 +824,7 @@ body.terminal-mode::after {
     border-radius: var(--nav-radius, 0);
     padding: 8px 16px;
     margin: 0;
-    transition: all 0.1s;
+    transition: transform 0.1s ease, background-color 0.1s ease;
     cursor: pointer;
     color: var(--theme-text-secondary);
     position: relative;
@@ -1189,7 +1215,7 @@ def page_layout(title: str, icon: str = "bar_chart"):
         # Terminal-style title with status indicator
         with ui.row().classes("items-center gap-2 ml-2"):
             # Blinking green status dot
-            ui.icon("circle").classes("text-xs").style(
+            ui.icon("circle").classes("text-xs").props('aria-label="System status: ready"').style(
                 f"color: {THEME['primary']}; animation: terminal-pulse 2s infinite;"
             )
             ui.label("NSE_MOMENTUM_LAB").classes("text-sm font-semibold mono-font").style(
@@ -1254,15 +1280,25 @@ def page_layout(title: str, icon: str = "bar_chart"):
                 ui.label("SYSTEM").classes("text-xs mono-font").style(
                     f"color: {THEME['text_muted']};"
                 )
-                ui.icon("circle").classes("text-xs").style(
-                    f"color: {THEME['primary']}; animation: terminal-pulse 2s infinite;"
-                )
+                ui.icon("circle").classes("text-xs").props(
+                    'aria-label="System status: ready"'
+                ).style(f"color: {THEME['primary']}; animation: terminal-pulse 2s infinite;")
 
         ui.separator().classes("sidebar-logo").style(f"background: {THEME['surface_border']};")
 
-        # Nav links
+        # Nav links — grouped by section with visual separators
         with ui.column().classes("py-2 gap-0 w-full"):
+            _prev_group: str | None = None
             for item in NAV_ITEMS:
+                # Insert section divider between groups (skip Home)
+                group = item.get("group")
+                if group and group != _prev_group:
+                    if _prev_group is not None:
+                        ui.separator().style(
+                            f"background: {THEME['surface_border']}; margin: 6px 16px; opacity: 0.5;"
+                        )
+                    _prev_group = group
+
                 is_active = item["label"] == title or (title == "Home" and item["path"] == "/")
                 active_cls = " nav-item-active" if is_active else ""
 
@@ -1338,26 +1374,48 @@ def _render_kpi_card_with_features(
     icon: str = "info",
     color: str = COLORS["primary"],
     is_hero: bool = False,
+    muted: bool = False,
     trend: float | None = None,
     trend_label: str | None = None,
 ) -> None:
-    """Render a KPI card with optional hero styling and trend indicator."""
-    card_classes = "kpi-card gap-1" + (" p-6" if is_hero else "")
+    """Render a KPI card with optional hero, muted, and trend indicator.
+
+    Tiers:
+      - hero: large icon + value, colored, with trend
+      - default: medium icon + value, colored
+      - muted: small icon + value, gray — for metadata (data source, IDs)
+    """
+    if muted:
+        # Metadata tier: visually quiet
+        card_classes = "kpi-card gap-1 p-4"
+        icon_size = "text-lg"
+        value_cls = "text-lg font-semibold tabular-nums"
+        label_cls = "text-xs uppercase tracking-wide font-medium"
+        value_color = THEME["text_primary"]
+        icon_color = THEME["text_muted"]
+    elif is_hero:
+        card_classes = "kpi-card gap-1 p-6"
+        icon_size = "text-4xl"
+        value_cls = "text-4xl font-bold tabular-nums"
+        label_cls = "text-xs uppercase tracking-wide font-medium"
+        value_color = color
+        icon_color = color
+    else:
+        card_classes = "kpi-card gap-1"
+        icon_size = "text-2xl"
+        value_cls = "text-2xl font-bold tabular-nums"
+        label_cls = "text-xs uppercase tracking-wide font-medium"
+        value_color = color
+        icon_color = color
 
     with ui.column().classes(card_classes):
         with ui.row().classes("items-center gap-3"):
-            ui.icon(icon).classes(f"{'text-4xl' if is_hero else 'text-2xl'}").style(
-                f"color: {color};"
-            )
-            ui.label(title).classes("text-xs uppercase tracking-wide font-medium").style(
-                f"color: {THEME['text_secondary']};"
-            )
+            ui.icon(icon).classes(icon_size).style(f"color: {icon_color};")
+            ui.label(title).classes(label_cls).style(f"color: {THEME['text_secondary']};")
 
         # Value and optional trend
         with ui.row().classes("items-baseline gap-2 mt-1"):
-            ui.label(str(value)).classes(
-                f"{'text-4xl' if is_hero else 'text-2xl'} font-bold"
-            ).style(f"color: {color};")
+            ui.label(str(value)).classes(value_cls).style(f"color: {value_color};")
             if trend is not None:
                 trend_icon = "↑" if trend > 0 else "↓" if trend < 0 else "→"
                 trend_color = (
@@ -1506,7 +1564,7 @@ def apply_chart_theme(fig) -> None:
                 tickfont=dict(color=theme["text_secondary"], family=mono_font, size=10),
             ),
             legend=dict(
-                bgcolor="rgba(13, 17, 23, 0.9)",
+                bgcolor=hex_to_rgba(theme["surface"], 0.9),
                 font_color=theme["text_secondary"],
                 bordercolor=theme["surface_border"],
                 borderwidth=1,
@@ -1539,7 +1597,7 @@ def apply_chart_theme(fig) -> None:
                 tickfont=dict(color=theme["text_secondary"], family=mono_font, size=10),
             ),
             legend=dict(
-                bgcolor="rgba(255, 255, 255, 0.95)",
+                bgcolor=hex_to_rgba(theme["surface"], 0.95),
                 font_color=theme["text_secondary"],
                 bordercolor=theme["surface_border"],
                 borderwidth=1,
@@ -1625,11 +1683,19 @@ def export_button(
     filename: str = "export.csv",
     label: str = "Download CSV",
 ) -> None:
-    """Add a CSV export button with Material icon."""
+    """Add a CSV export button with Material icon.
+
+    Accepts a Polars DataFrame or a list of dicts.
+    """
     if data is None or (hasattr(data, "is_empty") and data.is_empty()):
         return
 
-    csv_content = data.write_csv()
+    if isinstance(data, list):
+        df = pl.DataFrame(data)
+    else:
+        df = data
+
+    csv_content = df.write_csv()
 
     def do_download():
         ui.download(csv_content.encode("utf-8"), filename=filename)
@@ -1667,14 +1733,13 @@ def paginated_table(
     page_size: int = 20,
     row_key: Any = None,
     on_row_click: Any = None,
+    aria_label: str = "Data table",
 ) -> None:
-    """Paginated table that only renders current page."""
+    """Sortable, paginated table using Quasar QTable native controls."""
     if not rows:
         ui.label("No data to display").style(f"color: {THEME['text_muted']};")
         return
 
-    total_pages = (len(rows) + page_size - 1) // page_size
-    state = {"page": 0}
     table_row_key = row_key or ("id" if rows and "id" in rows[0] else None)
 
     def _is_probable_row(payload: dict[str, Any]) -> bool:
@@ -1739,70 +1804,42 @@ def paginated_table(
 
         return {}
 
-    def show_page():
-        start = state["page"] * page_size
-        end = start + page_size
+    # Enable sorting and scope=col on all columns
+    sortable_columns = [
+        {**col, "sortable": True, "headerClasses": "scope-col"}
+        if "headerClasses" not in col
+        else {**col, "sortable": True, "headerClasses": col.get("headerClasses", "") + " scope-col"}
+        for col in columns
+    ]
 
-        # Add scope="col" to all column definitions for accessibility (A11Y-003)
-        accessible_columns = [
-            {**col, "headerClasses": "scope-col"}
-            if "headerClasses" not in col
-            else {**col, "headerClasses": col.get("headerClasses", "") + " scope-col"}
-            for col in columns
-        ]
+    with ui.element("div").style("width: 100%; overflow-x: auto;"):
+        table = (
+            ui.table(
+                columns=sortable_columns,
+                rows=rows,
+                pagination={"rowsPerPage": page_size, "rowsPerPage_options": [10, 20, 50, 100]},
+                row_key=table_row_key,
+            )
+            .props(f'aria-label="{aria_label}"')
+            .style("min-width: max-content;")
+        )
 
-        with ui.column().classes("w-full"):
-            with ui.element("div").style("width: 100%; overflow-x: auto;"):
-                table = ui.table(
-                    columns=accessible_columns,
-                    rows=rows[start:end],
-                    pagination={"rowsPerPage": page_size, "rowsPerPage_options": [10, 20, 50, 100]},
-                    row_key=table_row_key,
-                ).style("min-width: max-content;")
+        if on_row_click:
 
-                if on_row_click:
+            async def _handle_row_click(e) -> None:
+                row_payload = _extract_row_payload(e)
+                if not row_payload:
+                    return
+                try:
+                    if not ui.context.client.has_socket_connection:
+                        return
+                except AttributeError, RuntimeError:
+                    return
+                result = on_row_click(row_payload)
+                if inspect.isawaitable(result):
+                    await result
 
-                    async def _handle_row_click(e) -> None:
-                        row_payload = _extract_row_payload(e)
-                        if not row_payload:
-                            return
-                        try:
-                            if not ui.context.client.has_socket_connection:
-                                return
-                        except AttributeError, RuntimeError:
-                            return
-                        result = on_row_click(row_payload)
-                        if inspect.isawaitable(result):
-                            await result
-
-                    table.on("row-click", _handle_row_click)
-
-            with ui.row().classes("justify-between items-center mt-4 w-full"):
-                ui.label(f"Showing {start + 1}-{min(end, len(rows))} of {len(rows)}").classes(
-                    f"color: {THEME['text_muted']};"
-                )
-                with ui.row().classes("gap-2"):
-                    ui.button(
-                        "Previous",
-                        on_click=lambda: (
-                            state.update(page=max(0, state["page"] - 1)),
-                            show_page(),
-                        ),
-                    ).props("flat dense").classes("" if state["page"] > 0 else "invisible")
-                    ui.label(f"Page {state['page'] + 1} of {total_pages}").classes(
-                        f"color: {THEME['text_secondary']};"
-                    )
-                    ui.button(
-                        "Next",
-                        on_click=lambda: (
-                            state.update(page=min(total_pages - 1, state["page"] + 1)),
-                            show_page(),
-                        ),
-                    ).props("flat dense").classes(
-                        "" if state["page"] < total_pages - 1 else "invisible"
-                    )
-
-    show_page()
+            table.on("row-click", _handle_row_click)
 
 
 # ---------------------------------------------------------------------------
@@ -1897,6 +1934,8 @@ def trade_table_with_filters(
     columns: list,
     rows: list,
     page_size: int = 50,
+    row_key: str | None = None,
+    on_row_click: callable | None = None,
 ) -> None:
     """Trade table with symbol, exit reason, and P&L filters."""
     if not rows:
@@ -1944,7 +1983,13 @@ def trade_table_with_filters(
                 if float(r.get("pnl_pct", 0).replace("%", "")) <= filters["max_pnl"]
             ]
 
-        paginated_table(filtered, columns, page_size=page_size)
+        paginated_table(
+            filtered,
+            columns,
+            page_size=page_size,
+            row_key=row_key,
+            on_row_click=on_row_click,
+        )
 
     with ui.column().classes("w-full"):
         with ui.row().classes("gap-4 mb-4 items-end w-full flex-wrap"):
@@ -1980,7 +2025,7 @@ def trade_table_with_filters(
 # ---------------------------------------------------------------------------
 # Theme state management
 # ---------------------------------------------------------------------------
-_theme_mode = {"terminal": True}  # True = terminal, False = clean
+_theme_mode = {"terminal": False}  # True = terminal, False = clean
 
 
 def get_current_theme() -> dict:
@@ -2089,7 +2134,6 @@ document.addEventListener('keydown', (e) => {
             'r': () => window.location.href = '/scans',
             'd': () => window.location.href = '/data_quality',
             'p': () => window.location.href = '/pipeline',
-            'w': () => window.location.href = '/walk_forward',
             'l': () => window.location.href = '/paper_ledger',
             'y': () => window.location.href = '/daily_summary',
         };

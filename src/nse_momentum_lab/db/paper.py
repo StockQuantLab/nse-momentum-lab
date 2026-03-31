@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Boolean, Integer, cast, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nse_momentum_lab.db.models import (
@@ -49,6 +49,21 @@ def _serialize_paper_session(row: PaperSession) -> dict[str, Any]:
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "finished_at": row.finished_at.isoformat() if row.finished_at else None,
         "archived_at": row.archived_at.isoformat() if row.archived_at else None,
+    }
+
+
+def _serialize_paper_session_compact(row: Any) -> dict[str, Any]:
+    return {
+        "session_id": row.session_id,
+        "trade_date": row.trade_date.isoformat() if row.trade_date else None,
+        "strategy_name": row.strategy_name,
+        "experiment_id": row.experiment_id,
+        "mode": row.mode,
+        "status": row.status,
+        "symbol_count": int(row.symbol_count or 0),
+        "strategy_params": row.strategy_params or {},
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
 
 
@@ -133,6 +148,21 @@ def _serialize_paper_feed_state(row: PaperFeedState) -> dict[str, Any]:
     }
 
 
+def _serialize_paper_feed_state_compact(row: Any) -> dict[str, Any]:
+    return {
+        "source": row.source,
+        "mode": row.mode,
+        "status": row.status,
+        "is_stale": row.is_stale,
+        "subscription_count": int(row.subscription_count or 0),
+        "token_count": int(row.token_count or 0),
+        "last_quote_at": row.last_quote_at.isoformat() if row.last_quote_at else None,
+        "last_tick_at": row.last_tick_at.isoformat() if row.last_tick_at else None,
+        "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
+        "observe_only": bool(row.observe_only),
+    }
+
+
 def _serialize_signal(row: Signal) -> dict[str, Any]:
     return {
         "signal_id": row.signal_id,
@@ -186,6 +216,35 @@ async def list_paper_sessions(
     result = await db_session.execute(query)
     sessions = result.scalars().all()
     return [_serialize_paper_session(row) for row in sessions]
+
+
+async def list_paper_sessions_compact(
+    db_session: AsyncSession,
+    *,
+    status: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    query = (
+        select(
+            PaperSession.session_id,
+            PaperSession.trade_date,
+            PaperSession.strategy_name,
+            PaperSession.experiment_id,
+            PaperSession.mode,
+            PaperSession.status,
+            func.coalesce(func.jsonb_array_length(PaperSession.symbols), 0).label("symbol_count"),
+            PaperSession.strategy_params,
+            PaperSession.started_at,
+            PaperSession.updated_at,
+        )
+        .order_by(PaperSession.created_at.desc())
+        .limit(limit)
+    )
+    if status:
+        query = query.where(PaperSession.status == status)
+
+    result = await db_session.execute(query)
+    return [_serialize_paper_session_compact(row) for row in result.all()]
 
 
 async def get_paper_feed_state(db_session: AsyncSession, session_id: str) -> PaperFeedState | None:
@@ -243,7 +302,6 @@ async def upsert_paper_feed_state(
         row.updated_at = now
 
     await db_session.commit()
-    await db_session.refresh(row)
     return row
 
 
@@ -305,7 +363,6 @@ async def touch_paper_feed_state(
         row.updated_at = now
 
     await db_session.commit()
-    await db_session.refresh(row)
     return row
 
 
@@ -852,45 +909,153 @@ async def get_paper_session_summary(
     if row is None:
         return None
 
-    signal_count = await db_session.scalar(
-        select(func.count(Signal.signal_id)).where(Signal.session_id == session_id)
-    )
-    open_signal_count = await db_session.scalar(
-        select(func.count(Signal.signal_id)).where(
-            Signal.session_id == session_id,
-            Signal.state.in_(sorted(OPEN_SIGNAL_STATES)),
+    counts_row = (
+        await db_session.execute(
+            select(
+                select(func.count(Signal.signal_id))
+                .where(Signal.session_id == session_id)
+                .scalar_subquery()
+                .label("signal_count"),
+                select(func.count(Signal.signal_id))
+                .where(
+                    Signal.session_id == session_id,
+                    Signal.state.in_(sorted(OPEN_SIGNAL_STATES)),
+                )
+                .scalar_subquery()
+                .label("open_signal_count"),
+                select(func.count(PaperPosition.position_id))
+                .where(
+                    PaperPosition.session_id == session_id,
+                    PaperPosition.closed_at.is_(None),
+                )
+                .scalar_subquery()
+                .label("open_position_count"),
+                select(func.count(PaperOrder.order_id))
+                .where(PaperOrder.session_id == session_id)
+                .scalar_subquery()
+                .label("order_count"),
+                select(func.count(PaperFill.fill_id))
+                .where(PaperFill.session_id == session_id)
+                .scalar_subquery()
+                .label("fill_count"),
+                select(func.count(PaperSessionSignal.paper_session_signal_id))
+                .where(PaperSessionSignal.session_id == session_id)
+                .scalar_subquery()
+                .label("queue_count"),
+            )
         )
-    )
-    open_position_count = await db_session.scalar(
-        select(func.count(PaperPosition.position_id)).where(
-            PaperPosition.session_id == session_id,
-            PaperPosition.closed_at.is_(None),
-        )
-    )
-    order_count = await db_session.scalar(
-        select(func.count(PaperOrder.order_id)).where(PaperOrder.session_id == session_id)
-    )
-    fill_count = await db_session.scalar(
-        select(func.count(PaperFill.fill_id)).where(PaperFill.session_id == session_id)
-    )
-    queue_count = await db_session.scalar(
-        select(func.count(PaperSessionSignal.paper_session_signal_id)).where(
-            PaperSessionSignal.session_id == session_id
-        )
-    )
+    ).one()
     feed_state = await get_paper_feed_state(db_session, session_id)
 
     return {
         "session": _serialize_paper_session(row),
         "counts": {
-            "signals": int(signal_count or 0),
-            "open_signals": int(open_signal_count or 0),
-            "open_positions": int(open_position_count or 0),
-            "orders": int(order_count or 0),
-            "fills": int(fill_count or 0),
-            "queue_signals": int(queue_count or 0),
+            "signals": int(counts_row.signal_count or 0),
+            "open_signals": int(counts_row.open_signal_count or 0),
+            "open_positions": int(counts_row.open_position_count or 0),
+            "orders": int(counts_row.order_count or 0),
+            "fills": int(counts_row.fill_count or 0),
+            "queue_signals": int(counts_row.queue_count or 0),
         },
         "feed_state": _serialize_paper_feed_state(feed_state) if feed_state else None,
+    }
+
+
+async def get_paper_session_summary_compact(
+    db_session: AsyncSession, session_id: str
+) -> dict[str, Any] | None:
+    session_row = (
+        await db_session.execute(
+            select(
+                PaperSession.session_id,
+                PaperSession.trade_date,
+                PaperSession.strategy_name,
+                PaperSession.experiment_id,
+                PaperSession.mode,
+                PaperSession.status,
+                func.coalesce(func.jsonb_array_length(PaperSession.symbols), 0).label(
+                    "symbol_count"
+                ),
+                PaperSession.strategy_params,
+                PaperSession.started_at,
+                PaperSession.updated_at,
+            ).where(PaperSession.session_id == session_id)
+        )
+    ).one_or_none()
+    if session_row is None:
+        return None
+
+    counts_row = (
+        await db_session.execute(
+            select(
+                select(func.count(Signal.signal_id))
+                .where(Signal.session_id == session_id)
+                .scalar_subquery()
+                .label("signal_count"),
+                select(func.count(Signal.signal_id))
+                .where(
+                    Signal.session_id == session_id,
+                    Signal.state.in_(sorted(OPEN_SIGNAL_STATES)),
+                )
+                .scalar_subquery()
+                .label("open_signal_count"),
+                select(func.count(PaperPosition.position_id))
+                .where(
+                    PaperPosition.session_id == session_id,
+                    PaperPosition.closed_at.is_(None),
+                )
+                .scalar_subquery()
+                .label("open_position_count"),
+                select(func.count(PaperOrder.order_id))
+                .where(PaperOrder.session_id == session_id)
+                .scalar_subquery()
+                .label("order_count"),
+                select(func.count(PaperFill.fill_id))
+                .where(PaperFill.session_id == session_id)
+                .scalar_subquery()
+                .label("fill_count"),
+                select(func.count(PaperSessionSignal.paper_session_signal_id))
+                .where(PaperSessionSignal.session_id == session_id)
+                .scalar_subquery()
+                .label("queue_count"),
+            )
+        )
+    ).one()
+    feed_row = (
+        await db_session.execute(
+            select(
+                PaperFeedState.source,
+                PaperFeedState.mode,
+                PaperFeedState.status,
+                PaperFeedState.is_stale,
+                PaperFeedState.subscription_count,
+                PaperFeedState.last_quote_at,
+                PaperFeedState.last_tick_at,
+                PaperFeedState.heartbeat_at,
+                func.coalesce(
+                    cast(PaperFeedState.metadata_json["token_count"].astext, Integer),
+                    PaperFeedState.subscription_count,
+                    0,
+                ).label("token_count"),
+                func.coalesce(
+                    cast(PaperFeedState.metadata_json["observe_only"].astext, Boolean),
+                    False,
+                ).label("observe_only"),
+            ).where(PaperFeedState.session_id == session_id)
+        )
+    ).one_or_none()
+
+    return {
+        "session": _serialize_paper_session_compact(session_row),
+        "counts": {
+            "signals": int(counts_row.signal_count or 0),
+            "open_signals": int(counts_row.open_signal_count or 0),
+            "open_positions": int(counts_row.open_position_count or 0),
+            "orders": int(counts_row.order_count or 0),
+            "fills": int(counts_row.fill_count or 0),
+            "queue_signals": int(counts_row.queue_count or 0),
+        },
+        "feed_state": _serialize_paper_feed_state_compact(feed_row) if feed_row else None,
     }
 
 

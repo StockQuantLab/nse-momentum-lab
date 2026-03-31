@@ -20,6 +20,26 @@ NSE Momentum Lab uses a layered data architecture:
 
 ## Adding New Daily Data
 
+### Today-only example: 2026-03-30
+
+Use this when you want to ingest only `2026-03-30` for the full current universe.
+
+```bash
+# Daily OHLCV for 2026-03-30 only
+doppler run -- uv run nseml-kite-ingest --date 2026-03-30
+
+# 5-minute OHLCV for 2026-03-30 only
+doppler run -- uv run nseml-kite-ingest --date 2026-03-30 --5min --resume
+```
+
+Recommended follow-up after both runs complete:
+
+```bash
+doppler run -- uv run nseml-build-features --since 2026-03-30
+doppler run -- uv run nseml-market-monitor --incremental --since 2026-03-30
+doppler run -- uv run nseml-db-verify
+```
+
 ### 1. Ingest the date window
 
 Use the current CLI directly. There is no `--dataset` flag.
@@ -38,6 +58,27 @@ doppler run -- uv run nseml-kite-ingest --from 2026-03-24 --to 2026-03-27
 doppler run -- uv run nseml-kite-ingest --today --save-raw
 ```
 
+### Symbol-scoped daily ingest
+
+If you want to ingest only a specific symbol list, pass `--symbols` to the Kite ingest CLI.
+This is the supported symbol-level control for ingestion.
+
+```bash
+# Ingest one day for a symbol subset
+doppler run -- uv run nseml-kite-ingest --date 2026-03-27 --symbols RELIANCE,TCS,INFY
+
+# Backfill a date window for a symbol subset
+doppler run -- uv run nseml-kite-ingest --from 2026-03-24 --to 2026-03-27 --symbols RELIANCE,TCS,INFY
+
+# Force current Kite master resolution instead of local-first universe selection
+doppler run -- uv run nseml-kite-ingest --backfill --universe current-master
+```
+
+Notes:
+- `--symbols` is exact symbol-level filtering for ingestion.
+- `--universe current-master` changes the default resolver; it does not override an explicit `--symbols` list.
+- `--update-features` still rebuilds the dependent daily feature tables after ingest; it does not create a symbol-only feature pack.
+
 ### 2. Refresh dependent tables
 
 ```bash
@@ -45,6 +86,14 @@ doppler run -- uv run nseml-build-features --since 2026-03-27
 doppler run -- uv run nseml-market-monitor --incremental --since 2026-03-27
 doppler run -- uv run nseml-db-verify
 ```
+
+If you need to refresh data for only a small symbol list, the supported route is:
+
+1. Run `nseml-kite-ingest --symbols ... --update-features` for the affected date window.
+2. Rebuild the relevant feature sets with `nseml-build-features --since YYYY-MM-DD`.
+
+`nseml-build-features` is feature-set scoped, not symbol scoped. It rebuilds the selected feature
+tables for the requested date range; it does not accept a `--symbols` flag.
 
 ### 3. Verify latest coverage
 
@@ -57,9 +106,9 @@ print(f'Latest daily date: {latest[0]}')
 "
 ```
 
-Walk-forward consumes the same loaded runtime coverage as replay/live validation. If the
-walk-forward preflight fails on stale `market_day_state`, `strategy_day_state`, or
-`intraday_day_pack` tables, refresh the runtime tables first and rerun the window.
+Replay and live paper sessions consume the same loaded runtime coverage. If readiness
+fails on stale `market_day_state`, `strategy_day_state`, or `intraday_day_pack` tables,
+refresh the runtime tables first and rerun the session.
 
 ---
 
@@ -82,6 +131,11 @@ doppler run -- uv run nseml-build-features --since 2026-03-27
 doppler run -- uv run nseml-market-monitor --incremental --since 2026-03-27
 ```
 
+`feat_intraday_core` now rebuilds with CPR-style symbol batches and symbol-specific parquet reads.
+Use `INTRADAY_CORE_BATCH_SIZE` to tune the batch size for low-RAM hosts.
+Keep DuckDB memory and temp spill limits set at launch time.
+The legacy yearly helper is disabled by default and should not be used for normal rebuilds.
+
 ### 3. Verify 5-minute coverage
 
 ```bash
@@ -96,6 +150,9 @@ print(f'Latest 5-min date: {latest[0]}')
 As of `2026-03-27`, the local lake is caught up through that date for both daily and 5-minute
 data. Future runs should be incremental catch-up only unless you intentionally need a historical
 backfill.
+
+For the `2026-03-30` catch-up, use the explicit `--date 2026-03-30` form instead of `--today`
+when you want the runbook and logs to stay pinned to that specific trade date.
 
 ---
 

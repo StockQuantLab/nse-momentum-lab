@@ -36,12 +36,21 @@ def rebuild_features():
 
         columns = db.con.execute("DESCRIBE feat_daily").fetchall()
         col_names = [c[0] for c in columns]
-        has_2lynch = all(col in col_names for col in ['r2_65', 'atr_compress_ratio', 'range_percentile', 'vol_dryup_ratio', 'prior_breakouts_90d'])
+        has_2lynch = all(
+            col in col_names
+            for col in [
+                "r2_65",
+                "atr_compress_ratio",
+                "range_percentile",
+                "vol_dryup_ratio",
+                "prior_breakouts_90d",
+            ]
+        )
 
         if has_2lynch:
             print("  Status: 2LYNCH features already exist")
             response = input("\n  Rebuild anyway? (y/N): ").strip().lower()
-            if response != 'y':
+            if response != "y":
                 print("  Aborted.")
                 return
         else:
@@ -62,7 +71,16 @@ def rebuild_features():
         # Verify new columns
         columns = db.con.execute("DESCRIBE feat_daily").fetchall()
         col_names = [c[0] for c in columns]
-        has_2lynch = all(col in col_names for col in ['r2_65', 'atr_compress_ratio', 'range_percentile', 'vol_dryup_ratio', 'prior_breakouts_90d'])
+        has_2lynch = all(
+            col in col_names
+            for col in [
+                "r2_65",
+                "atr_compress_ratio",
+                "range_percentile",
+                "vol_dryup_ratio",
+                "prior_breakouts_90d",
+            ]
+        )
 
         print("\n[VERIFICATION]")
         print(f"  Total columns: {len(col_names)}")
@@ -70,10 +88,18 @@ def rebuild_features():
 
         if has_2lynch:
             print("\n  [2LYNCH FEATURES]")
-            for col in ['r2_65', 'atr_compress_ratio', 'range_percentile', 'vol_dryup_ratio', 'prior_breakouts_90d']:
+            for col in [
+                "r2_65",
+                "atr_compress_ratio",
+                "range_percentile",
+                "vol_dryup_ratio",
+                "prior_breakouts_90d",
+            ]:
                 if col in col_names:
                     # Check sample data
-                    sample = db.con.execute(f"SELECT {col} FROM feat_daily WHERE {col} IS NOT NULL LIMIT 1").fetchone()
+                    sample = db.con.execute(
+                        f"SELECT {col} FROM feat_daily WHERE {col} IS NOT NULL LIMIT 1"
+                    ).fetchone()
                     print(f"    {col}: OK (sample: {sample[0] if sample else 'NULL'})")
 
         # Sample data
@@ -88,7 +114,7 @@ def rebuild_features():
         """).fetchall()
 
         for i, row in enumerate(sample_rows):
-            print(f"  {i+1}. {row[0]} @ {row[1]}")
+            print(f"  {i + 1}. {row[0]} @ {row[1]}")
             print(f"     R²: {row[2]:.3f} | ATR Ratio: {row[3]:.2f} | Range Pct: {row[4]:.2f}")
             print(f"     Vol Ratio: {row[5]:.2f} | Prior Breakouts: {row[6]}")
 
@@ -99,6 +125,7 @@ def rebuild_features():
     except Exception as e:
         print(f"\n  [ERROR] {e}")
         import traceback
+
         traceback.print_exc()
         print(f"\n{'=' * 80}")
         print("REBUILD FAILED")

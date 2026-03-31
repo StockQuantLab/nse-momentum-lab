@@ -80,6 +80,12 @@ def test_backtest_params_hash_changes_with_inputs() -> None:
     assert p1.to_hash() != p2.to_hash()
 
 
+def test_backtest_params_hash_changes_with_cost_model() -> None:
+    p1 = BacktestParams(commission_model="zerodha", slippage_bps=0.0)
+    p2 = BacktestParams(commission_model="zero", slippage_bps=0.0)
+    assert p1.to_hash() != p2.to_hash()
+
+
 def test_experiment_id_depends_on_dataset_hash() -> None:
     params_hash = BacktestParams().to_hash()
     exp1 = DuckDBBacktestRunner.build_experiment_id(params_hash, "dataset_a")
@@ -249,6 +255,102 @@ def test_market_db_persists_trade_filter_count() -> None:
         assert trades["symbol"][0] == "TCS"
     finally:
         db.con.close()
+
+
+def test_threshold_breakout_candidate_query_uses_prior_day_watchlist_features() -> None:
+    db = _make_in_memory_market_db()
+    try:
+        db.con.execute(
+            """
+            CREATE TABLE v_daily(
+                symbol VARCHAR,
+                date DATE,
+                close DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                open DOUBLE,
+                volume DOUBLE
+            )
+            """
+        )
+        db.con.execute(
+            """
+            CREATE TABLE feat_daily(
+                symbol VARCHAR,
+                date DATE,
+                close_pos_in_range DOUBLE,
+                ma_20 DOUBLE,
+                ret_5d DOUBLE,
+                atr_20 DOUBLE,
+                vol_dryup_ratio DOUBLE,
+                atr_compress_ratio DOUBLE,
+                range_percentile DOUBLE,
+                prior_breakouts_30d INTEGER,
+                prior_breakdowns_90d INTEGER,
+                r2_65 DOUBLE,
+                ma_7 DOUBLE,
+                ma_65_sma DOUBLE
+            )
+            """
+        )
+        v_daily_rows = [
+            ("HILTON", date(2026, 3, 19), 12.0, 12.2, 11.8, 12.1, 100000.0),
+            ("HILTON", date(2026, 3, 20), 12.5, 12.6, 12.3, 12.4, 120000.0),
+            ("HILTON", date(2026, 3, 21), 13.0, 13.1, 12.8, 12.9, 130000.0),
+            ("HILTON", date(2026, 3, 22), 13.5, 13.6, 13.2, 13.3, 140000.0),
+            ("HILTON", date(2026, 3, 23), 13.2, 13.4, 13.0, 13.35, 150000.0),
+            ("HILTON", date(2026, 3, 24), 14.38, 14.6, 13.9, 15.12, 700000.0),
+            ("HILTON", date(2026, 3, 25), 15.0, 15.5, 14.9, 14.95, 800000.0),
+        ]
+        db.con.executemany("INSERT INTO v_daily VALUES (?, ?, ?, ?, ?, ?, ?)", v_daily_rows)
+
+        feat_rows = [
+            ("HILTON", date(2026, 3, 19), 0.9, 11.8, 0.2, 1.2, 0.8, 1.0, 0.2, 0, 0, 0.7, 12.0, 12.5),
+            ("HILTON", date(2026, 3, 20), 0.9, 12.0, 0.2, 1.1, 0.8, 1.0, 0.2, 0, 0, 0.7, 12.1, 12.6),
+            ("HILTON", date(2026, 3, 21), 0.9, 12.4, 0.2, 1.0, 0.8, 1.0, 0.2, 0, 0, 0.7, 12.2, 12.7),
+            ("HILTON", date(2026, 3, 22), 0.9, 12.8, 0.2, 1.0, 0.8, 1.0, 0.2, 0, 0, 0.7, 12.3, 12.8),
+            ("HILTON", date(2026, 3, 23), 0.9, 13.1, 0.2, 0.9, 0.8, 1.0, 0.2, 0, 0, 0.7, 12.4, 12.9),
+            ("HILTON", date(2026, 3, 24), 0.5277777777777781, 18.69, -0.10516490354698194, 0.936,
+             1.6567735285516751, 1.0, 0.0, 1, 0, 0.9609702193230579, 15.0, 24.90107692307693),
+            ("HILTON", date(2026, 3, 25), 0.98, 10.0, 0.5, 1.5, 0.5, 1.0, 0.9, 0, 0, 0.99, 16.0, 20.0),
+        ]
+        db.con.executemany("INSERT INTO feat_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", feat_rows)
+
+        strategy = resolve_strategy("thresholdbreakout")
+        query, params_tuple = strategy.build_candidate_query(
+            BacktestParams(breakout_threshold=0.04),
+            ["HILTON"],
+            date(2026, 3, 19),
+            date(2026, 3, 25),
+        )
+        result = db.con.execute(query, params_tuple).pl()
+
+        row = result.filter(pl.col("trading_date") == date(2026, 3, 25))
+        assert row.height == 1
+        filter_cols = ["filter_h", "filter_n", "filter_y", "filter_c", "filter_l", "filter_2"]
+        filters_passed = sum(int(row[col][0]) for col in filter_cols)
+        assert filters_passed == 3
+        assert row["watch_date"][0] == date(2026, 3, 24)
+    finally:
+        db.con.close()
+
+
+def test_to_equity_df_uses_net_pnl_without_alias_collision() -> None:
+    runner = DuckDBBacktestRunner.__new__(DuckDBBacktestRunner)
+    trades = pl.DataFrame(
+        {
+            "entry_date": [date(2026, 3, 27), date(2026, 3, 28)],
+            "symbol": ["AAA", "BBB"],
+            "net_pnl": [100.0, -25.0],
+            "pnl_pct": [1.0, -0.25],
+        }
+    )
+
+    equity = runner._to_equity_df(trades, portfolio_value=1000.0)
+
+    assert equity["pnl_pct"].to_list() == [10.0, -2.5]
+    assert equity["cumulative_return_pct"].to_list() == [10.0, 7.5]
+    assert equity["drawdown_pct"].to_list() == [0.0, -2.5]
 
 
 def test_delete_experiment_removes_trades_and_yearly_metrics() -> None:

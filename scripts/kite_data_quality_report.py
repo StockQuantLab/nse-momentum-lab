@@ -3,14 +3,13 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from nse_momentum_lab.db.market_db import get_market_db
+from nse_momentum_lab.services.kite.parquet_repair import scan_5min_timestamp_alignment
 from nse_momentum_lab.services.kite.scheduler import get_kite_scheduler
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -37,7 +36,13 @@ def _build_issue(check: str, message: str, severity: str, value: int) -> Dataset
 
 
 def _business_days(start_date: date, end_date: date) -> int:
-    return len(pd.bdate_range(start=start_date, end=end_date))
+    days = 0
+    current = start_date
+    while current <= end_date:
+        if current.weekday() < 5:
+            days += 1
+        current = date.fromordinal(current.toordinal() + 1)
+    return days
 
 
 def _write_symbol_csv(path: Path, symbols: list[str]) -> None:
@@ -242,7 +247,7 @@ def _query_dataset_report(
         "duplicate_check_error": duplicate_check_error,
         "missing_symbols_count": len(missing_symbols),
         "missing_symbols_sample": missing_symbols[:50],
-        "issues": [issue.__dict__ for issue in issues],
+        "issues": [asdict(issue) for issue in issues],
         "_missing_symbols": missing_symbols,
     }
 
@@ -276,6 +281,9 @@ def main() -> int:
         )
         for dataset in ("daily", "5min")
     ]
+    timestamp_issues = scan_5min_timestamp_alignment(PROJECT_ROOT / "data" / "parquet" / "5min")
+    timestamp_issue_count = len(timestamp_issues)
+    timestamp_issue_sample = [issue.as_dict() for issue in timestamp_issues[:50]]
 
     flattened_issues: list[dict[str, Any]] = []
     overall_status = "PASS"
@@ -292,6 +300,16 @@ def main() -> int:
                 }
             )
 
+    timestamp_issue = _build_issue(
+        "five_min_timestamp_alignment",
+        "5-minute parquet files whose first candle_time is not 09:15 IST",
+        "ERROR",
+        timestamp_issue_count,
+    )
+    flattened_issues.append({"dataset": "lake", **asdict(timestamp_issue)})
+    if timestamp_issue.status == "FAIL":
+        overall_status = "FAIL"
+
     summary = {
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
@@ -299,6 +317,10 @@ def main() -> int:
         "include_duplicates": include_duplicates,
         "expected_universe_symbols": len(expected_symbols),
         "overall_status": overall_status,
+        "timestamp_alignment": {
+            "issue_count": timestamp_issue_count,
+            "issue_sample": timestamp_issue_sample,
+        },
         "issues": flattened_issues,
         "reports": [
             {key: value for key, value in report.items() if not key.startswith("_")}

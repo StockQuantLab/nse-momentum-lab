@@ -29,8 +29,12 @@ def compute_r2_for_all_symbols():
     # Check current state
     print("\n[CHECKING CURRENT STATE]")
     total_rows = db.con.execute("SELECT COUNT(*) FROM feat_daily").fetchone()[0]
-    r2_zero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL").fetchone()[0]
-    r2_nonzero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 > 0").fetchone()[0]
+    r2_zero_count = db.con.execute(
+        "SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL"
+    ).fetchone()[0]
+    r2_nonzero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 > 0").fetchone()[
+        0
+    ]
 
     print(f"  Total rows: {total_rows:,}")
     print(f"  R² = 0.0 or NULL: {r2_zero_count:,}")
@@ -39,13 +43,15 @@ def compute_r2_for_all_symbols():
     if r2_nonzero_count > 1000:
         print("\n  R² appears to already be computed!")
         response = input("  Re-compute anyway? (y/N): ").strip().lower()
-        if response != 'y':
+        if response != "y":
             print("  Aborted.")
             return
 
     # Get all symbols
     print("\n[LOADING SYMBOLS]")
-    symbols_result = db.con.execute("SELECT DISTINCT symbol FROM v_daily ORDER BY symbol").fetchall()
+    symbols_result = db.con.execute(
+        "SELECT DISTINCT symbol FROM v_daily ORDER BY symbol"
+    ).fetchall()
     all_symbols = [row[0] for row in symbols_result]
     print(f"  Total symbols: {len(all_symbols)}")
 
@@ -68,11 +74,13 @@ def compute_r2_for_all_symbols():
     failed_symbols = []
 
     for batch_idx in range(0, total_symbols, batch_size):
-        batch_symbols = all_symbols[batch_idx:batch_idx + batch_size]
+        batch_symbols = all_symbols[batch_idx : batch_idx + batch_size]
         batch_num = batch_idx // batch_size + 1
         total_batches = (total_symbols + batch_size - 1) // batch_size
 
-        print(f"\n  Batch {batch_num}/{total_batches} ({len(batch_symbols)} symbols)...", flush=True)
+        print(
+            f"\n  Batch {batch_num}/{total_batches} ({len(batch_symbols)} symbols)...", flush=True
+        )
 
         for symbol in batch_symbols:
             try:
@@ -136,14 +144,22 @@ def compute_r2_for_all_symbols():
 
     # Final verification
     print("\n[VERIFICATION]")
-    r2_zero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL").fetchone()[0]
-    r2_nonzero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 > 0").fetchone()[0]
-    r2_null_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 IS NULL").fetchone()[0]
+    r2_zero_count = db.con.execute(
+        "SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL"
+    ).fetchone()[0]
+    r2_nonzero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 > 0").fetchone()[
+        0
+    ]
+    r2_null_count = db.con.execute(
+        "SELECT COUNT(*) FROM feat_daily WHERE r2_65 IS NULL"
+    ).fetchone()[0]
 
     print(f"  R² = 0.0: {r2_zero_count:,}")
     print(f"  R² IS NULL: {r2_null_count:,}")
     print(f"  R² > 0: {r2_nonzero_count:,}")
-    print(f"  Computed: {db.con.execute('SELECT COUNT(*) FROM feat_daily WHERE r2_computed = TRUE').fetchone()[0]:,}")
+    print(
+        f"  Computed: {db.con.execute('SELECT COUNT(*) FROM feat_daily WHERE r2_computed = TRUE').fetchone()[0]:,}"
+    )
 
     # Show sample R² values
     print("\n[SAMPLE R² VALUES]")
@@ -157,7 +173,7 @@ def compute_r2_for_all_symbols():
     """).fetchall()
 
     for i, row in enumerate(sample):
-        print(f"    {i+1}. {row[0]} @ {row[1]}: R² = {row[2]:.4f}")
+        print(f"    {i + 1}. {row[0]} @ {row[1]}: R² = {row[2]:.4f}")
 
     print("\n  Bottom 10 R² (least linear / most choppy):")
     sample = db.con.execute("""
@@ -169,7 +185,7 @@ def compute_r2_for_all_symbols():
     """).fetchall()
 
     for i, row in enumerate(sample):
-        print(f"    {i+1}. {row[0]} @ {row[1]}: R² = {row[2]:.4f}")
+        print(f"    {i + 1}. {row[0]} @ {row[1]}: R² = {row[2]:.4f}")
 
     print("\n  [FAILED SYMBOLS]")
     if failed_symbols:
@@ -213,7 +229,7 @@ def compute_r2_vectorized(closes: np.ndarray, period: int = 65) -> np.ndarray:
 
     # For each position, compute R² over the last `period` closes
     for i in range(period - 1, n):
-        window = closes[i - period + 1:i + 1]
+        window = closes[i - period + 1 : i + 1]
 
         try:
             # Simple linear regression: y = mx + b
@@ -224,11 +240,11 @@ def compute_r2_vectorized(closes: np.ndarray, period: int = 65) -> np.ndarray:
             sum_x = np.sum(x)
             sum_y = np.sum(window)
             sum_xy = np.sum(x * window)
-            sum_x2 = np.sum(x ** 2)
-            np.sum(window ** 2)
+            sum_x2 = np.sum(x**2)
+            np.sum(window**2)
 
             # Calculate slope and intercept
-            denominator = (n_points * sum_x2 - sum_x ** 2)
+            denominator = n_points * sum_x2 - sum_x**2
             if abs(denominator) < 1e-10:
                 r2[i] = 0.0
                 continue
@@ -257,6 +273,7 @@ if __name__ == "__main__":
 
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     compute_r2_for_all_symbols()

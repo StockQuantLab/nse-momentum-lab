@@ -46,10 +46,40 @@ class TestKiteStreamRunner:
             "mode": "full",
         }
         mock_touch.assert_awaited_once()
+        assert mock_touch.await_args.kwargs["metadata_json"] == {
+            "token_count": 2,
+            "mode": "full",
+        }
+
+    @patch("nse_momentum_lab.services.kite.stream.touch_paper_feed_state", new_callable=AsyncMock)
+    def test_record_ticks_throttles_feed_state_writes(self, mock_touch: AsyncMock) -> None:
+        runner = KiteStreamRunner(
+            sessionmaker=_sessionmaker_mock(),
+            session_id="paper-live",
+            config=KiteStreamConfig(
+                api_key="kite-key",
+                access_token="kite-token",
+                instrument_tokens=[101, 102],
+            ),
+        )
+
+        asyncio.run(runner._record_ticks([{"instrument_token": 101, "last_price": 100.0}]))
+        asyncio.run(runner._record_ticks([{"instrument_token": 102, "last_price": 101.0}]))
+
+        mock_touch.assert_awaited_once()
+        assert mock_touch.await_args.kwargs["metadata_json"] == {
+            "tick_count": 1,
+            "token_count": 2,
+            "last_tick_tokens": [101],
+            "mode": "full",
+        }
 
     @patch("nse_momentum_lab.services.kite.stream.upsert_paper_fill", new_callable=AsyncMock)
     @patch("nse_momentum_lab.services.kite.stream.upsert_paper_order_event", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.services.kite.stream.update_paper_order_broker_state", new_callable=AsyncMock)
+    @patch(
+        "nse_momentum_lab.services.kite.stream.update_paper_order_broker_state",
+        new_callable=AsyncMock,
+    )
     def test_record_order_update_persists_broker_state(
         self,
         mock_update_order: AsyncMock,

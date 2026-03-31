@@ -21,13 +21,11 @@ from apps.nicegui.components import (
     nav_card,
     divider,
     primary_action_card,
-    kpi_section,
     SPACE_SECTION,
     SPACE_GRID_DEFAULT,
     SPACE_MD,
     SPACE_GROUP_TIGHT,
     TYPE_BODY_LG,
-    TYPE_PRESET_PAGE_HEADER,
     theme_text_primary,
     theme_text_secondary,
     theme_text_muted,
@@ -63,16 +61,14 @@ async def home_page() -> None:
     experiments_df = await aget_experiments()
 
     with page_layout("Home", "home"):
-        ui.label("NSE Momentum Lab").classes(TYPE_PRESET_PAGE_HEADER).style(
-            f"color: {theme_text_primary()};"
+        ui.html(
+            f'<h1 class="text-4xl font-bold" style="color: {theme_text_primary()};">NSE Momentum Lab</h1>'
         )
         ui.label("Local-first momentum research and backtest analysis").classes(
             f"{TYPE_BODY_LG} {SPACE_SECTION}"
         ).style(f"color: {theme_text_secondary()};")
 
-        divider()
-
-        # Primary CTA - most important action
+        # Primary CTA — the ONE thing a user should do next
         has_experiments = not experiments_df.is_empty()
         if not has_experiments:
             primary_action_card(
@@ -95,217 +91,185 @@ async def home_page() -> None:
 
         divider()
 
-        # Database Status KPIs - grouped for clarity with semantic spacing
-        ui.label("Database Status").classes("text-xl font-semibold").style(
-            f"color: {theme_text_primary()};"
-        )
+        # Navigation Cards — grouped into collapsible sections
+        with (
+            ui.expansion("Core Analysis", icon="bar_chart")
+            .classes("w-full")
+            .props("default-opened")
+        ):
+            # Asymmetric grid: primary card gets more visual weight
+            with ui.row().classes("w-full gap-4"):
+                with ui.column().classes("flex-2"):
+                    nav_card(
+                        "Backtest Results",
+                        "Analyze stored 2LYNCH backtests from DuckDB",
+                        "bar_chart",
+                        "/backtest",
+                        color_success(),
+                    )
+                with ui.column().classes(f"flex-1 {SPACE_GRID_DEFAULT}"):
+                    nav_card(
+                        "Trade Analytics",
+                        "Inspect trade distributions and exit behavior",
+                        "analytics",
+                        "/trade_analytics",
+                        color_info(),
+                    )
+                    nav_card(
+                        "Compare Experiments",
+                        "Compare multiple experiment runs side-by-side",
+                        "compare_arrows",
+                        "/compare",
+                        color_primary(),
+                    )
 
-        kpi_section(
-            "Data Overview",
-            [
-                dict(
-                    title="Data Source",
-                    value=status.get("data_source", "unknown").upper(),
-                    icon="storage",
-                    color=color_info(),
-                ),
-                dict(
-                    title="Symbols",
-                    value=f"{int(status.get('symbols', 0)):,}",
-                    icon="show_chart",
-                    color=color_success(),
-                ),
-                dict(
-                    title="Daily Candles",
-                    value=f"{int(status.get('total_candles', 0)):,}",
-                    icon="candlestick_chart",
-                    color=color_warning(),
-                ),
-                dict(
-                    title="Experiments",
-                    value=f"{len(experiments_df):,}",
-                    icon="science",
-                    color=color_primary(),
-                ),
-            ],
-            columns=4,
-        )
-
-        # Dataset info - using semantic spacing constant
-        with ui.column().classes(f"{SPACE_SECTION} gap-2"):
-            if status.get("dataset_hash"):
-                ui.label(f"Dataset hash: {status.get('dataset_hash')}").classes(
-                    "text-sm font-mono"
-                ).style(f"color: {theme_text_muted()};")
-            if status.get("date_range"):
-                ui.label(f"Date range: {status.get('date_range')}").classes("text-sm").style(
-                    f"color: {theme_text_muted()};"
-                )
-
-        divider()
-
-        # Latest Experiment - show as hero if available
-        ui.label("Latest Experiment").classes("text-xl font-semibold mb-6").style(
-            f"color: {theme_text_primary()};"
-        )
-
-        if experiments_df.is_empty():
-            with ui.column().classes("kpi-card p-6"):
-                ui.label("No experiments found").style(f"color: {theme_text_secondary()};")
-                ui.label("Run: doppler run -- uv run nseml-backtest").classes(
-                    "text-sm font-mono mt-2"
-                ).style(f"color: {theme_text_muted()};")
-        else:
-            latest = experiments_df.row(0, named=True)
-            ret_val = float(latest.get("total_return_pct", 0))
-            # Use kpi_grid with hero_index=0 for first card as hero
-            kpi_grid(
-                [
-                    dict(
-                        title="Total Return",
-                        value=f"{ret_val:.2f}%",
-                        icon="attach_money",
-                        color=color_success() if ret_val > 0 else color_error(),
-                        is_hero=True,  # First card is hero
-                        trend=ret_val,  # Shows trend indicator
-                        trend_label="All-time performance",
-                    ),
-                    dict(
-                        title="Win Rate",
-                        value=f"{float(latest.get('win_rate_pct', 0)):.1f}%",
-                        icon="target",
-                        color=color_info(),
-                    ),
-                    dict(
-                        title="Trades",
-                        value=f"{int(latest.get('total_trades', 0)):,}",
-                        icon="bar_chart",
-                        color=color_warning(),
-                    ),
-                    dict(
-                        title="Exp ID",
-                        value=str(latest.get("exp_id", "-"))[:12],
-                        icon="tag",
-                        color=color_gray(),
-                    ),
-                ],
-                columns=4,
-                hero_index=0,  # First card is hero
-            )
-
-        divider()
-
-        # Navigation Cards — grouped by category with visual hierarchy
-        # Use varied spacing for rhythm
-        ui.label("Core Analysis").classes("text-xl font-semibold mb-4").style(
-            f"color: {theme_text_primary()};"
-        )
-
-        # Asymmetric grid: 2 primary cards + 1 secondary creates visual interest
-        with ui.row().classes(f"w-full gap-4 {SPACE_SECTION}"):
-            # Primary backtest card - gets more visual weight
-            with ui.column().classes("flex-2"):
+        with ui.expansion("Research Tools", icon="science").classes("w-full"):
+            with ui.grid(columns=2).classes(f"w-full {SPACE_GRID_DEFAULT}"):
                 nav_card(
-                    "Backtest Results",
-                    "Analyze stored 2LYNCH backtests from DuckDB",
-                    "bar_chart",
-                    "/backtest",
-                    color_success(),
-                )
-            # Secondary cards in a narrower column
-            with ui.column().classes(f"flex-1 {SPACE_GRID_DEFAULT}"):
-                nav_card(
-                    "Trade Analytics",
-                    "Inspect trade distributions and exit behavior",
-                    "analytics",
-                    "/trade_analytics",
+                    "Strategy Analysis",
+                    "Analyze parameter sensitivity across runs",
+                    "tune",
+                    "/strategy",
                     color_info(),
                 )
                 nav_card(
-                    "Compare Experiments",
-                    "Compare multiple experiment runs side-by-side",
-                    "compare_arrows",
-                    "/compare",
-                    color_primary(),
+                    "Momentum Scans",
+                    "View 4% + 2LYNCH scan results and pass rates",
+                    "radar",
+                    "/scans",
+                    color_warning(),
+                )
+                nav_card(
+                    "Data Quality",
+                    "Validate data integrity and completeness",
+                    "verified",
+                    "/data_quality",
+                    color_success(),
+                )
+                nav_card(
+                    "Market Monitor",
+                    "Track Stockbee-style market regime and breadth",
+                    "monitor",
+                    "/market_monitor",
+                    color_info(),
                 )
 
-        ui.label("Research Tools").classes("text-lg font-semibold mb-4").style(
-            f"color: {theme_text_secondary()};"
-        )
+        with ui.expansion("Operations", icon="engineering").classes("w-full"):
+            with ui.grid(columns=2).classes(f"w-full {SPACE_GRID_DEFAULT}"):
+                nav_card(
+                    "Paper Ledger",
+                    "Track paper trading sessions and execution state",
+                    "receipt_long",
+                    "/paper_ledger",
+                    color_warning(),
+                )
+                nav_card(
+                    "Pipeline Status",
+                    "Monitor job execution and status",
+                    "engineering",
+                    "/pipeline",
+                    color_gray(),
+                )
+                nav_card(
+                    "Daily Summary",
+                    "Daily market overview and statistics",
+                    "today",
+                    "/daily_summary",
+                    color_info(),
+                )
 
-        # 2x2 grid instead of 3-column - breaks monotony, feels more grounded
-        with ui.grid(columns=2).classes(f"w-full {SPACE_GRID_DEFAULT} {SPACE_SECTION}"):
-            nav_card(
-                "Strategy Analysis",
-                "Analyze parameter sensitivity across runs",
-                "tune",
-                "/strategy",
-                color_info(),
+        # System status — collapsed by default, available when needed
+        with ui.expansion("System Status", icon="storage").classes("w-full"):
+            ui.label("Data Overview").classes("text-xl font-semibold mb-4").style(
+                f"color: {theme_text_primary()};"
             )
-            nav_card(
-                "Momentum Scans",
-                "View 4% + 2LYNCH scan results and pass rates",
-                "radar",
-                "/scans",
-                color_warning(),
-            )
-            nav_card(
-                "Data Quality",
-                "Validate data integrity and completeness",
-                "verified",
-                "/data_quality",
-                color_success(),
-            )
-            nav_card(
-                "Market Monitor",
-                "Track Stockbee-style market regime and breadth",
-                "monitor",
-                "/market_monitor",
-                color_info(),
-            )
-
-        ui.label("Operations").classes("text-lg font-semibold mb-4").style(
-            f"color: {theme_text_secondary()};"
-        )
-
-        # 4-column grid works here for compact utility items
-        with ui.grid(columns=4).classes(f"w-full {SPACE_GRID_DEFAULT} {SPACE_SECTION}"):
-            nav_card(
-                "Walk Forward",
-                "Review validation folds and rerun promotion-gate checks",
-                "view_week",
-                "/walk_forward",
-                color_primary(),
-            )
-            nav_card(
-                "Paper Ledger",
-                "Track paper trading sessions and execution state",
-                "receipt_long",
-                "/paper_ledger",
-                color_warning(),
-            )
-            nav_card(
-                "Pipeline Status",
-                "Monitor job execution and status",
-                "engineering",
-                "/pipeline",
-                color_gray(),
-            )
-            nav_card(
-                "Daily Summary",
-                "Daily market overview and statistics",
-                "today",
-                "/daily_summary",
-                color_info(),
+            kpi_grid(
+                [
+                    dict(
+                        title="Data Source",
+                        value=status.get("data_source", "unknown").upper(),
+                        icon="storage",
+                        color=color_info(),
+                        muted=True,
+                    ),
+                    dict(
+                        title="Symbols",
+                        value=f"{int(status.get('symbols', 0)):,}",
+                        icon="show_chart",
+                        color=color_success(),
+                    ),
+                    dict(
+                        title="Daily Candles",
+                        value=f"{int(status.get('total_candles', 0)):,}",
+                        icon="candlestick_chart",
+                        color=color_warning(),
+                    ),
+                    dict(
+                        title="Experiments",
+                        value=f"{len(experiments_df):,}",
+                        icon="science",
+                        color=color_primary(),
+                    ),
+                ],
+                columns=4,
             )
 
-        divider()
+            # Dataset info
+            with ui.column().classes(f"{SPACE_SECTION} gap-2"):
+                if status.get("dataset_hash"):
+                    ui.label(f"Dataset hash: {status.get('dataset_hash')}").classes(
+                        "text-sm font-mono"
+                    ).style(f"color: {theme_text_muted()};")
+                if status.get("date_range"):
+                    ui.label(f"Date range: {status.get('date_range')}").classes("text-sm").style(
+                        f"color: {theme_text_muted()};"
+                    )
 
-        # Quick Start Commands - enhanced with semantic spacing
+            # Latest Experiment — shown inline under status
+            if not experiments_df.is_empty():
+                ui.separator().classes("my-4")
+                ui.label("Latest Experiment").classes("text-xl font-semibold mb-4").style(
+                    f"color: {theme_text_primary()};"
+                )
+                latest = experiments_df.row(0, named=True)
+                ret_val = float(latest.get("total_return_pct", 0))
+                kpi_grid(
+                    [
+                        dict(
+                            title="Total Return",
+                            value=f"{ret_val:.2f}%",
+                            icon="attach_money",
+                            color=color_success() if ret_val > 0 else color_error(),
+                            is_hero=True,
+                            trend=ret_val,
+                            trend_label="All-time performance",
+                        ),
+                        dict(
+                            title="Win Rate",
+                            value=f"{float(latest.get('win_rate_pct', 0)):.1f}%",
+                            icon="target",
+                            color=color_info(),
+                        ),
+                        dict(
+                            title="Trades",
+                            value=f"{int(latest.get('total_trades', 0)):,}",
+                            icon="bar_chart",
+                            color=color_warning(),
+                        ),
+                        dict(
+                            title="Exp ID",
+                            value=str(latest.get("exp_id", "-"))[:12],
+                            icon="tag",
+                            color=color_gray(),
+                            muted=True,
+                        ),
+                    ],
+                    columns=4,
+                    hero_index=0,
+                )
+
+        # Quick Start Commands — collapsed by default, developer-only reference
         with ui.expansion("Quick Start Commands", icon="terminal").classes("w-full"):
-            ui.label("Run these commands in your terminal:").classes("mb-3").style(
-                f"color: {theme_text_secondary()};"
-            )
             commands = [
                 ("Sync dependencies", "uv sync"),
                 ("Start database", "doppler run -- docker compose up -d"),

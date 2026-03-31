@@ -1,4 +1,4 @@
-"""CLI entry point for paper-session management and walk-forward runs."""
+"""CLI entry point for paper-session management and daily paper flows."""
 
 from __future__ import annotations
 
@@ -9,8 +9,10 @@ import inspect
 import json
 import logging
 import sys
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 from datetime import UTC, date, datetime
+from functools import cache
+from pathlib import Path
 from statistics import mean, median
 from typing import Any, cast
 from uuid import uuid4
@@ -24,10 +26,11 @@ from nse_momentum_lab.db.paper import (
     delete_walk_forward_sessions_by_ids,
     flatten_open_positions,
     get_paper_session_summary,
+    get_paper_session_summary_compact,
     get_walk_forward_session_cleanup_preview,
     insert_walk_forward_fold,
     list_paper_sessions,
-    list_passed_walk_forward_sessions,
+    list_paper_sessions_compact,
     qualify_session_signals,
     reset_walk_forward_folds,
     set_paper_session_status,
@@ -38,22 +41,9 @@ from nse_momentum_lab.features import (
     FEAT_DAILY_CORE_VERSION,
     FEAT_INTRADAY_CORE_VERSION,
 )
-from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
-    BacktestParams,
-    DuckDBBacktestRunner,
-)
-from nse_momentum_lab.services.backtest.walkforward import WalkForwardFramework
-from nse_momentum_lab.services.kite.client import KiteConnectClient
-from nse_momentum_lab.services.kite.stream import KiteStreamConfig, KiteStreamRunner
-from nse_momentum_lab.services.paper.runtime import (
-    PaperRuntimePlan,
-    PaperRuntimeScaffold,
-    redact_credentials,
-)
 
 logger = logging.getLogger(__name__)
 BACKTEST_DATE_KEYS = {"start_date", "end_date", "start_year", "end_year"}
-BACKTEST_PARAM_KEYS = set(BacktestParams.__dataclass_fields__)
 WALK_FORWARD_RUNTIME_SPECS = {
     "modular": (
         {
@@ -88,6 +78,57 @@ WALK_FORWARD_RUNTIME_SPECS = {
         },
     ),
 }
+
+
+@cache
+def _get_backtest_params_cls() -> type[Any]:
+    from nse_momentum_lab.services.backtest.duckdb_backtest_runner import BacktestParams
+
+    return BacktestParams
+
+
+@cache
+def _get_backtest_runner_cls() -> type[Any]:
+    from nse_momentum_lab.services.backtest.duckdb_backtest_runner import DuckDBBacktestRunner
+
+    return DuckDBBacktestRunner
+
+
+@cache
+def _get_walk_forward_framework_cls() -> type[Any]:
+    from nse_momentum_lab.services.backtest.walkforward import WalkForwardFramework
+
+    return WalkForwardFramework
+
+
+@cache
+def _get_kite_connect_client_cls() -> type[Any]:
+    from nse_momentum_lab.services.kite.client import KiteConnectClient
+
+    return KiteConnectClient
+
+
+@cache
+def _get_kite_stream_symbols() -> tuple[type[Any], type[Any]]:
+    from nse_momentum_lab.services.kite.stream import KiteStreamConfig, KiteStreamRunner
+
+    return KiteStreamConfig, KiteStreamRunner
+
+
+@cache
+def _get_paper_runtime_symbols() -> tuple[type[Any], type[Any], Any]:
+    from nse_momentum_lab.services.paper.runtime import (
+        PaperRuntimePlan,
+        PaperRuntimeScaffold,
+        redact_credentials,
+    )
+
+    return PaperRuntimePlan, PaperRuntimeScaffold, redact_credentials
+
+
+@cache
+def _backtest_param_keys() -> frozenset[str]:
+    return frozenset(_get_backtest_params_cls().__dataclass_fields__)
 
 
 def _utc_today() -> date:
@@ -137,14 +178,81 @@ def _default_session_id(prefix: str, *parts: str) -> str:
     return f"{prefix}-{safe}" if safe else f"{prefix}-{uuid4().hex[:8]}"
 
 
+def _format_threshold_label(value: Any) -> str:
+    try:
+        numeric = float(value)
+    except TypeError, ValueError:
+        return ""
+    compact = f"{numeric:.4f}".rstrip("0").rstrip(".").replace(".", "p")
+    return f"thr-{compact}" if compact else ""
+
+
 def _normalize_backtest_params(
     strategy_name: str,
     overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    params = asdict(BacktestParams(strategy=strategy_name))
+    backtest_params_cls = _get_backtest_params_cls()
+    params = asdict(backtest_params_cls(strategy=strategy_name))
     params.update(overrides or {})
     params["strategy"] = strategy_name
-    return asdict(BacktestParams(**params))
+    return asdict(backtest_params_cls(**params))
+
+
+def _build_fast_sim_backtest_params(
+    args: argparse.Namespace,
+    *,
+    trade_date: date,
+) -> dict[str, Any]:
+    backtest_params_cls = _get_backtest_params_cls()
+    experiment_id = getattr(args, "experiment_id", None)
+    if experiment_id:
+        backtest_db = get_backtest_db(read_only=True)
+        experiment = backtest_db.get_experiment(str(experiment_id))
+        if experiment is None:
+            raise SystemExit(f"Experiment '{experiment_id}' was not found in backtest.duckdb")
+        experiment_params = _parse_json(str(experiment.get("params_json") or "{}"))
+        strategy_name = str(
+            experiment.get("strategy_name")
+            or experiment_params.get("strategy")
+            or getattr(args, "strategy", "thresholdbreakout")
+        )
+        params = _normalize_backtest_params(strategy_name, experiment_params)
+    else:
+        strategy_name = getattr(args, "strategy", "thresholdbreakout")
+        params = _normalize_backtest_params(
+            strategy_name, _parse_json(getattr(args, "params_json", None))
+        )
+
+    params["start_date"] = trade_date.isoformat()
+    params["end_date"] = trade_date.isoformat()
+    params["start_year"] = trade_date.year
+    params["end_year"] = trade_date.year
+    universe_size = getattr(args, "universe_size", None)
+    if universe_size is None:
+        universe_size = params.get("universe_size", 2000)
+    params["universe_size"] = int(universe_size)
+    return backtest_params_cls(**params)
+
+
+def _print_fast_sim_summary(exp_id: str) -> None:
+    backtest_db = get_backtest_db(read_only=True)
+    row = backtest_db.con.execute(
+        """SELECT strategy_name, start_year, end_year, total_trades, total_return_pct,
+                  max_drawdown_pct, profit_factor
+           FROM bt_experiment WHERE exp_id = ?""",
+        [exp_id],
+    ).fetchone()
+    if not row:
+        print("  (no summary available — experiment not persisted)")
+        return
+
+    strategy, start_yr, end_yr, trades, total_ret, max_dd, pf = row
+    print()
+    print(f"  Strategy   : {strategy}  ({start_yr}-{end_yr})")
+    print(f"  Trades     : {int(trades):,}")
+    print(f"  Total Ret  : {float(total_ret):.1f}%")
+    print(f"  Max DD     : {float(max_dd):.2f}%")
+    print(f"  Prof Factor: {float(pf):.2f}")
 
 
 def _load_market_trading_sessions(start_date: date, end_date: date) -> list[date]:
@@ -417,7 +525,8 @@ def _extract_walk_forward_base_params(session: dict[str, Any]) -> dict[str, Any]
     if isinstance(base_params, dict):
         return base_params
 
-    return {key: value for key, value in strategy_params.items() if key in BACKTEST_PARAM_KEYS}
+    valid_keys = _backtest_param_keys()
+    return {key: value for key, value in strategy_params.items() if key in valid_keys}
 
 
 def _extract_walk_forward_test_ranges(session: dict[str, Any]) -> list[tuple[date, date]]:
@@ -619,7 +728,7 @@ def _validate_experiment_against_walk_forward(
     experiment_params = (
         json.loads(params_json) if isinstance(params_json, str) and params_json else {}
     )
-    comparable_keys = BACKTEST_PARAM_KEYS - BACKTEST_DATE_KEYS
+    comparable_keys = _backtest_param_keys() - BACKTEST_DATE_KEYS
     validated_comparable = {key: validated_params.get(key) for key in comparable_keys}
     experiment_comparable = {key: experiment_params.get(key) for key in comparable_keys}
     if experiment_comparable != validated_comparable:
@@ -664,7 +773,13 @@ def _walk_forward_gate_rejection_reason(
 def _session_to_json(session: Any) -> dict[str, Any]:
     if isinstance(session, dict):
         return session
-    return asdict(session)
+    if is_dataclass(session):
+        return asdict(session)
+    if hasattr(session, "_asdict"):
+        return dict(session._asdict())
+    if hasattr(session, "__dict__"):
+        return {key: value for key, value in vars(session).items() if not key.startswith("_sa_")}
+    raise TypeError(f"Unsupported paper-session payload type: {type(session)!r}")
 
 
 async def _warn_if_session_exists(
@@ -696,23 +811,32 @@ def _build_runtime_plan(
     feed_source: str,
     trade_date: date | None = None,
     symbols: list[str] | None = None,
-) -> PaperRuntimePlan:
+) -> dict[str, Any]:
+    paper_runtime_plan_cls, _, _ = _get_paper_runtime_symbols()
     settings = get_settings()
+    strategy_params = _parse_json(args.strategy_params) if hasattr(args, "strategy_params") else {}
     resolved_trade_date = trade_date
     if resolved_trade_date is None:
         resolved_trade_date = getattr(args, "trade_date", None) or (
             _utc_today() if mode == "live" else None
         )
-    session_id = args.session_id or _default_session_id(
-        "paper",
-        args.strategy,
-        resolved_trade_date.isoformat() if resolved_trade_date else "na",
-        mode,
-    )
+    session_parts = [str(args.strategy)]
+    threshold_value = strategy_params.get("breakout_threshold")
+    if threshold_value in (None, "") and str(args.strategy).startswith("thresholdbreak"):
+        threshold_value = 0.04
+    threshold_label = _format_threshold_label(threshold_value)
+    if threshold_label:
+        session_parts.append(threshold_label)
+    if mode == "live" and getattr(args, "watchlist", False):
+        session_parts.append("watchlist")
+    if getattr(args, "observe", False):
+        session_parts.append("observe")
+    session_parts.extend([resolved_trade_date.isoformat() if resolved_trade_date else "na", mode])
+    session_id = args.session_id or _default_session_id("paper", *session_parts)
     resolved_symbols = (
         list(symbols) if symbols is not None else _parse_symbol_csv(getattr(args, "symbols", None))
     )
-    return PaperRuntimePlan(
+    return paper_runtime_plan_cls(
         session_id=session_id,
         strategy_name=args.strategy,
         trade_date=resolved_trade_date,
@@ -720,9 +844,7 @@ def _build_runtime_plan(
         symbols=resolved_symbols,
         experiment_id=args.experiment_id,
         notes=args.notes,
-        strategy_params=_parse_json(args.strategy_params)
-        if hasattr(args, "strategy_params")
-        else {},
+        strategy_params=strategy_params,
         risk_config=_parse_json(args.risk_config) if hasattr(args, "risk_config") else {},
         feed_mode=getattr(args, "feed_mode", "full"),
         feed_source=feed_source,
@@ -757,6 +879,132 @@ def _resolve_watchlist_min_filters(args: argparse.Namespace) -> int:
         return int(raw)
     except TypeError, ValueError:
         return 5
+
+
+def _build_watchlist_report(
+    args: argparse.Namespace,
+    *,
+    trade_date: date,
+    symbols: list[str],
+) -> tuple[Any | None, dict[str, Any]]:
+    watchlist_mode = bool(getattr(args, "watchlist", False))
+    if not watchlist_mode:
+        return None, {"enabled": False, "ready": True}
+
+    from nse_momentum_lab.services.paper.live_watchlist import build_prior_day_watchlist
+
+    threshold = _resolve_watchlist_threshold(args)
+    min_filters = _resolve_watchlist_min_filters(args)
+    direction = "short" if "breakdown" in str(getattr(args, "strategy", "")).lower() else "long"
+    watchlist_df = build_prior_day_watchlist(
+        symbols=symbols,
+        trade_date=trade_date,
+        strategy=args.strategy,
+        threshold=threshold,
+        direction=direction,
+        min_filters=min_filters,
+    )
+    count = int(getattr(watchlist_df, "height", 0) or 0)
+    report: dict[str, Any] = {
+        "enabled": True,
+        "ready": count > 0,
+        "count": count,
+        "threshold": threshold,
+        "min_filters": min_filters,
+        "symbol_sample": (
+            watchlist_df["symbol"].to_list()[:10]
+            if count > 0 and "symbol" in watchlist_df.columns
+            else []
+        ),
+    }
+    if count > 0:
+        report["top_filters_passed"] = int(watchlist_df["filters_passed"].max())
+        return watchlist_df, report
+
+    report["reasons"] = ["empty_watchlist"]
+    report["remediation"] = [
+        "Loosen watchlist_min_filters or breakout_threshold for the live session.",
+        "Run daily-live without --watchlist only if you explicitly want broad observe-only coverage.",
+        "Check logs for watchlist query failures before retrying.",
+    ]
+    return watchlist_df, report
+
+
+def _compact_paper_session_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
+    if not summary:
+        return {}
+    session = dict(summary.get("session") or {})
+    counts = dict(summary.get("counts") or {})
+    feed_state = dict(summary.get("feed_state") or {})
+    feed_metadata = dict(feed_state.get("metadata_json") or {})
+    compact_session = {
+        "session_id": session.get("session_id"),
+        "trade_date": session.get("trade_date"),
+        "strategy_name": session.get("strategy_name"),
+        "experiment_id": session.get("experiment_id"),
+        "mode": session.get("mode"),
+        "status": session.get("status"),
+        "symbol_count": int(session.get("symbol_count") or len(session.get("symbols") or [])),
+        "strategy_params": session.get("strategy_params") or {},
+    }
+    compact_feed = {
+        "source": feed_state.get("source"),
+        "mode": feed_state.get("mode"),
+        "status": feed_state.get("status"),
+        "is_stale": feed_state.get("is_stale"),
+        "subscription_count": feed_state.get("subscription_count"),
+        "token_count": int(
+            feed_state.get("token_count") or len(feed_metadata.get("instrument_tokens") or [])
+        ),
+        "last_quote_at": feed_state.get("last_quote_at"),
+        "last_tick_at": feed_state.get("last_tick_at"),
+        "heartbeat_at": feed_state.get("heartbeat_at"),
+        "observe_only": bool(feed_state.get("observe_only", feed_metadata.get("observe_only"))),
+    }
+    return {
+        "session": compact_session,
+        "counts": counts,
+        "feed_state": compact_feed,
+    }
+
+
+def _compact_runtime_result(result: dict[str, Any]) -> dict[str, Any]:
+    session = dict(result.get("session") or {})
+    feed_state = dict(result.get("feed_state") or {})
+    feed_plan = dict(result.get("feed_plan") or {})
+    signals = list(result.get("signals") or [])
+    return {
+        "session": {
+            "session_id": session.get("session_id"),
+            "trade_date": session.get("trade_date"),
+            "strategy_name": session.get("strategy_name"),
+            "mode": session.get("mode"),
+            "status": session.get("status"),
+            "symbol_count": len(session.get("symbols") or []),
+            "strategy_params": session.get("strategy_params") or {},
+        },
+        "feed_state": {
+            "source": feed_state.get("source"),
+            "mode": feed_state.get("mode"),
+            "status": feed_state.get("status"),
+            "subscription_count": feed_state.get("subscription_count"),
+            "is_stale": feed_state.get("is_stale"),
+            "token_count": len(feed_plan.get("instrument_tokens") or []),
+            "batch_count": len(feed_plan.get("batches") or []),
+        },
+        "queue_size": int(result.get("queue_size") or 0),
+        "actionable_queue_size": int(result.get("actionable_queue_size") or 0),
+        "signal_count": len(signals),
+        "signal_sample": [
+            {
+                "signal_id": signal.get("signal_id"),
+                "symbol": signal.get("symbol"),
+                "state": signal.get("state"),
+                "decision_status": signal.get("decision_status"),
+            }
+            for signal in signals[:10]
+        ],
+    }
 
 
 def _resolve_all_local_symbols() -> list[str]:
@@ -1016,13 +1264,14 @@ def _build_stream_runner(
     *,
     instrument_tokens: list[int] | None = None,
     tick_handler: Any | None = None,
-) -> KiteStreamRunner:
+) -> dict[str, Any]:
+    kite_stream_config_cls, kite_stream_runner_cls = _get_kite_stream_symbols()
     settings = get_settings()
     sessionmaker = get_sessionmaker()
-    return KiteStreamRunner(
+    return kite_stream_runner_cls(
         sessionmaker=sessionmaker,
         session_id=session_id,
-        config=KiteStreamConfig(
+        config=kite_stream_config_cls(
             api_key=settings.kite_api_key or "",
             access_token=settings.kite_access_token or "",
             instrument_tokens=(
@@ -1133,11 +1382,20 @@ async def _cmd_status(args: argparse.Namespace) -> None:
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
         if args.session_id:
+            if args.summary:
+                payload = await get_paper_session_summary_compact(db_session, args.session_id)
+                print(json.dumps(payload or {}, default=str, indent=2))
+                return
             summary = await get_paper_session_summary(db_session, args.session_id)
-            print(json.dumps(summary or {}, default=str, indent=2))
+            payload = _compact_paper_session_summary(summary) if args.summary else (summary or {})
+            print(json.dumps(payload, default=str, indent=2))
             return
 
-        sessions = await list_paper_sessions(db_session, status=args.status, limit=args.limit)
+        sessions = (
+            await list_paper_sessions_compact(db_session, status=args.status, limit=args.limit)
+            if args.summary
+            else await list_paper_sessions(db_session, status=args.status, limit=args.limit)
+        )
     print(json.dumps({"sessions": sessions}, default=str, indent=2))
 
 
@@ -1257,95 +1515,6 @@ async def _cmd_alert(args: argparse.Namespace) -> None:
     )
 
 
-async def _check_walk_forward_gate(
-    db_session: Any,
-    plan: PaperRuntimePlan,
-    *,
-    bypass: bool = False,
-) -> None:
-    """Raise SystemExit if no compatible passing walk-forward session exists."""
-    if bypass:
-        logger.warning("Walk-forward promotion gate bypassed for strategy=%s", plan.strategy_name)
-        return
-
-    passed_sessions = await list_passed_walk_forward_sessions(db_session, plan.strategy_name)
-    if not passed_sessions:
-        raise SystemExit(
-            f"No passing walk-forward session found for strategy '{plan.strategy_name}'. "
-            "Run 'nseml-paper walk-forward' first, or pass --skip-gate to bypass."
-        )
-
-    backtest_db = get_backtest_db(read_only=True) if plan.experiment_id else None
-    experiment = None
-    if plan.experiment_id:
-        experiment = backtest_db.get_experiment(plan.experiment_id) if backtest_db else None
-        if experiment is None:
-            raise SystemExit(f"Experiment '{plan.experiment_id}' was not found in backtest.duckdb")
-
-    rejected: list[str] = []
-    for session in passed_sessions:
-        rejection_reason = _walk_forward_gate_rejection_reason(
-            session=session,
-            trade_date=plan.trade_date,
-            experiment=experiment,
-            backtest_db=backtest_db,
-        )
-        if rejection_reason is None:
-            logger.info(
-                "Walk-forward gate passed: session_id=%s finished_at=%s trade_date=%s",
-                session["session_id"],
-                session.get("finished_at"),
-                plan.trade_date,
-            )
-            return
-        rejected.append(f"{session['session_id']}: {rejection_reason}")
-
-    raise SystemExit(
-        "No compatible passing walk-forward session found for "
-        f"strategy '{plan.strategy_name}'"
-        + (f", trade_date '{plan.trade_date.isoformat()}'" if plan.trade_date else "")
-        + ". Recent rejections: "
-        + "; ".join(rejected[:5])
-    )
-
-
-async def _check_daily_walk_forward_gate(
-    db_session: Any,
-    plan: PaperRuntimePlan,
-    *,
-    bypass: bool = False,
-) -> None:
-    """Check walk-forward lineage for daily sessions — warn but don't block.
-
-    Daily replay/live should not require a passing walk-forward to start.
-    The gate is informational: it logs the lineage status so operators know
-    whether the strategy has been validated, but the session proceeds
-    regardless.  Full walk-forward remains the research promotion gate.
-    """
-    if bypass:
-        logger.warning("Walk-forward gate check bypassed for strategy=%s", plan.strategy_name)
-        return
-
-    passed_sessions = await list_passed_walk_forward_sessions(db_session, plan.strategy_name)
-    if passed_sessions:
-        latest = passed_sessions[0]
-        logger.info(
-            "Walk-forward lineage OK: session_id=%s finished_at=%s strategy=%s",
-            latest["session_id"],
-            latest.get("finished_at"),
-            plan.strategy_name,
-        )
-        return
-
-    # No walk-forward session found — warn but allow the session to proceed
-    logger.warning(
-        "No passing walk-forward session found for strategy '%s'. "
-        "Session will proceed, but the strategy has not been validated via walk-forward. "
-        "Run 'nseml-paper walk-forward' when ready.",
-        plan.strategy_name,
-    )
-
-
 async def _cmd_daily_prepare(args: argparse.Namespace) -> None:
     trade_date = _resolve_trade_date_arg(getattr(args, "trade_date", None))
     symbols = _resolve_daily_symbols(args, trade_date)
@@ -1357,7 +1526,54 @@ async def _cmd_daily_prepare(args: argparse.Namespace) -> None:
     print(json.dumps(payload, default=str, indent=2))
 
 
+async def _cmd_daily_sim(args: argparse.Namespace) -> None:
+    trade_date = _resolve_trade_date_arg(getattr(args, "trade_date", None))
+    symbols = _resolve_daily_symbols(args, trade_date, live=False)
+    preparation = _build_daily_prepare_report(
+        trade_date=trade_date,
+        symbols=symbols,
+        mode="replay",
+    )
+    if not preparation.get("coverage_ready", False):
+        print(json.dumps({"mode": "daily-sim", "preparation": preparation}, default=str, indent=2))
+        return
+
+    params = _build_fast_sim_backtest_params(args, trade_date=trade_date)
+    duckdb_backtest_runner_cls = _get_backtest_runner_cls()
+    runner = duckdb_backtest_runner_cls()
+    progress_file = (
+        Path(args.progress_file).expanduser() if getattr(args, "progress_file", None) else None
+    )
+
+    try:
+        exp_id = await asyncio.to_thread(
+            runner.run,
+            params,
+            force=getattr(args, "force", False),
+            snapshot=getattr(args, "snapshot", False),
+            progress_file=progress_file,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise SystemExit(f"[FAST-SIM FAILED] {exc}") from exc
+
+    print(
+        json.dumps(
+            {
+                "mode": "daily-sim",
+                "trade_date": trade_date.isoformat(),
+                "symbols": len(symbols),
+                "preparation": preparation,
+                "experiment_id": exp_id,
+            },
+            default=str,
+            indent=2,
+        )
+    )
+    _print_fast_sim_summary(exp_id)
+
+
 async def _cmd_daily_replay(args: argparse.Namespace) -> None:
+    _, paper_runtime_scaffold_cls, _ = _get_paper_runtime_symbols()
     trade_date = _resolve_trade_date_arg(getattr(args, "trade_date", None))
     symbols = _resolve_daily_symbols(args, trade_date)
     preparation = _build_daily_prepare_report(trade_date=trade_date, symbols=symbols, mode="replay")
@@ -1386,18 +1602,44 @@ async def _cmd_daily_replay(args: argparse.Namespace) -> None:
             threshold=_resolve_watchlist_threshold(args),
             min_filters=_resolve_watchlist_min_filters(args),
         )
-        if not watchlist_df.is_empty():
-            plan = _build_runtime_plan(
-                args,
-                mode="replay",
-                feed_source="duckdb",
-                trade_date=trade_date,
-                symbols=sorted(watchlist_df["symbol"].to_list()),
+        if watchlist_df.is_empty():
+            print(
+                json.dumps(
+                    {
+                        "mode": "replay",
+                        "trade_date": trade_date.isoformat(),
+                        "watchlist": {
+                            "enabled": True,
+                            "ready": False,
+                            "count": 0,
+                            "reasons": ["empty_watchlist"],
+                        },
+                        "status": "BLOCKED",
+                        "reason": "empty_watchlist",
+                    },
+                    default=str,
+                    indent=2,
+                )
             )
-            print(f"[WATCHLIST] {len(watchlist_df)} symbols from prior-day features for replay")
-        else:
-            print("[WATCHLIST] No symbols passed prior-day quality filters for replay")
-    runtime = PaperRuntimeScaffold(feed_batch_size=get_settings().kite_ws_max_tokens)
+            return
+
+        watchlist_rows = watchlist_df.to_dicts()
+        plan = _build_runtime_plan(
+            args,
+            mode="replay",
+            feed_source="duckdb",
+            trade_date=trade_date,
+            symbols=sorted(watchlist_df["symbol"].to_list()),
+        )
+        plan.strategy_params = {
+            **(plan.strategy_params or {}),
+            "_live_watchlist_rows": watchlist_rows,
+            "_watchlist_mode": True,
+            "breakout_threshold": _resolve_watchlist_threshold(args),
+            "watchlist_min_filters": _resolve_watchlist_min_filters(args),
+        }
+        print(f"[WATCHLIST] {len(watchlist_df)} symbols from prior-day features for replay")
+    runtime = paper_runtime_scaffold_cls(feed_batch_size=get_settings().kite_ws_max_tokens)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
         await _warn_if_session_exists(
@@ -1405,11 +1647,6 @@ async def _cmd_daily_replay(args: argparse.Namespace) -> None:
             plan.session_id,
             command="daily-replay",
             auto_generated=args.session_id is None,
-        )
-        await _check_daily_walk_forward_gate(
-            db_session,
-            plan,
-            bypass=getattr(args, "skip_gate", False),
         )
     result = await runtime.prepare_session(sessionmaker, plan, status="RUNNING")
     execution = None
@@ -1464,6 +1701,8 @@ async def _cmd_daily_start(args: argparse.Namespace) -> None:
 
 
 async def _cmd_daily_live(args: argparse.Namespace) -> None:
+    _, paper_runtime_scaffold_cls, redact_credentials = _get_paper_runtime_symbols()
+    kite_connect_client_cls = _get_kite_connect_client_cls()
     settings = get_settings()
     trade_date = _resolve_trade_date_arg(getattr(args, "trade_date", None))
     symbols = _resolve_daily_symbols(args, trade_date, live=True)
@@ -1472,27 +1711,31 @@ async def _cmd_daily_live(args: argparse.Namespace) -> None:
         print(json.dumps({"mode": "live", "preparation": preparation}, default=str, indent=2))
         return
 
-    # Watchlist mode: build from prior-day features, no same-day data needed
-    watchlist_mode = getattr(args, "watchlist", False)
-    watchlist_df = None
-    if watchlist_mode:
-        from nse_momentum_lab.services.paper.live_watchlist import build_prior_day_watchlist
-
-        watchlist_df = build_prior_day_watchlist(
-            symbols=symbols,
-            trade_date=trade_date,
-            strategy=args.strategy,
-            threshold=_resolve_watchlist_threshold(args),
-            min_filters=_resolve_watchlist_min_filters(args),
-        )
-        if not watchlist_df.is_empty():
-            watchlist_symbols = sorted(watchlist_df["symbol"].to_list())
-            print(
-                f"[WATCHLIST] {len(watchlist_symbols)} symbols from prior-day features "
-                f"(top filters_passed={int(watchlist_df['filters_passed'].max())})"
+    watchlist_df, watchlist_report = _build_watchlist_report(
+        args,
+        trade_date=trade_date,
+        symbols=symbols,
+    )
+    watchlist_mode = bool(watchlist_report.get("enabled"))
+    if watchlist_mode and not watchlist_report.get("ready", False):
+        print(
+            json.dumps(
+                {
+                    "mode": "live",
+                    "verdict": "BLOCKED",
+                    "preparation": preparation,
+                    "watchlist": watchlist_report,
+                },
+                default=str,
+                indent=2,
             )
-        else:
-            print("[WATCHLIST] No symbols passed prior-day quality filters")
+        )
+        return
+    if watchlist_mode:
+        print(
+            f"[WATCHLIST] {watchlist_report['count']} symbols from prior-day features "
+            f"(top filters_passed={watchlist_report['top_filters_passed']})"
+        )
 
     plan = _build_runtime_plan(
         args,
@@ -1513,7 +1756,7 @@ async def _cmd_daily_live(args: argparse.Namespace) -> None:
                 "_watchlist_mode": True,
                 "breakout_threshold": _resolve_watchlist_threshold(args),
             }
-    runtime = PaperRuntimeScaffold(feed_batch_size=settings.kite_ws_max_tokens)
+    runtime = paper_runtime_scaffold_cls(feed_batch_size=settings.kite_ws_max_tokens)
     sessionmaker = get_sessionmaker()
     status = "ACTIVE" if settings.has_kite_credentials() else "PLANNING"
     async with sessionmaker() as db_session:
@@ -1523,11 +1766,6 @@ async def _cmd_daily_live(args: argparse.Namespace) -> None:
             command="daily-live",
             auto_generated=args.session_id is None,
         )
-        await _check_daily_walk_forward_gate(
-            db_session,
-            plan,
-            bypass=getattr(args, "skip_gate", False),
-        )
     result = await runtime.prepare_session(sessionmaker, plan, status=status)
     execution = None
     observe_only = bool(getattr(args, "observe", False) or plan.observe_only)
@@ -1536,7 +1774,7 @@ async def _cmd_daily_live(args: argparse.Namespace) -> None:
     if getattr(args, "execute", False) and not observe_only and not getattr(args, "run", False):
         if not settings.has_kite_credentials():
             raise SystemExit("Kite credentials are required to execute live paper entries")
-        with KiteConnectClient(
+        with kite_connect_client_cls(
             api_key=settings.kite_api_key or "",
             access_token=settings.kite_access_token,
             api_secret=settings.kite_api_secret,
@@ -1557,7 +1795,13 @@ async def _cmd_daily_live(args: argparse.Namespace) -> None:
                 "status": status,
                 "kite_ready": settings.has_kite_credentials(),
                 "preparation": preparation,
-                "result": {**result, "feed_plan": redact_credentials(result.get("feed_plan", {}))},
+                "watchlist": watchlist_report,
+                "result": _compact_runtime_result(
+                    {
+                        **result,
+                        "feed_plan": redact_credentials(result.get("feed_plan", {})),
+                    }
+                ),
                 "execution": execution,
             },
             default=str,
@@ -1603,8 +1847,9 @@ async def _cmd_daily_live(args: argparse.Namespace) -> None:
 
 
 async def _cmd_replay_day(args: argparse.Namespace) -> None:
+    _, paper_runtime_scaffold_cls, _ = _get_paper_runtime_symbols()
     plan = _build_runtime_plan(args, mode="replay", feed_source="duckdb")
-    runtime = PaperRuntimeScaffold(feed_batch_size=get_settings().kite_ws_max_tokens)
+    runtime = paper_runtime_scaffold_cls(feed_batch_size=get_settings().kite_ws_max_tokens)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as db_session:
         await _warn_if_session_exists(
@@ -1613,7 +1858,6 @@ async def _cmd_replay_day(args: argparse.Namespace) -> None:
             command="replay-day",
             auto_generated=args.session_id is None,
         )
-        await _check_walk_forward_gate(db_session, plan, bypass=getattr(args, "skip_gate", False))
     result = await runtime.prepare_session(sessionmaker, plan, status="RUNNING")
     execution = None
     if getattr(args, "execute", False):
@@ -1633,9 +1877,11 @@ async def _cmd_replay_day(args: argparse.Namespace) -> None:
 
 
 async def _cmd_live(args: argparse.Namespace) -> None:
+    _, paper_runtime_scaffold_cls, redact_credentials = _get_paper_runtime_symbols()
+    kite_connect_client_cls = _get_kite_connect_client_cls()
     settings = get_settings()
     plan = _build_runtime_plan(args, mode="live", feed_source="kite")
-    runtime = PaperRuntimeScaffold(feed_batch_size=settings.kite_ws_max_tokens)
+    runtime = paper_runtime_scaffold_cls(feed_batch_size=settings.kite_ws_max_tokens)
     sessionmaker = get_sessionmaker()
     status = "ACTIVE" if settings.has_kite_credentials() else "PLANNING"
     async with sessionmaker() as db_session:
@@ -1645,7 +1891,6 @@ async def _cmd_live(args: argparse.Namespace) -> None:
             command="live",
             auto_generated=args.session_id is None,
         )
-        await _check_walk_forward_gate(db_session, plan, bypass=getattr(args, "skip_gate", False))
     result = await runtime.prepare_session(sessionmaker, plan, status=status)
     execution = None
     observe_only = getattr(args, "observe", False)
@@ -1654,7 +1899,7 @@ async def _cmd_live(args: argparse.Namespace) -> None:
     if getattr(args, "execute", False) and not observe_only:
         if not settings.has_kite_credentials():
             raise SystemExit("Kite credentials are required to execute live paper entries")
-        with KiteConnectClient(
+        with kite_connect_client_cls(
             api_key=settings.kite_api_key or "",
             access_token=settings.kite_access_token,
             api_secret=settings.kite_api_secret,
@@ -1712,7 +1957,10 @@ async def _cmd_stream(args: argparse.Namespace) -> None:
 
 
 async def _cmd_walk_forward(args: argparse.Namespace) -> None:
-    framework = WalkForwardFramework(strategy_name=args.strategy)
+    backtest_params_cls = _get_backtest_params_cls()
+    duckdb_backtest_runner_cls = _get_backtest_runner_cls()
+    walk_forward_framework_cls = _get_walk_forward_framework_cls()
+    framework = walk_forward_framework_cls(strategy_name=args.strategy)
     trading_sessions = _load_market_trading_sessions(args.start_date, args.end_date)
     windows = list(
         framework.generate_rolling_windows_from_sessions(
@@ -1759,13 +2007,13 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
         "wf", args.strategy, args.start_date.isoformat(), args.end_date.isoformat()
     )
     base_params = _normalize_backtest_params(args.strategy, _parse_json(args.params_json))
-    base_params_hash = BacktestParams(**base_params).to_hash()
+    base_params_hash = backtest_params_cls(**base_params).to_hash()
     test_ranges = [
         {"start": window.test_start.isoformat(), "end": window.test_end.isoformat()}
         for window in windows
     ]
 
-    runner = DuckDBBacktestRunner()
+    runner = duckdb_backtest_runner_cls()
     folds: list[dict[str, Any]] = []
     sessionmaker = get_sessionmaker()
 
@@ -1813,7 +2061,7 @@ async def _cmd_walk_forward(args: argparse.Namespace) -> None:
                 fold_params["start_year"] = window.test_start.year
                 fold_params["end_year"] = window.test_end.year
                 exp_id = runner.run(
-                    BacktestParams(**fold_params),
+                    backtest_params_cls(**fold_params),
                     force=args.force,
                     snapshot=args.snapshot,
                     wf_run_id=session_id,
@@ -1992,14 +2240,14 @@ async def _cmd_walk_forward_cleanup(args: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Paper session and walk-forward workflow")
+    parser = argparse.ArgumentParser(description="Paper session workflow")
     sub = parser.add_subparsers(dest="command", required=True)
 
     prepare = sub.add_parser("prepare", help="Create or update a paper session")
     prepare.add_argument("--session-id", default=None)
     prepare.add_argument("--trade-date", default=None, type=_parse_iso_date, help="YYYY-MM-DD")
     prepare.add_argument("--strategy", default="thresholdbreakout")
-    prepare.add_argument("--mode", default="replay", choices=["replay", "live", "walk_forward"])
+    prepare.add_argument("--mode", default="replay", choices=["replay", "live"])
     prepare.add_argument("--status", default="PLANNING")
     prepare.add_argument("--experiment-id", default=None)
     prepare.add_argument("--symbols", default="")
@@ -2014,46 +2262,16 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--session-id", default=None)
     status.add_argument("--status", default=None)
     status.add_argument("--limit", type=_positive_int, default=20)
-    status.set_defaults(handler=_cmd_status)
-
-    walk_forward = sub.add_parser("walk-forward", help="Run rolling walk-forward backtests")
-    walk_forward.add_argument("--session-id", default=None)
-    walk_forward.add_argument("--strategy", default="thresholdbreakout")
-    walk_forward.add_argument("--start-date", required=True, type=_parse_iso_date)
-    walk_forward.add_argument("--end-date", required=True, type=_parse_iso_date)
-    walk_forward.add_argument(
-        "--train-days",
-        type=_positive_int,
-        default=252,
-        help="Training window size in trading sessions",
-    )
-    walk_forward.add_argument(
-        "--test-days",
-        type=_positive_int,
-        default=63,
-        help="Test window size in trading sessions",
-    )
-    walk_forward.add_argument(
-        "--roll-interval-days",
-        type=_positive_int,
-        default=63,
-        help="Fold roll interval in trading sessions",
-    )
-    walk_forward.add_argument("--max-folds", type=_positive_int, default=None)
-    walk_forward.add_argument("--params-json", default=None)
-    walk_forward.add_argument("--force", action="store_true")
-    walk_forward.add_argument("--snapshot", action="store_true")
-    walk_forward.add_argument("--notes", default=None)
-    walk_forward.add_argument(
-        "--yes",
+    status.add_argument(
+        "--summary",
         action="store_true",
-        help="Skip confirmation prompt for large runs (for CI/scripts)",
+        help="Show compact counts/feed state without full symbol and signal payloads",
     )
-    walk_forward.set_defaults(handler=_cmd_walk_forward)
+    status.set_defaults(handler=_cmd_status)
 
     daily_prepare = sub.add_parser(
         "daily-prepare",
-        help="Check daily paper runtime readiness without requiring walk-forward date coverage",
+        help="Check daily paper runtime readiness",
     )
     daily_prepare.add_argument(
         "--trade-date", default=None, type=_parse_iso_date, help="YYYY-MM-DD"
@@ -2068,33 +2286,28 @@ def build_parser() -> argparse.ArgumentParser:
     daily_prepare.add_argument("--mode", default="replay", choices=["replay", "live"])
     daily_prepare.set_defaults(handler=_cmd_daily_prepare)
 
-    cleanup = sub.add_parser(
-        "walk-forward-cleanup",
-        aliases=["cleanup-walk-forward"],
-        help="Preview or delete walk-forward parent runs and their linked backtest rows",
+    daily_sim = sub.add_parser(
+        "daily-sim",
+        help="Run a fast single-day historical simulation using the backtest engine",
     )
-    cleanup.add_argument(
-        "--wf-run-id",
-        dest="wf_run_ids",
-        action="append",
-        default=[],
-        help="Parent walk-forward run ID to clean (repeatable)",
+    daily_sim.add_argument("--trade-date", required=True, type=_parse_iso_date, help="YYYY-MM-DD")
+    daily_sim.add_argument("--strategy", default="thresholdbreakout")
+    daily_sim.add_argument("--experiment-id", default=None)
+    daily_sim.add_argument("--params-json", default=None)
+    daily_sim.add_argument(
+        "--universe-size",
+        type=_positive_int,
+        default=None,
+        help="Backtest universe size for the one-day simulation",
     )
-    cleanup.add_argument(
-        "--run-id",
-        dest="run_ids",
-        action="append",
-        default=[],
-        help="Legacy backtest run ID to clean (repeatable)",
+    daily_sim.add_argument(
+        "--progress-file",
+        default=None,
+        help="Optional NDJSON progress file for the backtest run",
     )
-    cleanup.add_argument("--apply", action="store_true", help="Delete the matched rows")
-    cleanup.add_argument(
-        "--yes",
-        action="store_true",
-        dest="apply",
-        help=argparse.SUPPRESS,
-    )
-    cleanup.set_defaults(handler=_cmd_walk_forward_cleanup)
+    daily_sim.add_argument("--force", action="store_true")
+    daily_sim.add_argument("--snapshot", action="store_true")
+    daily_sim.set_defaults(handler=_cmd_daily_sim)
 
     replay = sub.add_parser("replay-day", help="Bootstrap a replay-day paper session")
     replay.add_argument("--session-id", default=None)
@@ -2108,9 +2321,6 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--feed-mode", default="full", choices=["ltp", "quote", "full"])
     replay.add_argument("--instrument-tokens", default="")
     replay.add_argument("--execute", action="store_true", help="Execute the replay queue once")
-    replay.add_argument(
-        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
-    )
     replay.set_defaults(handler=_cmd_replay_day)
 
     daily_replay = sub.add_parser(
@@ -2140,9 +2350,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Build watchlist from prior-day features (no same-day data required)",
     )
-    daily_replay.add_argument(
-        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
-    )
     daily_replay.set_defaults(handler=_cmd_daily_replay)
 
     live = sub.add_parser("live", help="Bootstrap a live Kite-backed paper session")
@@ -2162,9 +2369,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--observe",
         action="store_true",
         help="Observe-only mode: subscribe to feed but do not execute trades",
-    )
-    live.add_argument(
-        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
     )
     live.set_defaults(handler=_cmd_live)
 
@@ -2200,9 +2404,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--observe",
         action="store_true",
         help="Observe-only mode: subscribe to feed but do not execute trades",
-    )
-    daily_live.add_argument(
-        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
     )
     daily_live.set_defaults(handler=_cmd_daily_live)
 
@@ -2240,9 +2441,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Observe-only mode: subscribe to feed but do not execute trades",
     )
-    daily_start.add_argument(
-        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
-    )
     daily_start.set_defaults(handler=_cmd_daily_start)
 
     stream = sub.add_parser("stream", help="Start the live Kite websocket loop")
@@ -2263,9 +2461,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--observe",
         action="store_true",
         help="Observe-only mode: subscribe to feed but do not execute trades",
-    )
-    stream.add_argument(
-        "--skip-gate", action="store_true", help="Skip the walk-forward promotion gate check"
     )
     stream.set_defaults(handler=_cmd_stream)
 
@@ -2349,8 +2544,6 @@ def _run_async_handler(handler: Any, args: argparse.Namespace) -> None:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    if getattr(args, "command", None) == "walk-forward" and args.end_date < args.start_date:
-        parser.error("--end-date must be on or after --start-date")
     handler = getattr(args, "handler", None)
     if handler is None:
         raise SystemExit("No command specified")

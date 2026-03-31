@@ -13,6 +13,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from nse_momentum_lab.db.market_db import get_market_db
+from nse_momentum_lab.services.kite.parquet_repair import scan_5min_timestamp_alignment
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 
 
@@ -98,10 +101,8 @@ def verify_duckdb() -> bool:
     print("DuckDB Verification")
     print("=" * 60)
 
-    from nse_momentum_lab.db.market_db import get_market_db
-
     try:
-        db = get_market_db()
+        db = get_market_db(read_only=True)
         status = db.get_status()
 
         print("\nRuntime coverage:")
@@ -125,6 +126,21 @@ def verify_duckdb() -> bool:
             print("    Run: doppler run -- uv run nseml-db-init --duckdb-only")
             print("    For an intentional full rebuild: add --force --allow-full-rebuild")
             return False
+
+        print("\nKite 5-min timestamp alignment:")
+        issues = scan_5min_timestamp_alignment(PROJECT_ROOT / "data" / "parquet" / "5min")
+        if issues:
+            print(
+                f"  [FAIL] {len(issues)} 5-min parquet files start before 09:15 IST or have a year mismatch"
+            )
+            for issue in issues[:10]:
+                print(
+                    f"    {issue.symbol} {issue.year}: {issue.first_candle_time} ({issue.status})"
+                )
+            if len(issues) > 10:
+                print(f"    ... and {len(issues) - 10} more")
+            return False
+        print("  [OK] no 5-min parquet files start before 09:15 IST")
 
         print("\nDataset summary:")
         if "symbols" in status:

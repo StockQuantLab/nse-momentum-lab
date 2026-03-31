@@ -120,7 +120,7 @@ def main():
     print(f"\n{'=' * 80}")
     print("RESULTS:")
     print(f"  Total rows: {result[0]:,}")
-    print(f"  Positive R² (> 0): {result[1]:,} ({result[1]/result[0]*100:.1f}%)")
+    print(f"  Positive R² (> 0): {result[1]:,} ({result[1] / result[0] * 100:.1f}%)")
     print(f"  Medium trend (>= 0.5): {result[2]:,}")
     print(f"  High trend (>= 0.7): {result[3]:,}")
     print(f"  Average R²: {result[4]:.4f}")

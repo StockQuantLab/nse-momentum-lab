@@ -11,6 +11,9 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
+DEFAULT_HTTPX_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=10.0)
+DEFAULT_HTTPX_LIMITS = httpx.Limits(max_connections=10, max_keepalive_connections=5)
+
 
 class KiteAPIError(RuntimeError):
     """Raised when Kite returns an error payload or transport failure."""
@@ -41,7 +44,7 @@ class KiteConnectClient:
         access_token: str | None = None,
         login_url: str = "https://kite.zerodha.com/connect/login?v=3",
         api_root: str = "https://api.kite.trade",
-        timeout: float = 10.0,
+        timeout: float | httpx.Timeout = DEFAULT_HTTPX_TIMEOUT,
         client: httpx.Client | None = None,
     ) -> None:
         self.api_key = api_key
@@ -49,7 +52,7 @@ class KiteConnectClient:
         self.access_token = access_token
         self.login_url_base = login_url
         self.api_root = api_root.rstrip("/")
-        self._client = client or httpx.Client(timeout=timeout)
+        self._client = client or httpx.Client(timeout=timeout, limits=DEFAULT_HTTPX_LIMITS)
 
     def close(self) -> None:
         self._client.close()

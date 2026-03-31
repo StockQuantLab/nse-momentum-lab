@@ -48,6 +48,11 @@ from nse_momentum_lab.features.materializer import (
     MaterializationResult,
     MaterializationSummary,
 )
+from nse_momentum_lab.features.progress import (
+    FeatureBuildProgressEvent,
+    FeatureBuildProgressReporter,
+    default_progress_file,
+)
 from nse_momentum_lab.features.registry import (
     FeatureDefinition,
     FeatureDependency,
@@ -65,21 +70,17 @@ from nse_momentum_lab.features.strategy_derived import (
 )
 
 __all__ = [
-    # Strategy derived
     "FEAT_2LYNCH_DERIVED_VERSION",
-    # Daily core
     "FEAT_DAILY_CORE_VERSION",
-    # Event core
     "FEAT_EVENT_CORE_VERSION",
-    # Intraday core
     "FEAT_INTRADAY_CORE_VERSION",
-    # Registry
+    "FeatureBuildProgressEvent",
+    "FeatureBuildProgressReporter",
     "FeatureDefinition",
     "FeatureDependency",
     "FeatureGranularity",
     "FeatureRegistry",
     "FeatureSetState",
-    # Materializer
     "IncrementalFeatureMaterializer",
     "IncrementalPolicy",
     "MaterializationPlan",
@@ -90,6 +91,7 @@ __all__ = [
     "build_feat_event_core",
     "build_feat_intraday_core",
     "create_legacy_feat_daily_view",
+    "default_progress_file",
     "get_feature_registry",
     "register_2lynch_derived",
     "register_feat_daily_core",

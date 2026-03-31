@@ -171,7 +171,9 @@ def _collect_preserved_walk_forward_exp_ids(
         if trade_date is None or trade_date < wf_start or trade_date > wf_end:
             continue
         strategy_params = row.get("strategy_params") or {}
-        walk_forward = strategy_params.get("walk_forward") if isinstance(strategy_params, dict) else {}
+        walk_forward = (
+            strategy_params.get("walk_forward") if isinstance(strategy_params, dict) else {}
+        )
         if not isinstance(walk_forward, dict):
             continue
         fold_ids = walk_forward.get("fold_experiment_ids")
@@ -211,15 +213,21 @@ def _build_retention_plan(
         created_at = row.get("created_at")
         created_date = _date_from_created_at(created_at)
         if created_date is not None and retain_start <= created_date <= retain_end:
-            keep.append(RetainedExperiment(exp_id=exp_id, created_at=created_at, reason="in_retain_window"))
+            keep.append(
+                RetainedExperiment(exp_id=exp_id, created_at=created_at, reason="in_retain_window")
+            )
             continue
         if exp_id in preserved_walk_forward_exp_ids:
             keep.append(
-                RetainedExperiment(exp_id=exp_id, created_at=created_at, reason="walk_forward_lineage")
+                RetainedExperiment(
+                    exp_id=exp_id, created_at=created_at, reason="walk_forward_lineage"
+                )
             )
             continue
         delete.append(
-            RetainedExperiment(exp_id=exp_id, created_at=created_at, reason="outside_retention_window")
+            RetainedExperiment(
+                exp_id=exp_id, created_at=created_at, reason="outside_retention_window"
+            )
         )
 
     return keep, delete

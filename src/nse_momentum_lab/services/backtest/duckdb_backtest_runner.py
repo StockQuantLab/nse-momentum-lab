@@ -39,6 +39,7 @@ from nse_momentum_lab.db.market_db import (
     get_backtest_db,
     get_market_db,
 )
+from nse_momentum_lab.services.backtest.cost_model import CostModel, cost_model_from_name
 from nse_momentum_lab.services.backtest.engine import ExitReason, PositionSide
 from nse_momentum_lab.services.backtest.persistence import (
     BacktestArtifactPublisher,
@@ -131,6 +132,9 @@ class BacktestParams:
     risk_per_trade_pct: float = 0.01
     portfolio_value: float = 1_000_000.0
     fees_per_trade: float = 0.001
+    # CPR-style execution costs. Keep the default aligned with Zerodha intraday costs.
+    commission_model: str = "zerodha"
+    slippage_bps: float = 0.0
     trail_activation_pct: float = 0.08
     trail_stop_pct: float = 0.02
     min_hold_days: int = 3
@@ -234,6 +238,10 @@ class BacktestParams:
             serializable_fields["short_post_day3_buffer_pct"] = 0.0
         return compute_short_hash(serializable_fields, length=16)
 
+    def get_cost_model(self) -> CostModel:
+        """Resolve the configured transaction cost model."""
+        return cost_model_from_name(self.commission_model, slippage_bps=self.slippage_bps)
+
     def to_vbt_config(
         self,
         direction: PositionSide = PositionSide.LONG,
@@ -263,7 +271,10 @@ class BacktestParams:
             direction=direction,
             risk_per_trade_pct=self.risk_per_trade_pct,
             default_portfolio_value=self.portfolio_value,
-            fees_per_trade=self.fees_per_trade,
+            fees_per_trade=0.0,
+            slippage_large_bps=0.0,
+            slippage_mid_bps=0.0,
+            slippage_small_bps=0.0,
             trail_activation_pct=trail_activation_pct,
             trail_stop_pct=self.trail_stop_pct,
             min_hold_days=self.min_hold_days,
@@ -1649,8 +1660,8 @@ class DuckDBBacktestRunner:
                 signal_bar.update(1)
 
         result = None
-        vectorbt_return_pct = 0.0
-        vectorbt_max_dd_pct = 0.0
+        cost_model = params.get_cost_model()
+        trade_direction = "SHORT" if is_short else "LONG"
         if vbt_signals:
             strategy_label = self._active_strategy.label_for_year(year)
             direction = self._active_strategy.direction
@@ -1668,21 +1679,49 @@ class DuckDBBacktestRunner:
                 price_data=price_data,
                 value_traded_inr=value_traded_inr,
             )
-            vectorbt_return_pct = result.total_return * 100
-            vectorbt_max_dd_pct = result.max_drawdown * 100
 
-        # Build trade dicts — direction-aware PnL percentage
+        # Build trade dicts — direction-aware PnL percentage.
+        # Costs are applied here using the CPR/Zerodha model so the saved PnL is net of fees.
         trades_out: list[dict] = []
         for t in result.trades if result is not None else []:
             hd = (t.exit_date - t.entry_date).days if t.exit_date and t.entry_date else 0
-            pct = 0.0
-            if t.entry_price and t.exit_price and t.entry_price > 0:
-                if is_short:
-                    pct = ((t.entry_price - t.exit_price) / t.entry_price) * 100
-                else:
-                    pct = ((t.exit_price - t.entry_price) / t.entry_price) * 100
-
             real_symbol = id_to_symbol.get(t.symbol_id, t.symbol)
+            qty = int(t.qty or 0)
+            entry_price = float(t.entry_price or 0.0)
+            exit_price = float(t.exit_price or 0.0)
+            position_value = round(entry_price * qty, 2)
+            if qty > 0 and entry_price > 0 and exit_price > 0:
+                gross_pnl = (
+                    round((entry_price - exit_price) * qty, 2)
+                    if is_short
+                    else round((exit_price - entry_price) * qty, 2)
+                )
+            else:
+                gross_pnl = 0.0
+            trade_cost = cost_model.round_trip_cost(
+                entry_price=entry_price,
+                exit_price=exit_price,
+                qty=qty,
+                direction=trade_direction,
+            )
+            net_pnl = round(gross_pnl - trade_cost, 2)
+            gross_pnl_pct = round((gross_pnl / position_value) * 100, 4) if position_value else 0.0
+            net_pnl_pct = round((net_pnl / position_value) * 100, 4) if position_value else 0.0
+            risk_per_share = (
+                abs(entry_price - float(t.initial_stop))
+                if t.initial_stop is not None and entry_price > 0
+                else 0.0
+            )
+            gross_r_multiple = (
+                round(gross_pnl / (risk_per_share * qty), 4)
+                if risk_per_share > 0 and qty > 0
+                else 0.0
+            )
+            net_r_multiple = (
+                round(net_pnl / (risk_per_share * qty), 4)
+                if risk_per_share > 0 and qty > 0
+                else 0.0
+            )
 
             # Find gap_pct and filters_passed for this trade
             context = signal_context.get((t.symbol_id, t.entry_date), {})
@@ -1700,10 +1739,16 @@ class DuckDBBacktestRunner:
                     "entry_date": t.entry_date,
                     "exit_date": t.exit_date,
                     "symbol": real_symbol,
-                    "entry_price": t.entry_price,
-                    "exit_price": t.exit_price,
-                    "pnl_pct": pct,
-                    "r_multiple": t.pnl_r if t.pnl_r else 0.0,
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
+                    "position_value": position_value,
+                    "gross_pnl": gross_pnl,
+                    "net_pnl": net_pnl,
+                    "total_costs": trade_cost,
+                    "gross_pnl_pct": gross_pnl_pct,
+                    "pnl_pct": net_pnl_pct,
+                    "r_multiple": net_r_multiple,
+                    "gross_r_multiple": gross_r_multiple,
                     "exit_reason": t.exit_reason.value if t.exit_reason else "unknown",
                     "holding_days": hd,
                     "gap_pct": gap_pct,
@@ -1711,13 +1756,14 @@ class DuckDBBacktestRunner:
                     "entry_time": t.entry_time or context.get("entry_time"),
                     "exit_time": exit_time,
                     "entry_mode": t.entry_mode,
-                    "qty": t.qty,
+                    "qty": qty,
                     "initial_stop": t.initial_stop,
-                    "fees": t.fees,
-                    "slippage_bps": t.slippage_bps,
+                    "fees": trade_cost,
+                    "slippage_bps": cost_model.slippage_bps,
                     "mfe_r": t.mfe_r,
                     "mae_r": t.mae_r,
                     "exit_rule_version": t.exit_rule_version,
+                    "commission_model": params.commission_model,
                     "selection_score": context.get("selection_score"),
                     "selection_rank": context.get("selection_rank"),
                     "reason_json": json.dumps(
@@ -1735,6 +1781,14 @@ class DuckDBBacktestRunner:
                     "timeline_version": "mixed_resolution_v1",
                 }
             )
+
+        trades_out.sort(
+            key=lambda t: (
+                t["entry_date"],
+                t.get("entry_time") or time.max,
+                str(t["symbol"]),
+            )
+        )
 
         executed_by_signal: dict[tuple[str, date], dict] = {}
         for trade in trades_out:
@@ -1793,10 +1847,12 @@ class DuckDBBacktestRunner:
                 execution_diagnostics,
             )
 
-        total_return_pct = vectorbt_return_pct
+        portfolio_value = float(params.portfolio_value or 0.0)
+        total_net_pnl = sum(float(t.get("net_pnl", 0.0) or 0.0) for t in trades_out)
+        total_return_pct = (total_net_pnl / portfolio_value * 100) if portfolio_value > 0 else 0.0
 
-        wins = sum(1 for t in trades_out if float(t.get("pnl_pct", 0.0)) > 0)
-        losses = sum(1 for t in trades_out if float(t.get("pnl_pct", 0.0)) < 0)
+        wins = sum(1 for t in trades_out if float(t.get("net_pnl", 0.0)) > 0)
+        losses = sum(1 for t in trades_out if float(t.get("net_pnl", 0.0)) < 0)
         total_trades = len(trades_out)
         win_rate_pct = (wins / total_trades * 100) if total_trades else 0.0
 
@@ -1810,14 +1866,22 @@ class DuckDBBacktestRunner:
             exit_reasons[reason] = exit_reasons.get(reason, 0) + 1
             hd = int(t.get("holding_days", 0) or 0)
             holding_days.append(hd)
-            pnl_pct = float(t.get("pnl_pct", 0.0) or 0.0)
-            if pnl_pct > 0:
-                total_gains += pnl_pct
-            elif pnl_pct < 0:
-                total_losses_val += abs(pnl_pct)
+            net_pnl = float(t.get("net_pnl", 0.0) or 0.0)
+            if net_pnl > 0:
+                total_gains += net_pnl
+            elif net_pnl < 0:
+                total_losses_val += abs(net_pnl)
             r_values.append(float(t.get("r_multiple", 0.0) or 0.0))
 
         profit_factor = total_gains / total_losses_val if total_losses_val > 0 else 0.0
+        if portfolio_value > 0 and trades_out:
+            net_equity_curve = np.cumsum([float(t.get("net_pnl", 0.0) or 0.0) for t in trades_out])
+            net_equity_curve = net_equity_curve + portfolio_value
+            running_peak = np.maximum.accumulate(net_equity_curve)
+            drawdown_pct = ((net_equity_curve - running_peak) / portfolio_value) * 100
+            max_dd_pct = abs(float(drawdown_pct.min())) if len(drawdown_pct) else 0.0
+        else:
+            max_dd_pct = 0.0
 
         stats = {
             "year": year,
@@ -1828,7 +1892,7 @@ class DuckDBBacktestRunner:
             "return_pct": total_return_pct,
             "win_rate_pct": win_rate_pct,
             "avg_r": float(np.mean(r_values)) if r_values else 0.0,
-            "max_dd_pct": vectorbt_max_dd_pct,
+            "max_dd_pct": max_dd_pct,
             "profit_factor": profit_factor,
             "avg_holding_days": float(np.mean(holding_days)) if holding_days else 0.0,
             "exit_reasons": exit_reasons,
@@ -2142,8 +2206,16 @@ class DuckDBBacktestRunner:
         max_dd = max((s["max_dd_pct"] for s in yearly_results.values()), default=0)
 
         # Overall profit factor
-        total_gains = sum(t["pnl_pct"] for t in all_trades if t["pnl_pct"] > 0)
-        total_losses = sum(abs(t["pnl_pct"]) for t in all_trades if t["pnl_pct"] < 0)
+        total_gains = sum(
+            float(t.get("net_pnl", 0.0) or 0.0)
+            for t in all_trades
+            if float(t.get("net_pnl", 0.0) or 0.0) > 0
+        )
+        total_losses = sum(
+            abs(float(t.get("net_pnl", 0.0) or 0.0))
+            for t in all_trades
+            if float(t.get("net_pnl", 0.0) or 0.0) < 0
+        )
         pf = total_gains / total_losses if total_losses else 0
 
         self.results_db.update_experiment_metrics(
@@ -2168,12 +2240,19 @@ class DuckDBBacktestRunner:
                     "symbol": pl.Utf8,
                     "entry_price": pl.Float64,
                     "exit_price": pl.Float64,
+                    "position_value": pl.Float64,
+                    "gross_pnl": pl.Float64,
+                    "net_pnl": pl.Float64,
+                    "total_costs": pl.Float64,
                     "pnl_pct": pl.Float64,
+                    "gross_pnl_pct": pl.Float64,
                     "r_multiple": pl.Float64,
+                    "gross_r_multiple": pl.Float64,
                     "exit_reason": pl.Utf8,
                     "holding_days": pl.Float64,
                     "gap_pct": pl.Float64,
                     "filters_passed": pl.Int64,
+                    "commission_model": pl.Utf8,
                 }
             )
         trades_df = pl.DataFrame(all_trades)
@@ -2209,7 +2288,7 @@ class DuckDBBacktestRunner:
         return pl.DataFrame(rows)
 
     @staticmethod
-    def _to_equity_df(trades_df: pl.DataFrame) -> pl.DataFrame:
+    def _to_equity_df(trades_df: pl.DataFrame, *, portfolio_value: float) -> pl.DataFrame:
         if trades_df.is_empty() or "pnl_pct" not in trades_df.columns:
             return pl.DataFrame(
                 schema={
@@ -2221,11 +2300,26 @@ class DuckDBBacktestRunner:
                 }
             )
 
-        equity = trades_df.sort("entry_date", nulls_last=True).with_columns(
-            pl.col("pnl_pct").cast(pl.Float64, strict=False).fill_null(0.0).alias("pnl_pct"),
-            pl.col("pnl_pct").cum_sum().alias("cumulative_return_pct"),
-            pl.col("cumulative_return_pct").cum_max().alias("running_peak_pct"),
-            (pl.col("cumulative_return_pct") - pl.col("running_peak_pct")).alias("drawdown_pct"),
+        equity = trades_df.sort("entry_date", nulls_last=True)
+        if "net_pnl" in equity.columns and portfolio_value > 0:
+            equity = equity.with_columns(
+                (
+                    pl.col("net_pnl").cast(pl.Float64, strict=False).fill_null(0.0)
+                    / portfolio_value
+                    * 100
+                ).alias("pnl_pct")
+            )
+        else:
+            equity = equity.with_columns(
+                pl.col("pnl_pct").cast(pl.Float64, strict=False).fill_null(0.0).alias("pnl_pct")
+            )
+
+        equity = equity.with_columns(pl.col("pnl_pct").cum_sum().alias("cumulative_return_pct"))
+        equity = equity.with_columns(
+            pl.col("cumulative_return_pct").cum_max().alias("running_peak_pct")
+        )
+        equity = equity.with_columns(
+            (pl.col("cumulative_return_pct") - pl.col("running_peak_pct")).alias("drawdown_pct")
         )
         return equity.select(
             ["entry_date", "symbol", "pnl_pct", "cumulative_return_pct", "drawdown_pct"]
@@ -2260,7 +2354,7 @@ class DuckDBBacktestRunner:
         publisher = BacktestArtifactPublisher()
         trades_df = self._to_trades_df(all_trades)
         yearly_df = self._to_yearly_df(yearly_results)
-        equity_df = self._to_equity_df(trades_df)
+        equity_df = self._to_equity_df(trades_df, portfolio_value=float(params.portfolio_value))
         summary = {
             "exp_id": exp_id,
             "strategy_name": strategy_name,

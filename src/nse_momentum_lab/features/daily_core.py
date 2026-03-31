@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from datetime import date, timedelta
 
+from nse_momentum_lab.features.progress import configure_duckdb_for_feature_build
 from nse_momentum_lab.features.registry import (
     FeatureDefinition,
     FeatureDependency,
@@ -389,11 +390,88 @@ def _build_feat_daily_core_incremental(
     return n
 
 
+def _build_feat_daily_core_symbols(
+    con,
+    symbols: list[str],
+    dataset_hash: str,
+) -> int:
+    """UPSERT feat_daily_core for specific symbols only.
+
+    Filters v_daily to only the listed symbols, recomputes all features from
+    their full history, then deletes + re-inserts their rows.  Window functions
+    are PARTITION BY symbol so no cross-symbol contamination occurs.
+    """
+    import time as _time
+
+    logger.info("feat_daily_core: symbol-level upsert for %d symbols", len(symbols))
+    filter_table = "_fdc_sym_filter"
+    source_view = "_fdc_sym_src"
+    delta_table = "_fdc_sym_delta"
+
+    logger.info("  Preparing source views...")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {filter_table} (symbol VARCHAR)")
+    if symbols:
+        phs = ",".join(["(?)"] * len(symbols))
+        con.execute(f"INSERT INTO {filter_table} VALUES {phs}", symbols)
+
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW {source_view} AS "
+        f"SELECT * FROM v_daily WHERE symbol IN (SELECT symbol FROM {filter_table})"
+    )
+
+    table_exists = True
+    try:
+        con.execute("SELECT 1 FROM feat_daily_core LIMIT 1").fetchone()
+    except Exception:
+        table_exists = False
+
+    try:
+        logger.info("  Computing daily features (window functions)...")
+        t0 = _time.monotonic()
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+        con.execute(f"CREATE TEMP TABLE {delta_table} AS {_daily_core_sql_for_source(source_view)}")
+        logger.info("  SQL complete in %.1fs", _time.monotonic() - t0)
+
+        if table_exists:
+            del_phs = ",".join(["?"] * len(symbols))
+            con.execute(f"DELETE FROM feat_daily_core WHERE symbol IN ({del_phs})", symbols)
+            con.execute(f"INSERT INTO feat_daily_core SELECT * FROM {delta_table}")
+        else:
+            con.execute(f"CREATE TABLE feat_daily_core AS SELECT * FROM {delta_table}")
+            con.execute(
+                "CREATE INDEX idx_feat_daily_core_symbol_date ON feat_daily_core(symbol, trading_date)"
+            )
+            con.execute(
+                "CREATE INDEX idx_feat_daily_core_close_pos_in_range ON feat_daily_core(close_pos_in_range)"
+            )
+            con.execute(
+                "CREATE INDEX idx_feat_daily_core_vol_dryup_ratio ON feat_daily_core(vol_dryup_ratio)"
+            )
+    finally:
+        con.execute(f"DROP VIEW IF EXISTS {source_view}")
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+        con.execute(f"DROP TABLE IF EXISTS {filter_table}")
+
+    row = con.execute("SELECT COUNT(*) FROM feat_daily_core").fetchone()
+    n = int(row[0]) if row and row[0] is not None else 0
+    con.execute(
+        """
+        INSERT OR REPLACE INTO bt_materialization_state
+        (table_name, dataset_hash, query_version, row_count, updated_at)
+        VALUES (?, ?, ?, ?, current_timestamp)
+        """,
+        ["feat_daily_core", dataset_hash, FEAT_DAILY_CORE_VERSION, n],
+    )
+    logger.info("feat_daily_core symbol-level refresh: %d symbols → %d total rows", len(symbols), n)
+    return n
+
+
 def build_feat_daily_core(
     con,  # DuckDBPyConnection
     force: bool = False,
     dataset_hash: str | None = None,
     since_date: date | None = None,
+    symbols: list[str] | None = None,
 ) -> int:
     """
     Build the feat_daily_core materialized table.
@@ -402,11 +480,19 @@ def build_feat_daily_core(
         con: DuckDB connection
         force: Force rebuild even if up-to-date
         dataset_hash: Hash of input dataset for incremental detection
+        since_date: Incremental rebuild from this date forward
+        symbols: If given, UPSERT only these symbols (overrides since_date/force)
 
     Returns:
         Number of rows in the built table
     """
+    configure_duckdb_for_feature_build(con)
+
     if dataset_hash is None:
+        import hashlib
+        import json
+
+        logger.info("Hashing v_daily source data...")
         snapshot_row = con.execute("""
             SELECT
                 COUNT(*)::BIGINT AS rows,
@@ -415,9 +501,6 @@ def build_feat_daily_core(
                 MAX(date)::VARCHAR AS max_date
             FROM v_daily
         """).fetchone()
-        import hashlib
-        import json
-
         snapshot = {
             "rows": int(snapshot_row[0]) if snapshot_row[0] else 0,
             "symbols": int(snapshot_row[1]) if snapshot_row[1] else 0,
@@ -427,6 +510,21 @@ def build_feat_daily_core(
         dataset_hash = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()[
             :16
         ]
+        logger.info(
+            "  v_daily: %s symbols, %s rows (%s to %s) hash=%s",
+            f"{snapshot['symbols']:,}",
+            f"{snapshot['rows']:,}",
+            snapshot["min_date"],
+            snapshot["max_date"],
+            dataset_hash,
+        )
+
+    if symbols is not None:
+        if not symbols:
+            logger.info("build_feat_daily_core: empty symbols list, nothing to do")
+            row = con.execute("SELECT COUNT(*) FROM feat_daily_core").fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        return _build_feat_daily_core_symbols(con, symbols=symbols, dataset_hash=dataset_hash)
 
     # Incremental path for short catch-up windows.
     if since_date is not None and not force:
@@ -453,11 +551,19 @@ def build_feat_daily_core(
             pass  # Table doesn't exist yet
 
     # Drop and rebuild
+    import time as _time
+
     logger.info("Building feat_daily_core materialized table...")
     con.execute("DROP TABLE IF EXISTS feat_daily_core")
+
+    logger.info("  Phase 1/3: Executing CREATE TABLE (window functions over daily data)...")
+    t0 = _time.monotonic()
     con.execute(FEAT_DAILY_CORE_SQL)
+    logger.info("  Phase 1/3: SQL complete in %.1fs", _time.monotonic() - t0)
 
     # Create indexes for common candidate queries
+    logger.info("  Phase 2/3: Creating indexes...")
+    t0 = _time.monotonic()
     con.execute(
         "CREATE INDEX idx_feat_daily_core_symbol_date ON feat_daily_core(symbol, trading_date)"
     )
@@ -467,10 +573,12 @@ def build_feat_daily_core(
     con.execute(
         "CREATE INDEX idx_feat_daily_core_vol_dryup_ratio ON feat_daily_core(vol_dryup_ratio)"
     )
+    logger.info("  Phase 2/3: Indexes created in %.1fs", _time.monotonic() - t0)
 
     row = con.execute("SELECT COUNT(*) FROM feat_daily_core").fetchone()
     n = int(row[0]) if row and row[0] is not None else 0
 
+    logger.info("  Phase 3/3: Updating materialization state...")
     con.execute(
         """
         INSERT OR REPLACE INTO bt_materialization_state

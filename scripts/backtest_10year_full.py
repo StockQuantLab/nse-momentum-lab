@@ -26,6 +26,7 @@ from nse_momentum_lab.services.backtest.vectorbt_engine import (
 @dataclass
 class YearlyStats:
     """Statistics for a single year."""
+
     year: int
     total_signals: int = 0
     filtered_signals: int = 0
@@ -165,21 +166,27 @@ def run_yearly_backtest(
         df_pl = pl.from_pandas(df)
 
         # Apply filters
-        df_pl = df_pl.with_columns([
-            pl.col("filter_h").fill_null(False),
-            pl.col("filter_n").fill_null(False),
-            pl.col("filter_y").fill_null(True),
-            pl.col("filter_c").fill_null(False),
-            pl.col("filter_l").fill_null(False),
-        ])
+        df_pl = df_pl.with_columns(
+            [
+                pl.col("filter_h").fill_null(False),
+                pl.col("filter_n").fill_null(False),
+                pl.col("filter_y").fill_null(True),
+                pl.col("filter_c").fill_null(False),
+                pl.col("filter_l").fill_null(False),
+            ]
+        )
 
-        df_pl = df_pl.with_columns([
-            (pl.col("filter_h").cast(int) +
-             pl.col("filter_n").cast(int) +
-             pl.col("filter_y").cast(int) +
-             pl.col("filter_c").cast(int) +
-             pl.col("filter_l").cast(int)).alias("filters_passed")
-        ])
+        df_pl = df_pl.with_columns(
+            [
+                (
+                    pl.col("filter_h").cast(int)
+                    + pl.col("filter_n").cast(int)
+                    + pl.col("filter_y").cast(int)
+                    + pl.col("filter_c").cast(int)
+                    + pl.col("filter_l").cast(int)
+                ).alias("filters_passed")
+            ]
+        )
 
         df_filtered = df_pl.filter(pl.col("filters_passed") >= min_filters)
 
@@ -221,7 +228,9 @@ def run_yearly_backtest(
                         "low_adj": float(row["low"]),
                     }
 
-                vol_df = db.get_features_range([symbol], start_date.isoformat(), end_date.isoformat())
+                vol_df = db.get_features_range(
+                    [symbol], start_date.isoformat(), end_date.isoformat()
+                )
                 if not vol_df.is_empty():
                     avg_vol = vol_df.select(pl.col("dollar_vol_20").drop_nulls().mean()).item()
                     value_traded_inr[symbol_id] = avg_vol if avg_vol else 50_000_000.0
@@ -242,20 +251,20 @@ def run_yearly_backtest(
             if isinstance(sig_date, datetime):
                 sig_date = sig_date.date()
 
-            vbt_signals.append((
-                sig_date,
-                symbol_id,
-                symbol,
-                row["low"],
-                {"gap_pct": row["gap_pct"], "atr": row["atr_20"] if row["atr_20"] else 0.0}
-            ))
+            vbt_signals.append(
+                (
+                    sig_date,
+                    symbol_id,
+                    symbol,
+                    row["low"],
+                    {"gap_pct": row["gap_pct"], "atr": row["atr_20"] if row["atr_20"] else 0.0},
+                )
+            )
 
         if not vbt_signals:
             print("  No valid signals")
             yearly_results[year] = YearlyStats(
-                year=year,
-                total_signals=len(df),
-                filtered_signals=len(df_filtered)
+                year=year, total_signals=len(df), filtered_signals=len(df_filtered)
             )
             continue
 
@@ -315,18 +324,20 @@ def run_yearly_backtest(
             if t.exit_date and t.entry_date:
                 holding_days = (t.exit_date - t.entry_date).days
 
-            all_trades.append({
-                "year": year,
-                "entry_date": t.entry_date,
-                "exit_date": t.exit_date,
-                "symbol": t.symbol,
-                "entry_price": t.entry_price,
-                "exit_price": t.exit_price,
-                "pnl_pct": (t.pnl * 100) if t.pnl else 0.0,
-                "r_multiple": t.pnl_r if t.pnl_r else 0.0,
-                "exit_reason": t.exit_reason.value if t.exit_reason else "unknown",
-                "holding_days": holding_days,
-            })
+            all_trades.append(
+                {
+                    "year": year,
+                    "entry_date": t.entry_date,
+                    "exit_date": t.exit_date,
+                    "symbol": t.symbol,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "pnl_pct": (t.pnl * 100) if t.pnl else 0.0,
+                    "r_multiple": t.pnl_r if t.pnl_r else 0.0,
+                    "exit_reason": t.exit_reason.value if t.exit_reason else "unknown",
+                    "holding_days": holding_days,
+                }
+            )
 
         print(f"  Trades: {len(result.trades)}")
         print(f"  Return: {stats.total_return_pct:+.2f}%")
@@ -343,7 +354,8 @@ def run_10year_backtest():
 
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     print("\n" + "=" * 80)
     print("2LYNCH BREAKOUT - 10 YEAR COMPREHENSIVE BACKTEST")
@@ -381,7 +393,9 @@ def run_10year_backtest():
     print("YEARLY BREAKDOWN - Rs.10+, 4/6 Filters")
     print(f"{'=' * 80}")
 
-    print(f"\n{'Year':<6} {'Signals':>8} {'Trades':>7} {'Win%':>6} {'Return%':>9} {'AvgR':>6} {'DD%':>6} {'WeakFT%':>7}")
+    print(
+        f"\n{'Year':<6} {'Signals':>8} {'Trades':>7} {'Win%':>6} {'Return%':>9} {'AvgR':>6} {'DD%':>6} {'WeakFT%':>7}"
+    )
     print(f"{'-' * 70}")
 
     total_signals = 0
@@ -407,17 +421,21 @@ def run_10year_backtest():
             count_r += 1
         max_dd = max(max_dd, stats.max_drawdown_pct)
 
-        print(f"{year:<6} {stats.filtered_signals:>8} {stats.trades:>7} "
-              f"{stats.win_rate_pct:>5.1f}% {stats.total_return_pct:>8.2f}% "
-              f"{stats.avg_r_multiple:>5.2f}R {stats.max_drawdown_pct:>5.1f}% "
-              f"{stats.weak_follow_through_pct:>6.1f}%")
+        print(
+            f"{year:<6} {stats.filtered_signals:>8} {stats.trades:>7} "
+            f"{stats.win_rate_pct:>5.1f}% {stats.total_return_pct:>8.2f}% "
+            f"{stats.avg_r_multiple:>5.2f}R {stats.max_drawdown_pct:>5.1f}% "
+            f"{stats.weak_follow_through_pct:>6.1f}%"
+        )
 
     print(f"{'-' * 70}")
     overall_win_rate = (total_wins / total_trades * 100) if total_trades > 0 else 0
     avg_r = (total_r / count_r) if count_r > 0 else 0
-    print(f"{'TOTAL':<6} {total_signals:>8} {total_trades:>7} "
-          f"{overall_win_rate:>5.1f}% {total_return:>8.2f}% "
-          f"{avg_r:>5.2f}R {max_dd:>5.1f}%")
+    print(
+        f"{'TOTAL':<6} {total_signals:>8} {total_trades:>7} "
+        f"{overall_win_rate:>5.1f}% {total_return:>8.2f}% "
+        f"{avg_r:>5.2f}R {max_dd:>5.1f}%"
+    )
 
     # Trade analysis
     print(f"\n{'=' * 80}")
@@ -432,24 +450,33 @@ def run_10year_backtest():
         # Best trades
         best_trades = trades_df.sort("pnl_pct", descending=True).head(10)
         print("\nTop 10 Winners:")
-        print(f"{'Date':<12} {'Symbol':<10} {'Entry':>8} {'Exit':>8} {'PnL%':>7} {'R':>5} {'Days':>5}")
+        print(
+            f"{'Date':<12} {'Symbol':<10} {'Entry':>8} {'Exit':>8} {'PnL%':>7} {'R':>5} {'Days':>5}"
+        )
         for t in best_trades.iter_rows(named=True):
-            print(f"{t['entry_date']!s:<12} {t['symbol']:<10} {t['entry_price']:>8.2f} "
-                  f"{t['exit_price']:>8.2f} {t['pnl_pct']:>6.2f}% {t['r_multiple']:>4.1f}R {t['holding_days']:>5}")
+            print(
+                f"{t['entry_date']!s:<12} {t['symbol']:<10} {t['entry_price']:>8.2f} "
+                f"{t['exit_price']:>8.2f} {t['pnl_pct']:>6.2f}% {t['r_multiple']:>4.1f}R {t['holding_days']:>5}"
+            )
 
         # Worst trades
         worst_trades = trades_df.sort("pnl_pct").head(10)
         print("\nTop 10 Losers:")
-        print(f"{'Date':<12} {'Symbol':<10} {'Entry':>8} {'Exit':>8} {'PnL%':>7} {'R':>5} {'Days':>5}")
+        print(
+            f"{'Date':<12} {'Symbol':<10} {'Entry':>8} {'Exit':>8} {'PnL%':>7} {'R':>5} {'Days':>5}"
+        )
         for t in worst_trades.iter_rows(named=True):
-            print(f"{t['entry_date']!s:<12} {t['symbol']:<10} {t['entry_price']:>8.2f} "
-                  f"{t['exit_price']:>8.2f} {t['pnl_pct']:>6.2f}% {t['r_multiple']:>4.1f}R {t['holding_days']:>5}")
+            print(
+                f"{t['entry_date']!s:<12} {t['symbol']:<10} {t['entry_price']:>8.2f} "
+                f"{t['exit_price']:>8.2f} {t['pnl_pct']:>6.2f}% {t['r_multiple']:>4.1f}R {t['holding_days']:>5}"
+            )
 
         # Exit reason analysis
-        exit_counts = trades_df.group_by("exit_reason").agg(
-            pl.len().alias("count"),
-            pl.col("pnl_pct").mean().alias("avg_pnl")
-        ).sort("count", descending=True)
+        exit_counts = (
+            trades_df.group_by("exit_reason")
+            .agg(pl.len().alias("count"), pl.col("pnl_pct").mean().alias("avg_pnl"))
+            .sort("count", descending=True)
+        )
 
         print("\nExit Reason Analysis:")
         print(f"{'Reason':<30} {'Count':>7} {'Avg PnL%':>10}")
@@ -477,15 +504,17 @@ def run_10year_backtest():
 
     print(f"\n{'Period':<30} {'Trades':>7} {'Return%':>9} {'Win%':>6}")
     for start_y, end_y, label in bull_periods:
-        period_trades = [t for t in all_trades if start_y <= t['year'] <= end_y]
+        period_trades = [t for t in all_trades if start_y <= t["year"] <= end_y]
         if not period_trades:
             continue
 
-        period_return = sum(t['pnl_pct'] for t in period_trades)
-        period_wins = sum(1 for t in period_trades if t['pnl_pct'] > 0)
+        period_return = sum(t["pnl_pct"] for t in period_trades)
+        period_wins = sum(1 for t in period_trades if t["pnl_pct"] > 0)
         period_win_rate = period_wins / len(period_trades) * 100
 
-        print(f"{label:<30} {len(period_trades):>7} {period_return:>8.2f}% {period_win_rate:>5.1f}%")
+        print(
+            f"{label:<30} {len(period_trades):>7} {period_return:>8.2f}% {period_win_rate:>5.1f}%"
+        )
 
     print(f"\n{'=' * 80}")
     print("BACKTEST COMPLETE")

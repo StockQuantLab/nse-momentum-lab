@@ -7,213 +7,61 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import duckdb
+import polars as pl
 import pytest
 
 from nse_momentum_lab.cli.paper import (
-    _build_walk_forward_runtime_coverage_report,
-    _check_daily_walk_forward_gate,
-    _check_walk_forward_gate,
-    _evaluate_walk_forward,
+    _session_to_json,
     _snapshot_hash,
-    _summarize_folds,
-    _validate_walk_forward_runtime_coverage,
     build_parser,
     main,
-)
-from nse_momentum_lab.db.market_db import FEAT_DAILY_QUERY_VERSION, MarketDataDB
-from nse_momentum_lab.features import (
-    FEAT_2LYNCH_DERIVED_VERSION,
-    FEAT_DAILY_CORE_VERSION,
-    FEAT_INTRADAY_CORE_VERSION,
 )
 from nse_momentum_lab.services.backtest.duckdb_backtest_runner import BacktestParams
 from nse_momentum_lab.services.paper.runtime import PaperRuntimePlan
 
 
-def _make_walk_forward_runtime_db(
+def _runtime_symbols(
     *,
-    daily_dates: list[date],
-    five_min_dates: list[date],
-    feat_daily_core_dates: list[date],
-    feat_2lynch_derived_dates: list[date],
-    feat_intraday_core_dates: list[date],
-) -> MarketDataDB:
-    db = MarketDataDB.__new__(MarketDataDB)
-    db.con = duckdb.connect(":memory:")
-    db._data_source = "local"
-    db._daily_glob = "daily"
-    db._five_min_glob = "five_min"
-    db._has_daily = True
-    db._has_5min = True
-    db.lake = SimpleNamespace(
-        mode="local",
-        local_parquet_dir=None,
-        bucket="",
-        daily_prefix="",
-        five_min_prefix="",
-        endpoint=None,
-        access_key=None,
-        secret_key=None,
-        secure=False,
-    )
-    db.con.execute("CREATE TABLE v_daily(date DATE, symbol VARCHAR)")
-    db.con.execute("CREATE TABLE v_5min(date DATE, symbol VARCHAR)")
-    for trade_date in daily_dates:
-        db.con.execute("INSERT INTO v_daily VALUES (?, ?)", [trade_date, "ABC"])
-    for trade_date in five_min_dates:
-        db.con.execute("INSERT INTO v_5min VALUES (?, ?)", [trade_date, "ABC"])
+    prepare_result: dict | None = None,
+    execute_live_result: dict | None = None,
+    execute_replay_result: dict | None = None,
+):
+    class _FakeRuntimeScaffold:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
 
-    db.con.execute(
-        """
-        CREATE TABLE bt_materialization_state (
-            table_name VARCHAR PRIMARY KEY,
-            dataset_hash VARCHAR NOT NULL,
-            query_version VARCHAR NOT NULL,
-            row_count BIGINT DEFAULT 0,
-            updated_at TIMESTAMP DEFAULT current_timestamp
-        )
-        """
-    )
-
-    snapshot = db.get_dataset_snapshot()
-    daily_hash = _snapshot_hash(snapshot["daily"])  # type: ignore[arg-type]
-    five_min_hash = _snapshot_hash(snapshot["five_min"])  # type: ignore[arg-type]
-
-    def seed_feature_table(
-        table_name: str,
-        dates: list[date],
-        *,
-        dataset_hash: str,
-        query_version: str,
-    ) -> None:
-        db.con.execute(f"CREATE TABLE {table_name}(trading_date DATE)")
-        for trade_date in dates:
-            db.con.execute(f"INSERT INTO {table_name} VALUES (?)", [trade_date])
-        db.con.execute(
-            """
-            INSERT INTO bt_materialization_state (table_name, dataset_hash, query_version, row_count)
-            VALUES (?, ?, ?, ?)
-            """,
-            [table_name, dataset_hash, query_version, len(dates)],
-        )
-
-    seed_feature_table(
-        "feat_daily_core",
-        feat_daily_core_dates,
-        dataset_hash=daily_hash,
-        query_version=FEAT_DAILY_CORE_VERSION,
-    )
-    seed_feature_table(
-        "feat_2lynch_derived",
-        feat_2lynch_derived_dates,
-        dataset_hash=daily_hash,
-        query_version=FEAT_2LYNCH_DERIVED_VERSION,
-    )
-    seed_feature_table(
-        "feat_intraday_core",
-        feat_intraday_core_dates,
-        dataset_hash=five_min_hash,
-        query_version=FEAT_INTRADAY_CORE_VERSION,
-    )
-    return db
+    _FakeRuntimeScaffold.prepare_session = AsyncMock(return_value=prepare_result or {})
+    _FakeRuntimeScaffold.execute_live_cycle = AsyncMock(return_value=execute_live_result)
+    _FakeRuntimeScaffold.execute_replay_cycle = AsyncMock(return_value=execute_replay_result)
+    return (MagicMock(name="PaperRuntimePlan"), _FakeRuntimeScaffold, lambda payload: payload)
 
 
 class TestPaperCLI:
     def test_build_parser_has_commands(self) -> None:
         parser = build_parser()
         commands = parser._subparsers._group_actions[0].choices.keys()  # type: ignore[attr-defined]
-        assert "walk-forward" in commands
-        assert "walk-forward-cleanup" in commands
-        assert "cleanup-walk-forward" in commands
         assert "daily-prepare" in commands
+        assert "daily-sim" in commands
         assert "daily-replay" in commands
         assert "daily-live" in commands
+        assert "walk-forward" not in commands
+        assert "walk-forward-cleanup" not in commands
+        assert "cleanup-walk-forward" not in commands
 
-    def test_walk_forward_cleanup_parser_supports_run_ids(self) -> None:
-        parser = build_parser()
-        args = parser.parse_args(
-            [
-                "walk-forward-cleanup",
-                "--wf-run-id",
-                "wf-1",
-                "--run-id",
-                "exp-1",
-                "--apply",
-            ]
-        )
-
-        assert args.wf_run_ids == ["wf-1"]
-        assert args.run_ids == ["exp-1"]
-        assert args.apply is True
-
-    def test_build_parser_validates_positive_days(self) -> None:
+    def test_prepare_parser_rejects_walk_forward_mode(self) -> None:
         parser = build_parser()
         try:
             parser.parse_args(
                 [
-                    "walk-forward",
-                    "--start-date",
-                    "2026-03-01",
-                    "--end-date",
-                    "2026-03-09",
-                    "--train-days",
-                    "-1",
+                    "prepare",
+                    "--mode",
+                    "walk_forward",
                 ]
             )
         except SystemExit as exc:
             assert exc.code == 2
         else:
-            raise AssertionError("Expected parser failure for negative --train-days")
-
-    def test_main_rejects_walk_forward_end_before_start(self) -> None:
-        with patch(
-            "sys.argv",
-            [
-                "nseml-paper",
-                "walk-forward",
-                "--start-date",
-                "2026-03-09",
-                "--end-date",
-                "2026-03-01",
-            ],
-        ):
-            try:
-                main()
-            except SystemExit as exc:
-                assert exc.code == 2
-            else:
-                raise AssertionError("Expected parser failure for end date before start date")
-
-    def test_walk_forward_decision_requires_performance(self) -> None:
-        passing_summary = _summarize_folds(
-            [
-                {
-                    "status": "completed",
-                    "total_return_pct": 1.5,
-                    "max_drawdown_pct": 4.0,
-                    "total_trades": 10,
-                },
-                {
-                    "status": "completed",
-                    "total_return_pct": 2.0,
-                    "max_drawdown_pct": 3.5,
-                    "total_trades": 12,
-                },
-            ]
-        )
-        failing_summary = _summarize_folds(
-            [
-                {
-                    "status": "completed",
-                    "total_return_pct": -1.0,
-                    "max_drawdown_pct": 20.0,
-                    "total_trades": 10,
-                }
-            ]
-        )
-
-        assert _evaluate_walk_forward(passing_summary)["status"] == "PASS"
-        assert _evaluate_walk_forward(failing_summary)["status"] == "FAIL"
+            raise AssertionError("Expected parser failure for unsupported prepare mode")
 
     @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
     @patch("nse_momentum_lab.cli.paper.create_or_update_paper_session", new_callable=AsyncMock)
@@ -241,183 +89,36 @@ class TestPaperCLI:
 
     @patch("nse_momentum_lab.cli.paper._resolve_all_local_symbols", return_value=["ABC", "XYZ"])
     def test_daily_prepare_defaults_to_all_symbols(self, mock_symbols: MagicMock) -> None:
-        with patch(
-            "nse_momentum_lab.cli.paper._build_daily_prepare_report",
-            return_value={"coverage_ready": True, "trade_date": "2026-03-27"},
-        ), patch("sys.argv", ["nseml-paper", "daily-prepare", "--mode", "live"]):
+        with (
+            patch(
+                "nse_momentum_lab.cli.paper._build_daily_prepare_report",
+                return_value={"coverage_ready": True, "trade_date": "2026-03-27"},
+            ),
+            patch("sys.argv", ["nseml-paper", "daily-prepare", "--mode", "live"]),
+        ):
             main()
 
         mock_symbols.assert_called_once()
 
-    def test_walk_forward_cleanup_command_dry_run_does_not_delete(self) -> None:
-        mock_session = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_plan = AsyncMock(
-            return_value={
-                "requested_wf_run_ids": ["wf-1"],
-                "requested_run_ids": [],
-                "missing_wf_run_ids": [],
-                "missing_run_ids": [],
-                "postgres": {
-                    "sessions": [
-                        {
-                            "session": {"session_id": "wf-1"},
-                            "folds": [{"fold_id": 1}],
-                            "fold_count": 1,
-                        }
-                    ],
-                    "session_count": 1,
-                    "fold_row_count": 1,
-                },
-                "duckdb": {
-                    "experiments": [
-                        {
-                            "exp_id": "exp-1",
-                            "wf_run_id": "wf-1",
-                            "trade_rows": 2,
-                            "yearly_metric_rows": 1,
-                            "diagnostic_rows": 1,
-                            "experiment_rows": 1,
-                            "total_rows": 5,
-                        }
-                    ],
-                    "run_ids_to_delete": ["exp-1"],
-                    "experiment_count": 1,
-                    "row_count": 5,
-                },
-                "summary": {
-                    "requested_wf_run_ids": 1,
-                    "requested_run_ids": 0,
-                    "postgres_sessions": 1,
-                    "postgres_fold_rows": 1,
-                    "duckdb_experiments": 1,
-                    "duckdb_rows": 5,
-                },
-            }
+    def test_session_to_json_supports_orm_like_objects(self) -> None:
+        session = SimpleNamespace(
+            session_id="paper-live",
+            status="ACTIVE",
+            _sa_instance_state=object(),
         )
-        mock_backtest_db = MagicMock()
 
-        with (
-            patch("nse_momentum_lab.cli.paper.get_sessionmaker") as mock_sm,
-            patch("nse_momentum_lab.cli.paper.get_backtest_db", return_value=mock_backtest_db),
-            patch("nse_momentum_lab.cli.paper._build_walk_forward_cleanup_plan", new=mock_plan),
-        ):
-            mock_sm.return_value.return_value = mock_context
-            with patch(
-                "sys.argv",
-                ["nseml-paper", "walk-forward-cleanup", "--wf-run-id", "wf-1"],
-            ):
-                main()
-
-        mock_plan.assert_awaited_once()
-        assert mock_session.execute.await_count == 0
-        mock_session.commit.assert_not_awaited()
-
-    def test_walk_forward_cleanup_command_apply_deletes_matching_rows(self) -> None:
-        mock_session = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_plan = AsyncMock(
-            return_value={
-                "requested_wf_run_ids": ["wf-1"],
-                "requested_run_ids": ["exp-legacy"],
-                "missing_wf_run_ids": [],
-                "missing_run_ids": [],
-                "postgres": {
-                    "sessions": [
-                        {
-                            "session": {"session_id": "wf-1"},
-                            "folds": [{"fold_id": 1}],
-                            "fold_count": 1,
-                        }
-                    ],
-                    "session_count": 1,
-                    "fold_row_count": 1,
-                },
-                "duckdb": {
-                    "experiments": [
-                        {
-                            "exp_id": "exp-1",
-                            "wf_run_id": "wf-1",
-                            "trade_rows": 2,
-                            "yearly_metric_rows": 1,
-                            "diagnostic_rows": 1,
-                            "experiment_rows": 1,
-                            "total_rows": 5,
-                        },
-                        {
-                            "exp_id": "exp-legacy",
-                            "wf_run_id": None,
-                            "trade_rows": 1,
-                            "yearly_metric_rows": 0,
-                            "diagnostic_rows": 0,
-                            "experiment_rows": 1,
-                            "total_rows": 2,
-                        },
-                    ],
-                    "run_ids_to_delete": ["exp-1", "exp-legacy"],
-                    "experiment_count": 2,
-                    "row_count": 7,
-                },
-                "summary": {
-                    "requested_wf_run_ids": 1,
-                    "requested_run_ids": 1,
-                    "postgres_sessions": 1,
-                    "postgres_fold_rows": 1,
-                    "duckdb_experiments": 2,
-                    "duckdb_rows": 7,
-                },
-            }
-        )
-        mock_backtest_db = MagicMock()
-        mock_backtest_db.experiment_exists.return_value = True
-
-        with (
-            patch("nse_momentum_lab.cli.paper.get_sessionmaker") as mock_sm,
-            patch("nse_momentum_lab.cli.paper.get_backtest_db", return_value=mock_backtest_db),
-            patch("nse_momentum_lab.cli.paper._build_walk_forward_cleanup_plan", new=mock_plan),
-        ):
-            mock_sm.return_value.return_value = mock_context
-            with patch(
-                "sys.argv",
-                [
-                    "nseml-paper",
-                    "walk-forward-cleanup",
-                    "--wf-run-id",
-                    "wf-1",
-                    "--run-id",
-                    "exp-legacy",
-                    "--apply",
-                ],
-            ):
-                main()
-
-        mock_plan.assert_awaited_once()
+        assert _session_to_json(session) == {
+            "session_id": "paper-live",
+            "status": "ACTIVE",
+        }
 
     @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper._check_walk_forward_gate", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper.KiteStreamRunner.run", new_callable=AsyncMock)
-    @patch(
-        "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.execute_live_cycle", new_callable=AsyncMock
-    )
-    @patch(
-        "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.prepare_session", new_callable=AsyncMock
-    )
-    @patch("nse_momentum_lab.cli.paper.KiteConnectClient")
     @patch("nse_momentum_lab.cli.paper.get_settings")
     @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
     def test_live_command_executes(
         self,
         mock_sm: MagicMock,
         mock_settings: MagicMock,
-        mock_kite_client_cls: MagicMock,
-        mock_prepare: AsyncMock,
-        mock_execute: AsyncMock,
-        mock_run: AsyncMock,
-        mock_gate: AsyncMock,
         mock_warn: AsyncMock,
     ) -> None:
         mock_session = AsyncMock()
@@ -431,41 +132,76 @@ class TestPaperCLI:
             kite_access_token="kite-token",
             has_kite_credentials=lambda: True,
         )
-        mock_prepare.return_value = {
-            "session": {"session_id": "paper-live"},
-            "feed_state": {"session_id": "paper-live"},
-            "signals": [],
-            "feed_plan": {},
-            "resolved_instrument_tokens": [12345],
-        }
-        mock_execute.return_value = {"session_id": "paper-live", "processed_signals": 1}
+        runtime_symbols = _runtime_symbols(
+            prepare_result={
+                "session": {"session_id": "paper-live"},
+                "feed_state": {"session_id": "paper-live"},
+                "signals": [],
+                "feed_plan": {},
+                "resolved_instrument_tokens": [12345],
+            },
+            execute_live_result={"session_id": "paper-live", "processed_signals": 1},
+        )
+        runtime_cls = runtime_symbols[1]
         mock_kite_client = MagicMock()
+        mock_kite_client_cls = MagicMock()
         mock_kite_client_cls.return_value.__enter__.return_value = mock_kite_client
         mock_kite_client_cls.return_value.__exit__.return_value = None
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock()
 
-        with patch("sys.argv", ["nseml-paper", "live", "--execute", "--run", "--symbols", "ABC"]):
+        with (
+            patch("nse_momentum_lab.cli.paper._get_paper_runtime_symbols", return_value=runtime_symbols),
+            patch(
+                "nse_momentum_lab.cli.paper._build_runtime_plan",
+                return_value=SimpleNamespace(session_id="paper-live"),
+            ),
+            patch("nse_momentum_lab.cli.paper._build_stream_runner", return_value=mock_runner),
+            patch(
+                "nse_momentum_lab.cli.paper._get_kite_connect_client_cls",
+                return_value=mock_kite_client_cls,
+            ),
+            patch("sys.argv", ["nseml-paper", "live", "--execute", "--run", "--symbols", "ABC"]),
+        ):
             main()
 
-        mock_prepare.assert_awaited_once()
-        mock_execute.assert_awaited_once()
-        mock_run.assert_awaited_once()
-        mock_gate.assert_awaited_once()
+        runtime_cls.prepare_session.assert_awaited_once()
+        runtime_cls.execute_live_cycle.assert_awaited_once()
+        mock_runner.run.assert_awaited_once()
+
+    @patch("nse_momentum_lab.cli.paper._print_fast_sim_summary")
+    @patch("nse_momentum_lab.cli.paper._resolve_daily_symbols", return_value=["ABC"])
+    def test_daily_sim_command_executes(
+        self,
+        mock_symbols: MagicMock,
+        mock_print_summary: MagicMock,
+    ) -> None:
+        mock_runner_cls = MagicMock()
+        mock_runner = MagicMock()
+        mock_runner.run.return_value = "exp-fast-sim"
+        mock_runner_cls.return_value = mock_runner
+
+        with (
+            patch(
+                "nse_momentum_lab.cli.paper._build_daily_prepare_report",
+                return_value={"coverage_ready": True, "trade_date": "2026-03-27"},
+            ),
+            patch("nse_momentum_lab.cli.paper._get_backtest_runner_cls", return_value=mock_runner_cls),
+            patch("sys.argv", ["nseml-paper", "daily-sim", "--trade-date", "2026-03-27"]),
+        ):
+            main()
+
+        mock_runner.run.assert_called_once()
+        mock_symbols.assert_called_once()
+        mock_print_summary.assert_called_once_with("exp-fast-sim")
 
     @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper._check_walk_forward_gate", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper.KiteStreamRunner.run", new_callable=AsyncMock)
-    @patch(
-        "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.prepare_session", new_callable=AsyncMock
-    )
     @patch("nse_momentum_lab.cli.paper.get_settings")
     @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
     def test_stream_command_executes(
         self,
         mock_sm: MagicMock,
         mock_settings: MagicMock,
-        mock_prepare: AsyncMock,
-        mock_run: AsyncMock,
-        mock_gate: AsyncMock,
         mock_warn: AsyncMock,
     ) -> None:
         mock_session = AsyncMock()
@@ -479,39 +215,40 @@ class TestPaperCLI:
             kite_access_token="kite-token",
             has_kite_credentials=lambda: True,
         )
-        mock_prepare.return_value = {
-            "session": {"session_id": "paper-stream"},
-            "feed_state": {"session_id": "paper-stream"},
-            "signals": [],
-            "feed_plan": {},
-            "resolved_instrument_tokens": [12345],
-        }
+        runtime_symbols = _runtime_symbols(
+            prepare_result={
+                "session": {"session_id": "paper-stream"},
+                "feed_state": {"session_id": "paper-stream"},
+                "signals": [],
+                "feed_plan": {},
+                "resolved_instrument_tokens": [12345],
+            }
+        )
+        runtime_cls = runtime_symbols[1]
+        mock_runner = MagicMock()
+        mock_runner.run = AsyncMock()
 
-        with patch("sys.argv", ["nseml-paper", "stream", "--symbols", "ABC"]):
+        with (
+            patch("nse_momentum_lab.cli.paper._get_paper_runtime_symbols", return_value=runtime_symbols),
+            patch(
+                "nse_momentum_lab.cli.paper._build_runtime_plan",
+                return_value=SimpleNamespace(session_id="paper-stream"),
+            ),
+            patch("nse_momentum_lab.cli.paper._build_stream_runner", return_value=mock_runner),
+            patch("sys.argv", ["nseml-paper", "stream", "--symbols", "ABC"]),
+        ):
             main()
 
-        mock_prepare.assert_awaited_once()
-        mock_run.assert_awaited_once()
-        mock_gate.assert_awaited_once()
+        runtime_cls.prepare_session.assert_awaited_once()
+        mock_runner.run.assert_awaited_once()
 
     @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper._check_walk_forward_gate", new_callable=AsyncMock)
-    @patch(
-        "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.execute_replay_cycle",
-        new_callable=AsyncMock,
-    )
-    @patch(
-        "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.prepare_session", new_callable=AsyncMock
-    )
     @patch("nse_momentum_lab.cli.paper.get_settings")
     @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
     def test_replay_day_execute_command(
         self,
         mock_sm: MagicMock,
         mock_settings: MagicMock,
-        mock_prepare: AsyncMock,
-        mock_execute: AsyncMock,
-        mock_gate: AsyncMock,
         mock_warn: AsyncMock,
     ) -> None:
         mock_session = AsyncMock()
@@ -525,37 +262,40 @@ class TestPaperCLI:
             kite_access_token=None,
             has_kite_credentials=lambda: False,
         )
-        mock_prepare.return_value = {
-            "session": {"session_id": "paper-replay"},
-            "feed_state": {"session_id": "paper-replay"},
-            "signals": [],
-            "feed_plan": {},
-        }
-        mock_execute.return_value = {"session_id": "paper-replay", "processed_signals": 2}
+        runtime_symbols = _runtime_symbols(
+            prepare_result={
+                "session": {"session_id": "paper-replay"},
+                "feed_state": {"session_id": "paper-replay"},
+                "signals": [],
+                "feed_plan": {},
+            },
+            execute_replay_result={"session_id": "paper-replay", "processed_signals": 2},
+        )
+        runtime_cls = runtime_symbols[1]
 
-        with patch(
-            "sys.argv",
-            ["nseml-paper", "replay-day", "--trade-date", "2026-03-21", "--execute"],
+        with (
+            patch("nse_momentum_lab.cli.paper._get_paper_runtime_symbols", return_value=runtime_symbols),
+            patch(
+                "nse_momentum_lab.cli.paper._build_runtime_plan",
+                return_value=SimpleNamespace(session_id="paper-replay"),
+            ),
+            patch(
+                "sys.argv",
+                ["nseml-paper", "replay-day", "--trade-date", "2026-03-21", "--execute"],
+            ),
         ):
             main()
 
-        mock_prepare.assert_awaited_once()
-        mock_execute.assert_awaited_once()
-        mock_gate.assert_awaited_once()
+        runtime_cls.prepare_session.assert_awaited_once()
+        runtime_cls.execute_replay_cycle.assert_awaited_once()
 
     @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper._check_daily_walk_forward_gate", new_callable=AsyncMock)
-    @patch(
-        "nse_momentum_lab.cli.paper.PaperRuntimeScaffold.prepare_session", new_callable=AsyncMock
-    )
     @patch("nse_momentum_lab.cli.paper.get_settings")
     @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
     def test_daily_live_command_executes(
         self,
         mock_sm: MagicMock,
         mock_settings: MagicMock,
-        mock_prepare: AsyncMock,
-        mock_gate: AsyncMock,
         mock_warn: AsyncMock,
     ) -> None:
         mock_session = AsyncMock()
@@ -569,332 +309,73 @@ class TestPaperCLI:
             kite_access_token="kite-token",
             has_kite_credentials=lambda: True,
         )
-        mock_prepare.return_value = {
-            "session": {"session_id": "paper-daily-live"},
-            "feed_state": {"session_id": "paper-daily-live"},
-            "signals": [],
-            "feed_plan": {},
-        }
+        runtime_symbols = _runtime_symbols(
+            prepare_result={
+                "session": {"session_id": "paper-daily-live"},
+                "feed_state": {"session_id": "paper-daily-live"},
+                "signals": [],
+                "feed_plan": {},
+            }
+        )
+        runtime_cls = runtime_symbols[1]
 
-        with patch(
-            "nse_momentum_lab.cli.paper._build_daily_prepare_report",
-            return_value={"coverage_ready": True, "trade_date": "2026-03-27"},
-        ), patch("sys.argv", ["nseml-paper", "daily-live", "--symbols", "ABC"]):
+        with (
+            patch("nse_momentum_lab.cli.paper._get_paper_runtime_symbols", return_value=runtime_symbols),
+            patch(
+                "nse_momentum_lab.cli.paper._build_runtime_plan",
+                return_value=SimpleNamespace(
+                    session_id="paper-daily-live",
+                    strategy_params={},
+                    observe_only=False,
+                ),
+            ),
+            patch(
+                "nse_momentum_lab.cli.paper._build_daily_prepare_report",
+                return_value={"coverage_ready": True, "trade_date": "2026-03-27"},
+            ),
+            patch("sys.argv", ["nseml-paper", "daily-live", "--symbols", "ABC"]),
+        ):
             main()
 
-        mock_prepare.assert_awaited_once()
-        mock_gate.assert_awaited_once()
+        runtime_cls.prepare_session.assert_awaited_once()
 
-    @patch("nse_momentum_lab.cli.paper.PaperRuntimeScaffold.prepare_session", new_callable=AsyncMock)
     def test_daily_replay_skips_runtime_when_preparation_is_not_ready(
         self,
-        mock_prepare: AsyncMock,
     ) -> None:
-        with patch(
-            "nse_momentum_lab.cli.paper._build_daily_prepare_report",
-            return_value={"coverage_ready": False, "trade_date": "2026-03-27"},
-        ), patch("sys.argv", ["nseml-paper", "daily-replay", "--symbols", "ABC"]):
+        runtime_symbols = _runtime_symbols()
+        runtime_cls = runtime_symbols[1]
+        with (
+            patch("nse_momentum_lab.cli.paper._get_paper_runtime_symbols", return_value=runtime_symbols),
+            patch(
+                "nse_momentum_lab.cli.paper._build_daily_prepare_report",
+                return_value={"coverage_ready": False, "trade_date": "2026-03-27"},
+            ),
+            patch("sys.argv", ["nseml-paper", "daily-replay", "--symbols", "ABC"]),
+        ):
             main()
 
-        mock_prepare.assert_not_awaited()
+        runtime_cls.prepare_session.assert_not_awaited()
 
-    @patch("nse_momentum_lab.cli.paper._warn_if_session_exists", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper._load_market_trading_sessions")
-    @patch("nse_momentum_lab.cli.paper.set_paper_session_status", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper.update_paper_session", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper.insert_walk_forward_fold", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper.reset_walk_forward_folds", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper.create_or_update_paper_session", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.cli.paper.DuckDBBacktestRunner")
-    @patch("nse_momentum_lab.cli.paper.WalkForwardFramework")
-    @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
-    def test_walk_forward_resets_existing_fold_rows_before_rerun(
+    def test_daily_replay_short_circuits_on_empty_watchlist(
         self,
-        mock_sm: MagicMock,
-        mock_framework_cls: MagicMock,
-        mock_runner_cls: MagicMock,
-        mock_create: AsyncMock,
-        mock_reset_folds: AsyncMock,
-        mock_insert_fold: AsyncMock,
-        mock_update_session: AsyncMock,
-        mock_set_status: AsyncMock,
-        mock_load_sessions: MagicMock,
-        mock_warn: AsyncMock,
     ) -> None:
-        mock_session = AsyncMock()
-        mock_session.commit = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_sm.return_value.return_value = mock_context
-        mock_load_sessions.return_value = [
-            date(2025, 4, 1),
-            date(2025, 4, 2),
-            date(2025, 4, 3),
-            date(2025, 4, 4),
-        ]
-
-        mock_framework = MagicMock()
-        mock_framework.generate_rolling_windows_from_sessions.return_value = [
-            SimpleNamespace(
-                train_start=date(2025, 4, 1),
-                train_end=date(2025, 12, 8),
-                test_start=date(2025, 12, 9),
-                test_end=date(2026, 2, 9),
-            )
-        ]
-        mock_framework_cls.return_value = mock_framework
-
-        mock_runner = MagicMock()
-        mock_runner.run.return_value = "exp-1"
-        mock_runner.results_db.get_experiment.return_value = {
-            "status": "completed",
-            "total_return_pct": 2.5,
-            "max_drawdown_pct": 3.0,
-            "profit_factor": 1.4,
-            "total_trades": 11,
-        }
-        mock_runner_cls.return_value = mock_runner
-
-        with patch(
-            "nse_momentum_lab.cli.paper._validate_walk_forward_runtime_coverage",
-            return_value={
-                "runtime_mode": "modular",
-                "trade_dates": [date(2025, 4, 1), date(2025, 4, 2), date(2025, 4, 3)],
-                "coverage_ready": True,
-            },
+        runtime_symbols = _runtime_symbols()
+        runtime_cls = runtime_symbols[1]
+        with (
+            patch("nse_momentum_lab.cli.paper._get_paper_runtime_symbols", return_value=runtime_symbols),
+            patch(
+                "nse_momentum_lab.cli.paper._build_daily_prepare_report",
+                return_value={"coverage_ready": True, "trade_date": "2026-03-27"},
+            ),
+            patch(
+                "nse_momentum_lab.services.paper.live_watchlist.build_prior_day_watchlist",
+                return_value=pl.DataFrame(),
+            ),
+            patch("sys.argv", ["nseml-paper", "daily-replay", "--watchlist", "--symbols", "ABC"]),
         ):
-            with patch(
-                "sys.argv",
-                [
-                    "nseml-paper",
-                    "walk-forward",
-                    "--start-date",
-                    "2025-04-01",
-                    "--end-date",
-                    "2026-03-09",
-                    "--max-folds",
-                    "1",
-                ],
-            ):
-                main()
+            main()
 
-        mock_reset_folds.assert_awaited_once_with(
-            mock_session, "wf-thresholdbreakout-2025-04-01-2026-03-09"
-        )
-        mock_insert_fold.assert_awaited_once()
-        mock_set_status.assert_awaited()
-        assert mock_runner.run.call_args is not None
-        assert mock_runner.run.call_args.kwargs["wf_run_id"] == "wf-thresholdbreakout-2025-04-01-2026-03-09"
-
-    def test_walk_forward_runtime_preflight_passes_when_runtime_tables_are_current(self) -> None:
-        trade_dates = [date(2026, 3, 17), date(2026, 3, 18), date(2026, 3, 19)]
-        market_db = _make_walk_forward_runtime_db(
-            daily_dates=trade_dates,
-            five_min_dates=trade_dates,
-            feat_daily_core_dates=trade_dates,
-            feat_2lynch_derived_dates=trade_dates,
-            feat_intraday_core_dates=trade_dates,
-        )
-
-        report = _build_walk_forward_runtime_coverage_report(
-            market_db,
-            trade_dates,
-            start_date=trade_dates[0],
-            end_date=trade_dates[-1],
-        )
-
-        assert report["runtime_mode"] == "modular"
-        assert report["coverage_ready"] is True
-        assert report["missing_by_date"] == []
-        assert report["tables"]["market_day_state"]["stale_reasons"] == []
-        assert report["tables"]["strategy_day_state"]["stale_reasons"] == []
-        assert report["tables"]["intraday_day_pack"]["stale_reasons"] == []
-
-    def test_walk_forward_runtime_preflight_fails_on_stale_intraday_pack(self) -> None:
-        trade_dates = [date(2026, 3, 17), date(2026, 3, 18), date(2026, 3, 19)]
-        market_db = _make_walk_forward_runtime_db(
-            daily_dates=trade_dates,
-            five_min_dates=trade_dates,
-            feat_daily_core_dates=trade_dates,
-            feat_2lynch_derived_dates=trade_dates,
-            feat_intraday_core_dates=trade_dates[:-1],
-        )
-
-        with patch("nse_momentum_lab.cli.paper.get_market_db", return_value=market_db):
-            with pytest.raises(SystemExit) as exc_info:
-                _validate_walk_forward_runtime_coverage(
-                    trade_dates,
-                    start_date=trade_dates[0],
-                    end_date=trade_dates[-1],
-                )
-
-        assert "intraday_day_pack" in str(exc_info.value)
-        assert "missing_trade_dates" in str(exc_info.value)
-
-    @patch("nse_momentum_lab.cli.paper._validate_walk_forward_runtime_coverage")
-    @patch("nse_momentum_lab.cli.paper._load_market_trading_sessions")
-    @patch("nse_momentum_lab.cli.paper.DuckDBBacktestRunner")
-    @patch("nse_momentum_lab.cli.paper.WalkForwardFramework")
-    def test_walk_forward_aborts_before_runner_when_runtime_is_stale(
-        self,
-        mock_framework_cls: MagicMock,
-        mock_runner_cls: MagicMock,
-        mock_load_sessions: MagicMock,
-        mock_validate: MagicMock,
-    ) -> None:
-        mock_load_sessions.return_value = [
-            date(2026, 3, 17),
-            date(2026, 3, 18),
-            date(2026, 3, 19),
-        ]
-        mock_framework = MagicMock()
-        mock_framework.generate_rolling_windows_from_sessions.return_value = [
-            SimpleNamespace(
-                train_start=date(2026, 3, 17),
-                train_end=date(2026, 3, 17),
-                test_start=date(2026, 3, 18),
-                test_end=date(2026, 3, 18),
-            )
-        ]
-        mock_framework_cls.return_value = mock_framework
-        mock_validate.side_effect = SystemExit("stale runtime coverage")
-
-        with patch(
-            "sys.argv",
-            [
-                "nseml-paper",
-                "walk-forward",
-                "--start-date",
-                "2026-03-17",
-                "--end-date",
-                "2026-03-19",
-                "--train-days",
-                "1",
-                "--test-days",
-                "1",
-                "--roll-interval-days",
-                "1",
-                "--max-folds",
-                "1",
-            ],
-        ):
-            with pytest.raises(SystemExit, match="stale runtime coverage"):
-                main()
-
-        mock_runner_cls.assert_not_called()
-
-    @patch("nse_momentum_lab.cli.paper.get_backtest_db")
-    @patch("nse_momentum_lab.cli.paper.list_passed_walk_forward_sessions", new_callable=AsyncMock)
-    async def test_check_walk_forward_gate_requires_trade_date_coverage(
-        self,
-        mock_list_sessions: AsyncMock,
-        mock_get_backtest_db: MagicMock,
-    ) -> None:
-        mock_get_backtest_db.return_value = MagicMock()
-        mock_list_sessions.return_value = [
-            {
-                "session_id": "wf-1",
-                "strategy_name": "threshold_breakout",
-                "finished_at": "2026-03-20T10:00:00+00:00",
-                "strategy_params": {
-                    "walk_forward": {
-                        "test_ranges": [{"start": "2026-03-10", "end": "2026-03-20"}]
-                    }
-                },
-            }
-        ]
-        plan = PaperRuntimePlan(
-            session_id="paper-1",
-            strategy_name="threshold_breakout",
-            trade_date=date(2026, 3, 21),
-            mode="replay",
-        )
-
-        try:
-            await _check_walk_forward_gate(AsyncMock(), plan)
-        except SystemExit as exc:
-            assert "outside validated test coverage" in str(exc)
-        else:
-            raise AssertionError("Expected walk-forward gate failure for uncovered trade date")
-
-    @patch("nse_momentum_lab.cli.paper.get_backtest_db")
-    @patch("nse_momentum_lab.cli.paper.list_passed_walk_forward_sessions", new_callable=AsyncMock)
-    async def test_check_walk_forward_gate_validates_experiment_lineage(
-        self,
-        mock_list_sessions: AsyncMock,
-        mock_get_backtest_db: MagicMock,
-    ) -> None:
-        base_params = asdict(BacktestParams(strategy="thresholdbreakout"))
-        mock_backtest_db = MagicMock()
-        mock_backtest_db.get_experiment.return_value = {
-            "strategy_name": "threshold_breakout",
-            "dataset_hash": "dataset-1",
-            "code_hash": "code-1",
-            "params_json": json.dumps(base_params),
-        }
-        mock_get_backtest_db.return_value = mock_backtest_db
-        mock_list_sessions.return_value = [
-            {
-                "session_id": "wf-1",
-                "strategy_name": "threshold_breakout",
-                "finished_at": "2026-03-20T10:00:00+00:00",
-                "strategy_params": {
-                    "walk_forward": {
-                        "base_params": base_params,
-                        "test_ranges": [{"start": "2026-03-10", "end": "2026-03-20"}],
-                        "lineage": {
-                            "dataset_hashes": ["dataset-2"],
-                            "code_hashes": ["code-1"],
-                        },
-                    }
-                },
-            }
-        ]
-        plan = PaperRuntimePlan(
-            session_id="paper-1",
-            strategy_name="threshold_breakout",
-            trade_date=date(2026, 3, 20),
-            mode="replay",
-            experiment_id="exp-1",
-        )
-
-        try:
-            await _check_walk_forward_gate(AsyncMock(), plan)
-        except SystemExit as exc:
-            assert "dataset hash is outside the validated walk-forward lineage" in str(exc)
-        else:
-            raise AssertionError("Expected walk-forward gate failure for mismatched lineage")
-
-    @patch("nse_momentum_lab.cli.paper.get_backtest_db")
-    @patch("nse_momentum_lab.cli.paper.list_passed_walk_forward_sessions", new_callable=AsyncMock)
-    async def test_daily_gate_ignores_trade_date_window(
-        self,
-        mock_list_sessions: AsyncMock,
-        mock_get_backtest_db: MagicMock,
-    ) -> None:
-        mock_get_backtest_db.return_value = MagicMock()
-        mock_list_sessions.return_value = [
-            {
-                "session_id": "wf-1",
-                "strategy_name": "threshold_breakout",
-                "finished_at": "2026-03-20T10:00:00+00:00",
-                "strategy_params": {
-                    "walk_forward": {
-                        "test_ranges": [{"start": "2026-03-10", "end": "2026-03-20"}]
-                    }
-                },
-            }
-        ]
-        plan = PaperRuntimePlan(
-            session_id="paper-1",
-            strategy_name="threshold_breakout",
-            trade_date=date(2026, 3, 27),
-            mode="live",
-            symbols=["ABC"],
-        )
-
-        await _check_daily_walk_forward_gate(AsyncMock(), plan)
+        runtime_cls.prepare_session.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -954,6 +435,315 @@ class TestBuildOperationalUniverse:
         assert result == []
 
 
+class TestBuildPriorDayWatchlist:
+    @patch("nse_momentum_lab.services.paper.live_watchlist.get_market_db")
+    def test_long_watchlist_query_executes_and_returns_rows(
+        self,
+        mock_get_db: MagicMock,
+    ) -> None:
+        from nse_momentum_lab.services.paper.live_watchlist import build_prior_day_watchlist
+
+        con = duckdb.connect(":memory:")
+        con.execute(
+            """
+            CREATE TABLE v_daily(
+                symbol VARCHAR,
+                date DATE,
+                close DOUBLE,
+                high DOUBLE,
+                low DOUBLE,
+                open DOUBLE,
+                volume DOUBLE
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE feat_daily(
+                symbol VARCHAR,
+                date DATE,
+                close_pos_in_range DOUBLE,
+                ma_20 DOUBLE,
+                ret_5d DOUBLE,
+                atr_20 DOUBLE,
+                vol_dryup_ratio DOUBLE,
+                atr_compress_ratio DOUBLE,
+                range_percentile DOUBLE,
+                prior_breakouts_30d INTEGER,
+                prior_breakdowns_90d INTEGER,
+                r2_65 DOUBLE,
+                ma_65_sma DOUBLE
+            )
+            """
+        )
+        con.executemany(
+            "INSERT INTO v_daily VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                ("ABC", date(2026, 3, 25), 102.0, 103.0, 100.0, 101.0, 100000.0),
+                ("ABC", date(2026, 3, 26), 100.0, 101.0, 98.0, 101.0, 100000.0),
+                ("ABC", date(2026, 3, 27), 101.0, 102.0, 99.0, 100.0, 100000.0),
+            ],
+        )
+        con.execute(
+            "INSERT INTO feat_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                "ABC",
+                date(2026, 3, 27),
+                0.8,
+                95.0,
+                0.1,
+                2.0,
+                1.0,
+                1.0,
+                0.4,
+                1,
+                0,
+                0.8,
+                90.0,
+            ],
+        )
+        mock_get_db.return_value = SimpleNamespace(con=con)
+
+        result = build_prior_day_watchlist(
+            symbols=["ABC"],
+            trade_date=date(2026, 3, 30),
+            strategy="thresholdbreakout",
+            threshold=0.04,
+            min_filters=5,
+        )
+
+        assert result.height == 1
+        assert result["symbol"].to_list() == ["ABC"]
+        assert result["filters_passed"].to_list() == [6]
+
+    @patch("nse_momentum_lab.services.paper.live_watchlist._build_latest_bar_fallback_watchlist")
+    @patch("nse_momentum_lab.services.paper.live_watchlist.get_market_db")
+    def test_primary_query_failure_uses_fallback_without_filtering_it_away(
+        self,
+        mock_get_db: MagicMock,
+        mock_fallback: MagicMock,
+    ) -> None:
+        from nse_momentum_lab.services.paper import live_watchlist
+        from nse_momentum_lab.services.paper.live_watchlist import build_prior_day_watchlist
+
+        live_watchlist._WATCHLIST_CACHE.clear()
+
+        mock_get_db.return_value = SimpleNamespace(
+            con=SimpleNamespace(execute=MagicMock(side_effect=RuntimeError("binder error")))
+        )
+        mock_fallback.return_value = pl.DataFrame(
+            {
+                "symbol": ["ABC"],
+                "watch_date": [date(2026, 3, 27)],
+                "last_close": [101.0],
+                "close_pos_in_range": [0.8],
+                "atr_20": [2.0],
+                "range_percentile": [0.4],
+                "vol_dryup_ratio": [1.0],
+                "r2_65": [0.8],
+                "value_traded_inr": [10100000.0],
+                "filter_h": [False],
+                "filter_n": [False],
+                "filter_y": [False],
+                "filter_c": [False],
+                "filter_l": [False],
+                "filter_2": [False],
+                "filters_passed": [0],
+            }
+        )
+
+        result = build_prior_day_watchlist(
+            symbols=["ABC"],
+            trade_date=date(2026, 3, 30),
+            min_filters=5,
+        )
+
+        assert result.height == 1
+        assert result["symbol"].to_list() == ["ABC"]
+        mock_fallback.assert_called_once()
+
+
+class TestLivePaperOperationalHelpers:
+    @patch("nse_momentum_lab.cli.paper.get_settings")
+    def test_build_runtime_plan_encodes_threshold_and_watchlist_in_session_id(
+        self,
+        mock_get_settings: MagicMock,
+    ) -> None:
+        from nse_momentum_lab.cli.paper import _build_runtime_plan
+
+        mock_get_settings.return_value = SimpleNamespace(
+            kite_api_key=None,
+            kite_access_token=None,
+        )
+        args = SimpleNamespace(
+            session_id=None,
+            strategy="thresholdbreakout",
+            trade_date=date(2026, 3, 30),
+            experiment_id=None,
+            notes=None,
+            strategy_params='{"breakout_threshold": 0.02}',
+            risk_config=None,
+            feed_mode="full",
+            instrument_tokens="",
+            observe=False,
+            watchlist=True,
+        )
+
+        plan = _build_runtime_plan(
+            args,
+            mode="live",
+            feed_source="kite",
+            trade_date=date(2026, 3, 30),
+            symbols=["TCS"],
+        )
+
+        assert plan.session_id == "paper-thresholdbreakout-thr-0p02-watchlist-2026-03-30-live"
+
+    @patch("nse_momentum_lab.services.paper.live_watchlist.build_prior_day_watchlist")
+    def test_build_watchlist_report_flags_empty_watchlist_as_not_ready(
+        self,
+        mock_build_watchlist: MagicMock,
+    ) -> None:
+        from nse_momentum_lab.cli.paper import _build_watchlist_report
+
+        mock_build_watchlist.return_value = pl.DataFrame()
+        args = SimpleNamespace(
+            strategy="thresholdbreakout",
+            strategy_params=None,
+            watchlist=True,
+        )
+
+        watchlist_df, report = _build_watchlist_report(
+            args,
+            trade_date=date(2026, 3, 30),
+            symbols=["TCS", "INFY"],
+        )
+
+        assert watchlist_df is not None
+        assert report["enabled"] is True
+        assert report["ready"] is False
+        assert report["count"] == 0
+        assert report["reasons"] == ["empty_watchlist"]
+
+    @patch("nse_momentum_lab.services.paper.live_watchlist.build_prior_day_watchlist")
+    def test_build_watchlist_report_passes_short_direction_for_breakdown(
+        self,
+        mock_build_watchlist: MagicMock,
+    ) -> None:
+        from nse_momentum_lab.cli.paper import _build_watchlist_report
+
+        mock_build_watchlist.return_value = pl.DataFrame(
+            {"symbol": ["SBIN"], "filters_passed": [5]}
+        )
+        args = SimpleNamespace(
+            strategy="thresholdbreakdown",
+            strategy_params='{"breakout_threshold": 0.02}',
+            watchlist=True,
+        )
+
+        _build_watchlist_report(
+            args,
+            trade_date=date(2026, 3, 30),
+            symbols=["SBIN"],
+        )
+
+        assert mock_build_watchlist.call_args.kwargs["direction"] == "short"
+
+    def test_compact_paper_session_summary_trims_large_payloads(self) -> None:
+        from nse_momentum_lab.cli.paper import _compact_paper_session_summary
+
+        payload = _compact_paper_session_summary(
+            {
+                "session": {
+                    "session_id": "paper-thresholdbreakout-thr-0p04-watchlist-2026-03-30-live",
+                    "trade_date": "2026-03-30",
+                    "strategy_name": "thresholdbreakout",
+                    "experiment_id": None,
+                    "mode": "live",
+                    "status": "ACTIVE",
+                    "symbols": ["TCS", "INFY"],
+                    "strategy_params": {"breakout_threshold": 0.04},
+                },
+                "counts": {
+                    "signals": 3,
+                    "open_signals": 2,
+                    "open_positions": 1,
+                    "orders": 1,
+                    "fills": 1,
+                    "queue_signals": 3,
+                },
+                "feed_state": {
+                    "source": "kite",
+                    "mode": "full",
+                    "status": "CONNECTED",
+                    "is_stale": False,
+                    "subscription_count": 2,
+                    "last_quote_at": "2026-03-30T09:31:00+05:30",
+                    "last_tick_at": "2026-03-30T09:31:00+05:30",
+                    "heartbeat_at": "2026-03-30T09:31:01+05:30",
+                    "metadata_json": {"instrument_tokens": [101, 202], "observe_only": False},
+                },
+            }
+        )
+
+        assert payload["session"]["symbol_count"] == 2
+        assert payload["feed_state"]["token_count"] == 2
+        assert "symbols" not in payload["session"]
+
+    @patch("builtins.print")
+    @patch("nse_momentum_lab.cli.paper.get_paper_session_summary_compact", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
+    def test_status_summary_uses_compact_session_query(
+        self,
+        mock_sm: MagicMock,
+        mock_compact_summary: AsyncMock,
+        mock_print: MagicMock,
+    ) -> None:
+        mock_session = AsyncMock()
+        mock_context = MagicMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_context.__aexit__ = AsyncMock()
+        mock_sm.return_value.return_value = mock_context
+        mock_compact_summary.return_value = {
+            "session": {"session_id": "paper-live", "symbol_count": 33},
+            "counts": {"signals": 33},
+            "feed_state": {"token_count": 33},
+        }
+
+        with patch("sys.argv", ["nseml-paper", "status", "--session-id", "paper-live", "--summary"]):
+            main()
+
+        mock_compact_summary.assert_awaited_once_with(mock_session, "paper-live")
+        printed = json.loads(mock_print.call_args.args[0])
+        assert printed["session"]["symbol_count"] == 33
+        assert printed["feed_state"]["token_count"] == 33
+
+    @patch("builtins.print")
+    @patch("nse_momentum_lab.cli.paper.list_paper_sessions_compact", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.cli.paper.get_sessionmaker")
+    def test_status_summary_list_uses_compact_session_list(
+        self,
+        mock_sm: MagicMock,
+        mock_list_compact: AsyncMock,
+        mock_print: MagicMock,
+    ) -> None:
+        mock_session = AsyncMock()
+        mock_context = MagicMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_context.__aexit__ = AsyncMock()
+        mock_sm.return_value.return_value = mock_context
+        mock_list_compact.return_value = [
+            {"session_id": "paper-live", "symbol_count": 33, "status": "ACTIVE"}
+        ]
+
+        with patch("sys.argv", ["nseml-paper", "status", "--summary"]):
+            main()
+
+        mock_list_compact.assert_awaited_once()
+        printed = json.loads(mock_print.call_args.args[0])
+        assert printed["sessions"][0]["symbol_count"] == 33
+
+
 class TestResolveDailySymbolsLive:
     """Tests for _resolve_daily_symbols with live=True operational universe."""
 
@@ -993,7 +783,8 @@ class TestResolveDailySymbolsLive:
 
     @patch("nse_momentum_lab.cli.paper._resolve_all_local_symbols")
     def test_replay_does_not_use_operational_universe(
-        self, mock_all_local: MagicMock,
+        self,
+        mock_all_local: MagicMock,
     ) -> None:
         from nse_momentum_lab.cli.paper import _resolve_daily_symbols
 
@@ -1049,9 +840,7 @@ class TestComposeLiveReadinessVerdict:
                 "requested_symbol_count": 50,
                 "missing_symbol_count": 50,
                 "matched_prev_trade_dates": {},
-                "missing_symbol_sample": [
-                    {"symbol": "STALE", "reasons": ["v_daily", "v_5min"]}
-                ],
+                "missing_symbol_sample": [{"symbol": "STALE", "reasons": ["v_daily", "v_5min"]}],
             },
             trade_date=date(2026, 3, 27),
         )
@@ -1126,7 +915,9 @@ class TestSessionCleanup:
     @patch("nse_momentum_lab.db.paper._utc_now")
     @patch("nse_momentum_lab.db.paper.get_paper_session", new_callable=AsyncMock)
     async def test_archive_sessions_archives_found(
-        self, mock_get: AsyncMock, mock_now: MagicMock,
+        self,
+        mock_get: AsyncMock,
+        mock_now: MagicMock,
     ) -> None:
         from nse_momentum_lab.db.paper import archive_sessions
 
@@ -1146,7 +937,8 @@ class TestSessionCleanup:
 
     @patch("nse_momentum_lab.db.paper.get_paper_session", new_callable=AsyncMock)
     async def test_archive_sessions_skips_not_found(
-        self, mock_get: AsyncMock,
+        self,
+        mock_get: AsyncMock,
     ) -> None:
         from nse_momentum_lab.db.paper import archive_sessions
 

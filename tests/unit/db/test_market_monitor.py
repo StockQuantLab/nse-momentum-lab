@@ -224,15 +224,11 @@ def test_build_market_monitor_incremental_matches_full_build() -> None:
     )
 
     db.build_market_monitor_table(force=True)
-    expected = db.con.execute(
-        "SELECT * FROM market_monitor_daily ORDER BY trading_date"
-    ).fetchall()
+    expected = db.con.execute("SELECT * FROM market_monitor_daily ORDER BY trading_date").fetchall()
 
     rebuild_from = date(2025, 4, 1)
     db.build_market_monitor_incremental(since_date=rebuild_from)
-    actual = db.con.execute(
-        "SELECT * FROM market_monitor_daily ORDER BY trading_date"
-    ).fetchall()
+    actual = db.con.execute("SELECT * FROM market_monitor_daily ORDER BY trading_date").fetchall()
 
     assert actual == expected
 

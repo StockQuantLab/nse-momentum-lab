@@ -53,6 +53,7 @@ nseml-paper = "nse_momentum_lab.cli.paper:main"
 nseml-kite-paper = "nse_momentum_lab.cli.paper:main"
 nseml-kite-token = "nse_momentum_lab.cli.kite_token:main"
 nseml-kite-ingest = "nse_momentum_lab.cli.kite_ingest:main"
+nseml-hygiene = "nse_momentum_lab.cli.data_hygiene:main"
 
 [build-system]
 requires = ["hatchling"]

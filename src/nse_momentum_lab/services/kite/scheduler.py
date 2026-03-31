@@ -12,7 +12,7 @@ from typing import Any
 from nse_momentum_lab.db.market_db import get_market_db
 from nse_momentum_lab.services.kite.auth import KiteAuth, get_kite_auth
 from nse_momentum_lab.services.kite.writer import KiteWriter, get_kite_writer
-from nse_momentum_lab.utils.constants import IngestionDataset
+from nse_momentum_lab.utils.constants import IngestionDataset, IngestionUniverse
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +62,6 @@ def _release_lock(fd: int) -> None:
         os.close(fd)
     except OSError:
         pass
-    try:
-        os.close(fd)
-    except OSError:
-        pass
 
 
 @dataclass(slots=True)
@@ -78,6 +74,7 @@ class KiteScheduler:
     def __init__(self, auth: KiteAuth | None = None, writer: KiteWriter | None = None) -> None:
         self.auth = auth or get_kite_auth()
         self.writer = writer or get_kite_writer()
+        self._local_parquet_symbols_cache: list[str] | None = None
 
     def get_ingestion_status(self) -> dict[str, Any]:
         market_db = get_market_db(read_only=True)
@@ -114,6 +111,8 @@ class KiteScheduler:
         }
 
     def get_symbols_from_local_parquet(self) -> list[str]:
+        if self._local_parquet_symbols_cache is not None:
+            return list(self._local_parquet_symbols_cache)
         if not PARQUET_DAILY_DIR.exists():
             return []
         symbols: list[str] = []
@@ -122,14 +121,18 @@ class KiteScheduler:
                 continue
             if (child / "all.parquet").exists() or (child / "kite.parquet").exists():
                 symbols.append(child.name.strip().upper())
-        return symbols
+        self._local_parquet_symbols_cache = symbols
+        return list(symbols)
 
     def get_symbols_from_kite(
         self,
         *,
         exchange: str = "NSE",
         segment: str = "NSE",
+        refresh: bool = False,
     ) -> list[str]:
+        if refresh:
+            self.auth.refresh_instruments(exchange)
         rows = self.auth.get_instruments(exchange)
         symbols: list[str] = []
         for row in rows:
@@ -149,6 +152,7 @@ class KiteScheduler:
         update_features: bool = False,
         save_raw: bool = False,
         resume: bool = True,
+        universe: IngestionUniverse = IngestionUniverse.LOCAL_FIRST,
     ) -> dict[str, Any]:
         target_date = trading_date or datetime.now(UTC).date()
         return self.run_daily_range_ingestion(
@@ -158,6 +162,7 @@ class KiteScheduler:
             update_features=update_features,
             save_raw=save_raw,
             resume=resume,
+            universe=universe,
         )
 
     def run_daily_range_ingestion(
@@ -169,6 +174,7 @@ class KiteScheduler:
         mode: str = "append",
         save_raw: bool = False,
         resume: bool = True,
+        universe: IngestionUniverse = IngestionUniverse.LOCAL_FIRST,
     ) -> dict[str, Any]:
         start = start_date or datetime.now(UTC).date()
         end = end_date or start
@@ -181,6 +187,7 @@ class KiteScheduler:
             resume=resume,
             mode=mode,
             update_features=update_features,
+            universe=universe,
         )
 
     def run_5min_ingestion(
@@ -190,6 +197,7 @@ class KiteScheduler:
         end_date: date | None = None,
         save_raw: bool = False,
         resume: bool = True,
+        universe: IngestionUniverse = IngestionUniverse.LOCAL_FIRST,
     ) -> dict[str, Any]:
         start = start_date or BACKFILL_START_DATE
         end = end_date or datetime.now(UTC).date()
@@ -202,6 +210,7 @@ class KiteScheduler:
             resume=resume,
             mode="append",
             update_features=False,
+            universe=universe,
         )
 
     def _run_ingestion(
@@ -215,6 +224,7 @@ class KiteScheduler:
         resume: bool,
         mode: str,
         update_features: bool,
+        universe: IngestionUniverse,
     ) -> dict[str, Any]:
         lock_fd, acquired = _try_acquire_lock()
         if not acquired:
@@ -230,6 +240,7 @@ class KiteScheduler:
                 resume=resume,
                 mode=mode,
                 update_features=update_features,
+                universe=universe,
             )
         finally:
             _release_lock(lock_fd)
@@ -245,18 +256,21 @@ class KiteScheduler:
         resume: bool,
         mode: str,
         update_features: bool,
+        universe: IngestionUniverse,
     ) -> dict[str, Any]:
         resolved_symbols = self._resolve_symbols(
             symbols=symbols,
             dataset=dataset,
             start_date=start_date,
             end_date=end_date,
+            universe=universe,
         )
         checkpoint = self._load_checkpoint(
             dataset=dataset,
             start_date=start_date,
             end_date=end_date,
             resume=resume,
+            universe=universe,
         )
         pending_symbols = [
             symbol for symbol in resolved_symbols if symbol not in checkpoint.completed_symbols
@@ -267,6 +281,7 @@ class KiteScheduler:
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "total_symbols": len(resolved_symbols),
+            "universe": universe.value,
             "processed_symbols": 0,
             "succeeded": 0,
             "failed": 0,
@@ -388,10 +403,19 @@ class KiteScheduler:
         dataset: IngestionDataset,
         start_date: date,
         end_date: date,
+        universe: IngestionUniverse = IngestionUniverse.LOCAL_FIRST,
     ) -> list[str]:
         if symbols:
             cleaned = [symbol.strip().upper() for symbol in symbols if symbol.strip()]
             return list(dict.fromkeys(cleaned))
+
+        if universe is IngestionUniverse.CURRENT_MASTER:
+            kite_symbols = self.get_symbols_from_kite(exchange="NSE", segment="NSE", refresh=True)
+            logger.info(
+                "Resolved Kite ingestion universe from current Kite master: %d",
+                len(kite_symbols),
+            )
+            return kite_symbols
 
         if dataset is IngestionDataset.FIVE_MIN:
             daily_window_symbols = self.get_symbols_from_daily_range(
@@ -463,10 +487,12 @@ class KiteScheduler:
         dataset: IngestionDataset,
         start_date: date,
         end_date: date,
+        universe: IngestionUniverse,
     ) -> Path:
         CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
         return (
-            CHECKPOINT_DIR / f"{dataset.value}_{start_date.isoformat()}_{end_date.isoformat()}.json"
+            CHECKPOINT_DIR
+            / f"{dataset.value}_{universe.value}_{start_date.isoformat()}_{end_date.isoformat()}.json"
         )
 
     def _load_checkpoint(
@@ -476,8 +502,11 @@ class KiteScheduler:
         start_date: date,
         end_date: date,
         resume: bool,
+        universe: IngestionUniverse,
     ) -> CheckpointState:
-        path = self._checkpoint_path(dataset=dataset, start_date=start_date, end_date=end_date)
+        path = self._checkpoint_path(
+            dataset=dataset, start_date=start_date, end_date=end_date, universe=universe
+        )
         if not resume or not path.exists():
             return CheckpointState(path=path, completed_symbols=set())
         payload = json.loads(path.read_text(encoding="utf-8"))

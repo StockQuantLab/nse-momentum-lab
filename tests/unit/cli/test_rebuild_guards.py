@@ -23,6 +23,9 @@ def test_build_features_rejects_force_without_ack(monkeypatch) -> None:
             status=False,
             list=False,
             legacy=False,
+            symbols=None,
+            symbols_file=None,
+            missing=False,
         ),
     )
 
@@ -44,6 +47,9 @@ def test_build_features_legacy_rebuild_rejects_force_without_ack(monkeypatch) ->
             status=False,
             list=False,
             legacy=True,
+            symbols=None,
+            symbols_file=None,
+            missing=False,
         ),
     )
 
@@ -67,6 +73,9 @@ def test_build_features_status_bypasses_force_guard(monkeypatch) -> None:
             status=True,
             list=False,
             legacy=False,
+            symbols=None,
+            symbols_file=None,
+            missing=False,
         ),
     )
     monkeypatch.setattr(
@@ -114,6 +123,9 @@ def test_build_features_single_feature_force_stays_allowed(monkeypatch) -> None:
             status=False,
             list=False,
             legacy=False,
+            symbols=None,
+            symbols_file=None,
+            missing=False,
         ),
     )
     monkeypatch.setattr(build_features, "get_market_db", lambda: DummyDB())
@@ -152,6 +164,9 @@ def test_build_features_single_feature_since_uses_incremental_path(monkeypatch) 
             status=False,
             list=False,
             legacy=False,
+            symbols=None,
+            symbols_file=None,
+            missing=False,
         ),
     )
     monkeypatch.setattr(build_features, "get_market_db", lambda: DummyDB())
@@ -187,6 +202,9 @@ def test_build_features_since_uses_incremental_path(monkeypatch) -> None:
             status=False,
             list=False,
             legacy=False,
+            symbols=None,
+            symbols_file=None,
+            missing=False,
         ),
     )
     monkeypatch.setattr(build_features, "get_market_db", lambda: DummyDB())

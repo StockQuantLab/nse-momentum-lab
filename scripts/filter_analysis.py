@@ -133,22 +133,28 @@ def analyze_filters(
     df_pl = pl.from_pandas(df)
 
     # Fill nulls
-    df_pl = df_pl.with_columns([
-        pl.col("filter_h").fill_null(False),
-        pl.col("filter_n").fill_null(False),
-        pl.col("filter_y").fill_null(True),
-        pl.col("filter_c").fill_null(False),
-        pl.col("filter_l").fill_null(False),
-    ])
+    df_pl = df_pl.with_columns(
+        [
+            pl.col("filter_h").fill_null(False),
+            pl.col("filter_n").fill_null(False),
+            pl.col("filter_y").fill_null(True),
+            pl.col("filter_c").fill_null(False),
+            pl.col("filter_l").fill_null(False),
+        ]
+    )
 
     # Count filters passed
-    df_pl = df_pl.with_columns([
-        (pl.col("filter_h").cast(int) +
-         pl.col("filter_n").cast(int) +
-         pl.col("filter_y").cast(int) +
-         pl.col("filter_c").cast(int) +
-         pl.col("filter_l").cast(int)).alias("filters_passed")
-    ])
+    df_pl = df_pl.with_columns(
+        [
+            (
+                pl.col("filter_h").cast(int)
+                + pl.col("filter_n").cast(int)
+                + pl.col("filter_y").cast(int)
+                + pl.col("filter_c").cast(int)
+                + pl.col("filter_l").cast(int)
+            ).alias("filters_passed")
+        ]
+    )
 
     return df_pl
 
@@ -158,7 +164,8 @@ def run_filter_analysis():
 
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     print("\n" + "=" * 80)
     print("2LYNCH FILTER ANALYSIS")
@@ -207,7 +214,11 @@ def run_filter_analysis():
 
     # Filter L breakdown
     print("\nFilter L Breakdown:")
-    for col, name in [("l_above_ma20", "Above MA20"), ("l_positive_mom", "Positive 5d momentum"), ("l_r2_high", "R² >= 70%")]:
+    for col, name in [
+        ("l_above_ma20", "Above MA20"),
+        ("l_positive_mom", "Positive 5d momentum"),
+        ("l_r2_high", "R² >= 70%"),
+    ]:
         passed = df[col].fill_null(False).sum()
         total = len(df)
         pct = (passed / total * 100) if total > 0 else 0
@@ -264,19 +275,25 @@ def run_filter_analysis():
     print(f"{'=' * 80}")
 
     # Count unique filter combinations
-    df_combo = df.with_columns([
-        pl.format("H:{} N:{} Y:{} C:{} L:{}",
-                  pl.col("filter_h").cast(str).str.replace("True", "1").str.replace("False", "0"),
-                  pl.col("filter_n").cast(str).str.replace("True", "1").str.replace("False", "0"),
-                  pl.col("filter_y").cast(str).str.replace("True", "1").str.replace("False", "0"),
-                  pl.col("filter_c").cast(str).str.replace("True", "1").str.replace("False", "0"),
-                  pl.col("filter_l").cast(str).str.replace("True", "1").str.replace("False", "0"),
-                  ).alias("combination")
-    ])
+    df_combo = df.with_columns(
+        [
+            pl.format(
+                "H:{} N:{} Y:{} C:{} L:{}",
+                pl.col("filter_h").cast(str).str.replace("True", "1").str.replace("False", "0"),
+                pl.col("filter_n").cast(str).str.replace("True", "1").str.replace("False", "0"),
+                pl.col("filter_y").cast(str).str.replace("True", "1").str.replace("False", "0"),
+                pl.col("filter_c").cast(str).str.replace("True", "1").str.replace("False", "0"),
+                pl.col("filter_l").cast(str).str.replace("True", "1").str.replace("False", "0"),
+            ).alias("combination")
+        ]
+    )
 
-    combo_counts = df_combo.group_by("combination").agg(
-        pl.len().alias("count")
-    ).sort("count", descending=True).head(20)
+    combo_counts = (
+        df_combo.group_by("combination")
+        .agg(pl.len().alias("count"))
+        .sort("count", descending=True)
+        .head(20)
+    )
 
     print("\nTop 20 Filter Combinations:")
     print(f"{'Combination (H N Y C L)':<25} {'Count':>8} {'%':>6}")
@@ -301,15 +318,27 @@ def run_filter_analysis():
             avg_filters_failed = failed["filters_passed"].mean()
 
             print(f"\n  {filter_names[f]}:")
-            print(f"    When PASSES: avg {avg_filters_passed:.2f} filters total ({len(passed)} signals)")
-            print(f"    When FAILS:  avg {avg_filters_failed:.2f} filters total ({len(failed)} signals)")
+            print(
+                f"    When PASSES: avg {avg_filters_passed:.2f} filters total ({len(passed)} signals)"
+            )
+            print(
+                f"    When FAILS:  avg {avg_filters_failed:.2f} filters total ({len(failed)} signals)"
+            )
 
             # Check what other filters tend to pass/fail with this one
             for other in filter_cols:
                 if other == f:
                     continue
-                pass_with_pass = passed.filter(pl.col(other)).height / len(passed) * 100 if len(passed) > 0 else 0
-                pass_with_fail = failed.filter(pl.col(other)).height / len(failed) * 100 if len(failed) > 0 else 0
+                pass_with_pass = (
+                    passed.filter(pl.col(other)).height / len(passed) * 100
+                    if len(passed) > 0
+                    else 0
+                )
+                pass_with_fail = (
+                    failed.filter(pl.col(other)).height / len(failed) * 100
+                    if len(failed) > 0
+                    else 0
+                )
                 print(f"      {other}: {pass_with_pass:.1f}% pass | {pass_with_fail:.1f}% pass")
 
     # Filter redundancy analysis
@@ -347,8 +376,12 @@ def run_filter_analysis():
     most_selective = min(pass_rates, key=pass_rates.get)
     least_selective = max(pass_rates, key=pass_rates.get)
 
-    print(f"\n  Most Selective Filter: {filter_names[most_selective]} ({pass_rates[most_selective]:.1f}% pass rate)")
-    print(f"  Least Selective Filter: {filter_names[least_selective]} ({pass_rates[least_selective]:.1f}% pass rate)")
+    print(
+        f"\n  Most Selective Filter: {filter_names[most_selective]} ({pass_rates[most_selective]:.1f}% pass rate)"
+    )
+    print(
+        f"  Least Selective Filter: {filter_names[least_selective]} ({pass_rates[least_selective]:.1f}% pass rate)"
+    )
 
     print("\n  Considerations:")
     print("    - Low pass rate filters are 'gatekeepers' - they define signal quality")

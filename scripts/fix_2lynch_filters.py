@@ -34,7 +34,9 @@ def rebuild_features_with_r2():
         print(f"  Current feat_daily: {n:,} rows")
 
         # Check R² values
-        r2_check = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 != 0.0").fetchone()[0]
+        r2_check = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 != 0.0").fetchone()[
+            0
+        ]
         print(f"  Non-zero R² values: {r2_check:,}")
 
         if r2_check > 1000:
@@ -52,7 +54,9 @@ def rebuild_features_with_r2():
     print("\n  Approach: Update R² in batches...")
 
     # Get all symbols
-    symbols_result = db.con.execute("SELECT DISTINCT symbol FROM v_daily ORDER BY symbol").fetchall()
+    symbols_result = db.con.execute(
+        "SELECT DISTINCT symbol FROM v_daily ORDER BY symbol"
+    ).fetchall()
     all_symbols = [row[0] for row in symbols_result]
 
     print(f"  Processing {len(all_symbols)} symbols...")
@@ -62,7 +66,7 @@ def rebuild_features_with_r2():
     total_processed = 0
 
     for i in range(0, len(all_symbols), batch_size):
-        batch_symbols = all_symbols[i:i+batch_size]
+        batch_symbols = all_symbols[i : i + batch_size]
         batch_num = i // batch_size + 1
         total_batches = (len(all_symbols) + batch_size - 1) // batch_size
 
@@ -98,7 +102,7 @@ def rebuild_features_with_r2():
                 r2_65[:64] = np.nan
 
                 for j in range(64, n):
-                    window = closes[j - 64:j + 1]
+                    window = closes[j - 64 : j + 1]
                     x = np.arange(65)
 
                     try:
@@ -107,10 +111,10 @@ def rebuild_features_with_r2():
                         sum_x = np.sum(x)
                         sum_y = np.sum(window)
                         sum_xy = np.sum(x * window)
-                        sum_x2 = np.sum(x ** 2)
-                        np.sum(window ** 2)
+                        sum_x2 = np.sum(x**2)
+                        np.sum(window**2)
 
-                        denominator = (n_points * sum_x2 - sum_x ** 2)
+                        denominator = n_points * sum_x2 - sum_x**2
                         if denominator == 0:
                             r2_65[j] = 0.0
                             continue
@@ -409,7 +413,7 @@ class FixedDuckDBSignalGenerator:
 
     sg_file = Path("src/nse_momentum_lab/services/scan/duckdb_signal_generator_fixed.py")
 
-    with open(sg_file, 'w') as f:
+    with open(sg_file, "w") as f:
         f.write(fixed_code)
 
     print(f"  Created: {sg_file}")
@@ -427,6 +431,7 @@ def test_fixed_implementation():
 
     # Import the fixed generator
     import sys
+
     sys.path.insert(0, str(Path(__file__).parent / "src"))
 
     # For now, we'll test with existing generator but with proper config
@@ -451,7 +456,8 @@ if __name__ == "__main__":
 
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     print("\n" + "=" * 80)
     print("FIXING 2LYNCH IMPLEMENTATION - ADR-007 COMPLIANCE")

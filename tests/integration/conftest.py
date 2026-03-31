@@ -109,8 +109,7 @@ def ensure_integration_services_available() -> None:
                 cur.execute("SELECT 1")
                 # Check for specific required tables
                 cur.execute(
-                    "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'nseml'"
+                    "SELECT table_name FROM information_schema.tables WHERE table_schema = 'nseml'"
                 )
                 existing_tables = {row[0] for row in cur.fetchall()}
                 missing = required_tables - existing_tables

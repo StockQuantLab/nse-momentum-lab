@@ -16,6 +16,7 @@ from nse_momentum_lab.db.models import (
     Signal,
 )
 from nse_momentum_lab.db.paper import upsert_paper_order_event
+from nse_momentum_lab.services.backtest.cost_model import CostModel
 from nse_momentum_lab.services.backtest.engine import ExitReason, SlippageModel
 
 logger = logging.getLogger(__name__)
@@ -137,9 +138,11 @@ class PaperTrader:
         self,
         risk_config: RiskConfig | None = None,
         slippage_model: SlippageModel | None = None,
+        cost_model: CostModel | None = None,
     ) -> None:
         self._risk = RiskGovernance(risk_config)
         self._slippage = slippage_model or SlippageModel()
+        self._cost_model = cost_model or CostModel.zerodha()
         self._positions: dict[tuple[str | None, int], PaperPosition] = {}
 
     def _position_key(self, signal_id: int, session_id: str | None) -> tuple[str | None, int]:
@@ -271,6 +274,7 @@ class PaperTrader:
         )
 
         entry_price_adjusted = entry_price * (1 + slippage_bps / 10000)
+        entry_costs = self._cost_model.entry_order_cost(entry_price_adjusted, qty, direction="LONG")
 
         position = PaperPosition(
             session_id=session_key,
@@ -285,6 +289,8 @@ class PaperTrader:
             metadata_json={
                 "signal_id": sig["signal_id"],
                 "session_id": session_key,
+                "entry_costs": entry_costs,
+                "gross_entry_price": entry_price,
             },
         )
         session.add(position)
@@ -309,7 +315,7 @@ class PaperTrader:
             fill_time=_utc_now(),
             fill_price=entry_price_adjusted,
             qty=qty,
-            fees=entry_price_adjusted * qty * DEFAULT_FEE_RATE,
+            fees=entry_costs,
             slippage_bps=slippage_bps,
         )
         session.add(fill)
@@ -404,8 +410,13 @@ class PaperTrader:
     ) -> None:
         slippage_bps = self._slippage.get_slippage_bps(None, exit_price, position.qty)
         exit_price_adjusted = exit_price * (1 - slippage_bps / 10000)
+        exit_costs = self._cost_model.exit_order_cost(
+            exit_price_adjusted, position.qty, direction="LONG"
+        )
 
-        pnl = (exit_price_adjusted - position.avg_entry) * position.qty
+        gross_pnl = (exit_price_adjusted - position.avg_entry) * position.qty
+        entry_costs = float((position.metadata_json or {}).get("entry_costs") or 0.0)
+        pnl = gross_pnl - entry_costs - exit_costs
         session_key = paper_session_id or sig.get("session_id")
         position_key = self._position_key(sig["signal_id"], session_key)
         position_update = update(PaperPosition).where(
@@ -439,10 +450,22 @@ class PaperTrader:
             fill_time=_utc_now(),
             fill_price=exit_price_adjusted,
             qty=position.qty,
-            fees=exit_price_adjusted * position.qty * DEFAULT_FEE_RATE,
+            fees=exit_costs,
             slippage_bps=slippage_bps,
         )
         session.add(fill)
+
+        metadata = dict(position.metadata_json or {})
+        metadata.update(
+            {
+                "gross_pnl": gross_pnl,
+                "entry_costs": entry_costs,
+                "exit_costs": exit_costs,
+                "total_costs": entry_costs + exit_costs,
+                "net_pnl": pnl,
+            }
+        )
+        position.metadata_json = metadata
 
         self._positions.pop(position_key, None)
         await upsert_paper_order_event(
@@ -455,7 +478,11 @@ class PaperTrader:
             payload_json={
                 "qty": position.qty,
                 "exit_price": exit_price_adjusted,
-                "pnl": pnl,
+                "gross_pnl": gross_pnl,
+                "net_pnl": pnl,
+                "entry_costs": entry_costs,
+                "exit_costs": exit_costs,
+                "total_costs": entry_costs + exit_costs,
                 "exit_reason": exit_reason.value,
             },
         )

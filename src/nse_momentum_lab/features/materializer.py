@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import TYPE_CHECKING
 
+from nse_momentum_lab.features.progress import (
+    FeatureBuildProgressReporter,
+    configure_duckdb_for_feature_build,
+)
 from nse_momentum_lab.features.registry import (
     FeatureDefinition,
     FeatureRegistry,
@@ -152,18 +156,65 @@ class IncrementalFeatureMaterializer:
         self,
         con: DuckDBPyConnection,
         plan: MaterializationPlan,
+        progress: FeatureBuildProgressReporter | None = None,
     ) -> MaterializationSummary:
         """Execute a materialization plan."""
         start_time = datetime.now()
         self._results.clear()
-
+        progress = progress or FeatureBuildProgressReporter()
         logger.info("Starting materialization plan: %d feature sets", len(plan.build_order))
+        progress.emit(
+            stage="start",
+            message=f"Starting materialization plan with {len(plan.build_order)} feature sets",
+            status="running",
+            progress_pct=0.0,
+            step=0,
+            step_total=len(plan.build_order),
+            pending_features=len(plan.build_order),
+        )
+        source_summary = self._summarize_sources(con)
+        progress.emit(
+            stage="source_summary",
+            message=f"Source summary: {source_summary}",
+            status="running",
+            progress_pct=0.0,
+            step=0,
+            step_total=len(plan.build_order),
+            pending_features=len(plan.build_order),
+        )
+        configure_duckdb_for_feature_build(con)
 
         for i, feat_def in enumerate(plan.build_order, 1):
             logger.info("[%d/%d] Building %s...", i, len(plan.build_order), feat_def.name)
+            progress.emit(
+                stage="feature_start",
+                message=f"Building {feat_def.name}",
+                status="running",
+                progress_pct=((i - 1) / max(len(plan.build_order), 1)) * 100.0,
+                step=i,
+                step_total=len(plan.build_order),
+                pending_features=len(plan.build_order) - i + 1,
+                feature_name=feat_def.name,
+            )
 
-            result = self._build_feature(con, feat_def, plan.force)
+            result = self._build_feature(con, feat_def, plan.force, progress=progress)
             self._results.append(result)
+            progress.emit(
+                stage=f"feature_{result.status}",
+                message=(
+                    f"{feat_def.name} {result.status}"
+                    + (f" ({result.row_count:,} rows)" if result.row_count else "")
+                ),
+                status=result.status,
+                progress_pct=(i / max(len(plan.build_order), 1)) * 100.0,
+                step=i,
+                step_total=len(plan.build_order),
+                pending_features=len(plan.build_order) - i,
+                feature_name=feat_def.name,
+                row_count=result.row_count,
+                duration_seconds=result.duration_seconds,
+                error_message=result.error_message,
+            )
 
             if result.status == "failed" and plan.stop_on_error:
                 logger.error("Stopping due to error in %s: %s", feat_def.name, result.error_message)
@@ -182,6 +233,19 @@ class IncrementalFeatureMaterializer:
                             plan.build_order = self.registry.resolve_build_order(plan.feature_sets)
 
         duration = (datetime.now() - start_time).total_seconds()
+        progress.emit(
+            stage="complete",
+            message=(
+                f"Materialization plan complete: {sum(1 for r in self._results if r.status == 'success')} "
+                f"success, {sum(1 for r in self._results if r.status == 'skipped')} skipped, "
+                f"{sum(1 for r in self._results if r.status == 'failed')} failed"
+            ),
+            status="failed" if any(r.status == "failed" for r in self._results) else "success",
+            progress_pct=100.0,
+            step=len(self._results),
+            step_total=len(plan.build_order),
+            pending_features=0,
+        )
 
         return MaterializationSummary(
             total_features=len(self._results),
@@ -197,6 +261,7 @@ class IncrementalFeatureMaterializer:
         con: DuckDBPyConnection,
         feat_def: FeatureDefinition,
         force: bool,
+        progress: FeatureBuildProgressReporter | None = None,
     ) -> MaterializationResult:
         """Build a single feature set."""
         import time
@@ -213,7 +278,7 @@ class IncrementalFeatureMaterializer:
             elif feat_def.name == "feat_intraday_core":
                 from nse_momentum_lab.features.intraday_core import build_feat_intraday_core
 
-                row_count = build_feat_intraday_core(con, force=force)
+                row_count = build_feat_intraday_core(con, force=force, progress=progress)
                 rebuild_type = "full" if force else "cached"
             elif feat_def.name == "feat_event_core":
                 from nse_momentum_lab.features.event_core import build_feat_event_core
@@ -264,6 +329,28 @@ class IncrementalFeatureMaterializer:
                 duration_seconds=duration,
                 error_message=str(e),
             )
+
+    def _summarize_sources(self, con: DuckDBPyConnection) -> str:
+        """Summarize active source views for human-readable progress messages."""
+        parts: list[str] = []
+        for view_name, label in (("v_daily", "daily"), ("v_5min", "5min")):
+            try:
+                row = con.execute(
+                    f"""
+                    SELECT
+                        COUNT(*)::BIGINT AS rows,
+                        COUNT(DISTINCT symbol)::BIGINT AS symbols
+                    FROM {view_name}
+                    """
+                ).fetchone()
+                if row:
+                    parts.append(
+                        f"{label}={int(row[1]) if row[1] is not None else 0:,} symbols/"
+                        f"{int(row[0]) if row[0] is not None else 0:,} rows"
+                    )
+            except Exception:
+                continue
+        return ", ".join(parts) if parts else "sources unavailable"
 
     def _build_from_sql(
         self,

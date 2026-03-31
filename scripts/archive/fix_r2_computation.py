@@ -101,7 +101,7 @@ def fix_r2_for_symbol(db, symbol: str) -> int:
     for i in range(len(dates)):
         # Get window of closes ending at this index
         start_idx = max(0, i - window_size + 1)
-        window = closes[start_idx:i + 1]
+        window = closes[start_idx : i + 1]
 
         r2 = compute_r2_for_window(window)
         r2_values.append(r2)
@@ -116,11 +116,14 @@ def fix_r2_for_symbol(db, symbol: str) -> int:
         batch_r2 = r2_values[i:batch_end]
 
         for trading_date, r2_val in zip(batch_dates, batch_r2, strict=False):
-            db.con.execute("""
+            db.con.execute(
+                """
                 UPDATE feat_daily
                 SET r2_65 = ?
                 WHERE symbol = ? AND trading_date = ?
-            """, [float(r2_val), symbol, trading_date])
+            """,
+                [float(r2_val), symbol, trading_date],
+            )
             updates += 1
 
     return updates
@@ -154,7 +157,7 @@ def main():
             total_updates += updates
 
             if (i + 1) % 50 == 0:
-                print(f"  [{i+1}/{len(symbols)}] {symbol}: {updates} rows updated")
+                print(f"  [{i + 1}/{len(symbols)}] {symbol}: {updates} rows updated")
         except Exception as e:
             print(f"  ERROR processing {symbol}: {e}")
 
@@ -175,7 +178,7 @@ def main():
     """).fetchone()
 
     print(f"  Total rows: {verification[0]:,}")
-    print(f"  Positive R²: {verification[1]:,} ({verification[1]/verification[0]*100:.1f}%)")
+    print(f"  Positive R²: {verification[1]:,} ({verification[1] / verification[0] * 100:.1f}%)")
     print(f"  High trend (R² >= 0.7): {verification[2]:,}")
     print(f"  Average R²: {verification[3]:.4f}")
 

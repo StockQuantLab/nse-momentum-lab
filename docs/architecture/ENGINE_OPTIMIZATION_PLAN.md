@@ -37,7 +37,8 @@ satisfy these rules:
      normal daily paper session.
 
 3. Daily readiness must be lighter than walk-forward
-   - Walk-forward remains the research and promotion gate.
+   - Walk-forward remains available for research validation, but it is not required to start
+     a normal daily paper session.
    - Daily live readiness should verify fresh runtime coverage and prior-day parity, not
      demand a full backtest or a same-day daily feature row.
 

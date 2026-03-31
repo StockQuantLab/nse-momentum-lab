@@ -63,7 +63,9 @@ def _walk_forward_session(session_id: str = "wf-1") -> SimpleNamespace:
     )
 
 
-def _walk_forward_fold(fold_id: int, *, session_id: str = "wf-1", exp_id: str = "exp-1") -> SimpleNamespace:
+def _walk_forward_fold(
+    fold_id: int, *, session_id: str = "wf-1", exp_id: str = "exp-1"
+) -> SimpleNamespace:
     return SimpleNamespace(
         fold_id=fold_id,
         wf_session_id=session_id,

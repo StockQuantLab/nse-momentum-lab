@@ -15,10 +15,14 @@ from __future__ import annotations
 import argparse
 import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
-import pandas as pd
+import polars as pl
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 @dataclass
@@ -37,44 +41,60 @@ def _infer_symbol(path: Path) -> str:
     return stem.strip().upper()
 
 
-def _normalize_5min_csv(path: Path, symbol: str) -> pd.DataFrame:
-    df = pd.read_csv(path, usecols=["Date", "Open", "High", "Low", "Close", "Volume"])
-    if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "candle_time",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume",
-                "true_range",
-                "date",
-                "symbol",
-            ]
+def _parse_ist_timestamp(value: object) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=IST)
+    else:
+        parsed = parsed.astimezone(IST)
+    return parsed.replace(tzinfo=None)
+
+
+def _normalize_5min_csv(path: Path, symbol: str) -> pl.DataFrame:
+    df = pl.read_csv(path, columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+    if df.is_empty():
+        return pl.DataFrame(
+            schema={
+                "candle_time": pl.Datetime(time_unit="us"),
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.Int64,
+                "true_range": pl.Float64,
+                "date": pl.Date,
+                "symbol": pl.Utf8,
+            }
         )
 
-    ts = pd.to_datetime(df["Date"], errors="coerce")
-    out = pd.DataFrame(
-        {
-            "candle_time": ts,
-            "open": pd.to_numeric(df["Open"], errors="coerce"),
-            "high": pd.to_numeric(df["High"], errors="coerce"),
-            "low": pd.to_numeric(df["Low"], errors="coerce"),
-            "close": pd.to_numeric(df["Close"], errors="coerce"),
-            "volume": pd.to_numeric(df["Volume"], errors="coerce").fillna(0).astype("int64"),
-            "symbol": symbol,
-        }
+    out = (
+        df.with_columns(
+            pl.col("Date")
+            .map_elements(_parse_ist_timestamp, return_dtype=pl.Datetime(time_unit="us"))
+            .alias("candle_time"),
+            pl.col("Open").cast(pl.Float64, strict=False).alias("open"),
+            pl.col("High").cast(pl.Float64, strict=False).alias("high"),
+            pl.col("Low").cast(pl.Float64, strict=False).alias("low"),
+            pl.col("Close").cast(pl.Float64, strict=False).alias("close"),
+            pl.col("Volume").cast(pl.Int64, strict=False).fill_null(0).alias("volume"),
+            pl.lit(symbol).alias("symbol"),
+        )
+        .drop_nulls(["candle_time", "open", "high", "low", "close"])
+        .with_columns(
+            (pl.col("high") - pl.col("low")).alias("true_range"),
+            pl.col("candle_time").dt.date().alias("date"),
+        )
+        .select(["candle_time", "open", "high", "low", "close", "volume", "true_range", "date", "symbol"])
+        .unique(subset=["candle_time"], keep="last")
+        .sort("candle_time")
     )
-    out = out.dropna(subset=["candle_time", "open", "high", "low", "close"])
-    out["true_range"] = out["high"] - out["low"]
-    out["date"] = out["candle_time"].dt.date
-
-    out = out.sort_values("candle_time")
-    out = out.drop_duplicates(subset=["candle_time"], keep="last")
-    return out[
-        ["candle_time", "open", "high", "low", "close", "volume", "true_range", "date", "symbol"]
-    ]
+    return out
 
 
 def rebuild_5min_parquet(
@@ -102,18 +122,20 @@ def rebuild_5min_parquet(
         symbol = _infer_symbol(path)
         seen_symbols.add(symbol)
         df = _normalize_5min_csv(path, symbol)
-        stats.rows_in += int(pd.read_csv(path, usecols=["Date"]).shape[0])
-        stats.rows_out += len(df)
+        stats.rows_in += df.height
+        stats.rows_out += df.height
 
-        if not df.empty:
+        if not df.is_empty():
             symbol_dir = out_dir / symbol
             symbol_dir.mkdir(parents=True, exist_ok=True)
-            df["year"] = pd.to_datetime(df["date"]).dt.year
-
-            for year, year_df in df.groupby("year", sort=True):
-                target = symbol_dir / f"{int(year)}.parquet"
-                tmp = symbol_dir / f"{int(year)}.parquet.tmp"
-                year_df.drop(columns=["year"]).to_parquet(tmp, index=False)
+            yearly_frames = df.with_columns(pl.col("date").dt.year().alias("year")).partition_by(
+                "year", maintain_order=True
+            )
+            for year_df in yearly_frames:
+                year = int(year_df.get_column("year")[0])
+                target = symbol_dir / f"{year}.parquet"
+                tmp = symbol_dir / f"{year}.parquet.tmp"
+                year_df.drop("year").write_parquet(tmp)
                 tmp.replace(target)
                 stats.parquet_files += 1
 
@@ -149,8 +171,12 @@ def validate_5min_parquet(out_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Rebuild 5-minute parquet from raw CSV files")
-    parser.add_argument("--raw-dir", default="data/raw/5min", help="Raw 5-minute CSV root directory")
-    parser.add_argument("--out-dir", default="data/parquet/5min", help="5-minute parquet output directory")
+    parser.add_argument(
+        "--raw-dir", default="data/raw/5min", help="Raw 5-minute CSV root directory"
+    )
+    parser.add_argument(
+        "--out-dir", default="data/parquet/5min", help="5-minute parquet output directory"
+    )
     parser.add_argument("--limit", type=int, default=None, help="Limit number of CSV files")
     parser.add_argument(
         "--no-clean",

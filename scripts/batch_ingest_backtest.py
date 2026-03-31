@@ -20,9 +20,7 @@ async def get_ingested_symbols():
     """Get list of already ingested symbols."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        result = await session.execute(
-            select(RefSymbol.symbol).where(RefSymbol.status == "ACTIVE")
-        )
+        result = await session.execute(select(RefSymbol.symbol).where(RefSymbol.status == "ACTIVE"))
         return sorted([r[0] for r in result.fetchall()])
 
 
@@ -52,9 +50,12 @@ async def run_backtest():
 
 async def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="Batch ingest and backtest")
     parser.add_argument("--batch-size", type=int, default=100, help="Number of stocks to process")
-    parser.add_argument("--skip-ingest", action="store_true", help="Skip ingestion, just scan/backtest")
+    parser.add_argument(
+        "--skip-ingest", action="store_true", help="Skip ingestion, just scan/backtest"
+    )
     parser.add_argument("--scan-only", action="store_true", help="Only run scans, no backtest")
     args = parser.parse_args()
 

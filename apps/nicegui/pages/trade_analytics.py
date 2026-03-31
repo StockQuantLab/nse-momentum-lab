@@ -116,7 +116,7 @@ async def trade_analytics_page() -> None:
                     )
                 )
             if "pnl_r" in trades_df.columns:
-                avg_r = trades_df["pnl_r"].mean()
+                avg_r = float(trades_df["pnl_r"].mean())
                 cards.append(
                     dict(
                         title="Avg R",

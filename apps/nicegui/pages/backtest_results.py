@@ -44,8 +44,10 @@ from apps.nicegui.components import (
     color_success,
     color_warning,
     empty_state,
+    hex_to_rgba,
     page_header,
     paginated_table,
+    trade_table_with_filters,
     export_menu,
     loading_spinner,
     SPACE_GRID_DEFAULT,
@@ -55,6 +57,7 @@ from apps.nicegui.components import (
     SPACE_SM,
     SPACE_XL,
     theme_primary,
+    theme_surface,
     theme_text_muted,
     theme_text_primary,
     theme_text_secondary,
@@ -171,83 +174,6 @@ async def backtest_page() -> None:
             )
 
             divider()
-
-            ui.label("Yearly Breakdown").classes(f"text-xl font-semibold {SPACE_XL}").style(
-                f"color: {theme_text_primary()};"
-            )
-
-            yearly_df = get_experiment_yearly_metrics(exp_id)
-
-            if not yearly_df.is_empty():
-                display_cols = {
-                    "year": "Year",
-                    "signals": "Signals",
-                    "trades": "Trades",
-                    "wins": "Wins",
-                    "losses": "Losses",
-                    "return_pct": "Return %",
-                    "win_rate_pct": "Win Rate %",
-                    "avg_r": "Avg R",
-                    "max_dd_pct": "Max DD %",
-                    "profit_factor": "PF",
-                }
-                available = [c for c in display_cols if c in yearly_df.columns]
-                rename_dict = {k: v for k, v in display_cols.items() if k in available}
-
-                if available:
-                    display_df = yearly_df.select(available).rename(rename_dict)
-
-                    def format_for_display(val, col):
-                        if val is None or (isinstance(val, float) and np.isnan(val)):
-                            return "-"
-                        if "Return" in col or "Rate" in col or "DD" in col:
-                            return f"{float(val):.2f}%"
-                        if col in ["Avg R", "PF"]:
-                            return f"{float(val):.2f}"
-                        return f"{int(val)}"
-
-                    paginated_table(
-                        columns=[
-                            {"name": col, "label": col, "field": col} for col in display_df.columns
-                        ],
-                        rows=[
-                            {
-                                col: format_for_display(row.get(col), col)
-                                for col in display_df.columns
-                            }
-                            for row in display_df.to_dicts()
-                        ],
-                        page_size=20,
-                    )
-
-                if "return_pct" in yearly_df.columns and "year" in yearly_df.columns:
-                    yearly_chart_df = yearly_df.sort("year")
-                    fig_yearly = go.Figure(
-                        data=[
-                            go.Bar(
-                                x=yearly_chart_df.get_column("year").to_list(),
-                                y=yearly_chart_df.get_column("return_pct").to_list(),
-                                marker=dict(
-                                    color=yearly_chart_df.get_column("return_pct").to_list(),
-                                    colorscale=[
-                                        [0.0, "#ef4444"],
-                                        [0.5, "#f59e0b"],
-                                        [1.0, "#22c55e"],
-                                    ],
-                                    showscale=False,
-                                ),
-                                name="Return %",
-                            )
-                        ]
-                    )
-                    fig_yearly.update_layout(
-                        title="Yearly Returns",
-                        xaxis_title="Year",
-                        yaxis_title="Return %",
-                        showlegend=False,
-                    )
-                    apply_chart_theme(fig_yearly)
-                    ui.plotly(fig_yearly).classes("w-full h-64")
 
             raw_trades_df = get_experiment_trades(exp_id).with_row_index("trade_row_id")
             trades_df = raw_trades_df
@@ -623,11 +549,15 @@ async def backtest_page() -> None:
                                             ("Rejection/Decision", diag.get("reason", "—")),
                                             (
                                                 "Signal Date",
-                                                _coerce_date(diag.get("signal_date")).strftime(
-                                                    "%Y-%m-%d"
-                                                )
-                                                if _coerce_date(diag.get("signal_date"))
-                                                else "—",
+                                                (
+                                                    signal_dt.strftime("%Y-%m-%d")
+                                                    if (
+                                                        signal_dt := _coerce_date(
+                                                            diag.get("signal_date")
+                                                        )
+                                                    )
+                                                    else "—"
+                                                ),
                                             ),
                                             ("Signal Time", str(diag.get("entry_time") or "—")),
                                             (
@@ -737,8 +667,56 @@ async def backtest_page() -> None:
                 f"color: {theme_text_primary()};"
             )
 
+            # --- Yearly data (for Yearly tab) ---
+            yearly_df = get_experiment_yearly_metrics(exp_id)
+
+            # --- Shared trade table helpers (used by All Trades and Winners/Losers tabs) ---
+            trade_cols = [
+                "entry_date",
+                "entry_time",
+                "symbol",
+                "entry_price",
+                "exit_date",
+                "exit_time",
+                "exit_price",
+                "exit_reason",
+                "holding_days",
+                "pnl_pct",
+                "pnl_r",
+            ]
+            avail_cols = [c for c in trade_cols if c in trades_df.columns]
+
+            def _format_trade_val(val, col):
+                if _is_missing(val):
+                    return "-"
+                if col == "pnl_pct":
+                    return f"{val:.2f}%"
+                if col == "pnl_r":
+                    return f"{val:.2f}R"
+                if "price" in col:
+                    return f"{val:.2f}"
+                if col == "holding_days":
+                    return f"{int(val)}d"
+                return str(val)
+
+            def _trade_rows(df_slice: pl.DataFrame):
+                return [
+                    {
+                        "trade_row_id": int(row["trade_row_id"]),
+                        **{col: _format_trade_val(row.get(col), col) for col in avail_cols},
+                    }
+                    for row in df_slice.to_dicts()
+                ]
+
+            table_columns = [
+                {"name": col, "label": col.replace("_", " ").title(), "field": col}
+                for col in avail_cols
+            ]
+
             tabs = ui.tabs().classes("w-full")
             with tabs:
+                tab_trades = ui.tab("All Trades")
+                tab_yearly = ui.tab("Yearly")
                 tab_equity = ui.tab("Equity Curve")
                 tab_exit = ui.tab("Exit Reasons")
                 tab_r = ui.tab("R-Multiple")
@@ -746,7 +724,113 @@ async def backtest_page() -> None:
                 tab_stock = ui.tab("Per-Stock")
                 tab_monthly = ui.tab("Monthly Heatmap")
 
-            with ui.tab_panels(tabs, value=tab_equity).classes("w-full"):
+            with ui.tab_panels(tabs, value=tab_trades).classes("w-full"):
+                with ui.tab_panel(tab_trades):
+                    with ui.row().classes(f"w-full {SPACE_GROUP_TIGHT} mb-2"):
+                        n_total = trades_df.height
+                        n_winners = int(
+                            trades_df.filter(pl.col("pnl_pct") > 0).height
+                            if "pnl_pct" in trades_df.columns
+                            else 0
+                        )
+                        ui.label(f"{n_total:,} trades total").classes("text-sm").style(
+                            f"color: {theme_text_secondary()};"
+                        )
+                        ui.label(f"{n_winners:,} winners").classes("text-sm").style(
+                            f"color: {color_success()};"
+                        )
+                        ui.label(f"{n_total - n_winners:,} losers").classes("text-sm").style(
+                            f"color: {color_error()};"
+                        )
+                    ui.label("Click any trade row to inspect details.").classes("text-xs").style(
+                        f"color: {theme_text_muted()};"
+                    )
+                    trade_table_with_filters(
+                        trades_df=trades_df,
+                        columns=table_columns,
+                        rows=_trade_rows(trades_df),
+                        page_size=50,
+                        row_key="trade_row_id",
+                        on_row_click=_open_trade_details_from_payload,
+                    )
+                with ui.tab_panel(tab_yearly):
+                    if not yearly_df.is_empty():
+                        display_cols = {
+                            "year": "Year",
+                            "signals": "Signals",
+                            "trades": "Trades",
+                            "wins": "Wins",
+                            "losses": "Losses",
+                            "return_pct": "Return %",
+                            "win_rate_pct": "Win Rate %",
+                            "avg_r": "Avg R",
+                            "max_dd_pct": "Max DD %",
+                            "profit_factor": "PF",
+                        }
+                        available = [c for c in display_cols if c in yearly_df.columns]
+                        rename_dict = {k: v for k, v in display_cols.items() if k in available}
+
+                        if available:
+                            display_df = yearly_df.select(available).rename(rename_dict)
+
+                            def format_for_display(val, col):
+                                if val is None or (isinstance(val, float) and np.isnan(val)):
+                                    return "-"
+                                if "Return" in col or "Rate" in col or "DD" in col:
+                                    return f"{float(val):.2f}%"
+                                if col in ["Avg R", "PF"]:
+                                    return f"{float(val):.2f}"
+                                return f"{int(val)}"
+
+                            paginated_table(
+                                columns=[
+                                    {"name": col, "label": col, "field": col}
+                                    for col in display_df.columns
+                                ],
+                                rows=[
+                                    {
+                                        col: format_for_display(row.get(col), col)
+                                        for col in display_df.columns
+                                    }
+                                    for row in display_df.to_dicts()
+                                ],
+                                page_size=20,
+                            )
+
+                        if "return_pct" in yearly_df.columns and "year" in yearly_df.columns:
+                            yearly_chart_df = yearly_df.sort("year")
+                            fig_yearly = go.Figure(
+                                data=[
+                                    go.Bar(
+                                        x=yearly_chart_df.get_column("year").to_list(),
+                                        y=yearly_chart_df.get_column("return_pct").to_list(),
+                                        marker=dict(
+                                            color=yearly_chart_df.get_column(
+                                                "return_pct"
+                                            ).to_list(),
+                                            colorscale=[
+                                                [0.0, color_error()],
+                                                [0.5, color_warning()],
+                                                [1.0, color_success()],
+                                            ],
+                                            showscale=False,
+                                        ),
+                                        name="Return %",
+                                    )
+                                ]
+                            )
+                            fig_yearly.update_layout(
+                                title="Yearly Returns",
+                                xaxis_title="Year",
+                                yaxis_title="Return %",
+                                showlegend=False,
+                            )
+                            apply_chart_theme(fig_yearly)
+                            ui.plotly(fig_yearly).classes("w-full h-64")
+                    else:
+                        ui.label("No yearly data available for this experiment.").style(
+                            f"color: {theme_text_secondary()};"
+                        )
                 with ui.tab_panel(tab_equity):
                     if "pnl_pct" in trades_df.columns and "entry_date" in trades_df.columns:
                         equity = (
@@ -762,11 +846,6 @@ async def backtest_page() -> None:
                                 (pl.col("cumulative_return") - pl.col("cummax")).alias("drawdown")
                             )
                         )
-
-                        def hex_to_rgba(hex_color: str, alpha: float = 0.2) -> str:
-                            hex_color = hex_color.lstrip("#")
-                            r, g, b = tuple(int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
-                            return f"rgba({r},{g},{b},{alpha})"
 
                         fig_eq = go.Figure()
 
@@ -943,51 +1022,6 @@ async def backtest_page() -> None:
 
                 with ui.tab_panel(tab_wl):
                     if "pnl_pct" in trades_df.columns:
-                        trade_cols = [
-                            "entry_date",
-                            "entry_time",
-                            "symbol",
-                            "entry_price",
-                            "exit_date",
-                            "exit_time",
-                            "exit_price",
-                            "exit_reason",
-                            "holding_days",
-                            "pnl_pct",
-                            "pnl_r",
-                        ]
-                        avail_cols = [c for c in trade_cols if c in trades_df.columns]
-
-                        def _format_trade_val(val, col):
-                            if _is_missing(val):
-                                return "-"
-                            if col == "pnl_pct":
-                                return f"{val:.2f}%"
-                            if col == "pnl_r":
-                                return f"{val:.2f}R"
-                            if "price" in col:
-                                return f"{val:.2f}"
-                            if col == "holding_days":
-                                return f"{int(val)}d"
-                            return str(val)
-
-                        def _trade_rows(df_slice: pl.DataFrame):
-                            return [
-                                {
-                                    "trade_row_id": int(row["trade_row_id"]),
-                                    **{
-                                        col: _format_trade_val(row.get(col), col)
-                                        for col in avail_cols
-                                    },
-                                }
-                                for row in df_slice.to_dicts()
-                            ]
-
-                        table_columns = [
-                            {"name": col, "label": col.replace("_", " ").title(), "field": col}
-                            for col in avail_cols
-                        ]
-
                         with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
                             with ui.column().classes("flex-1"):
                                 ui.label("Top Winners").classes(
@@ -1118,7 +1152,11 @@ async def backtest_page() -> None:
                                 "Dec",
                             ],
                             y=years,
-                            color_continuous_scale=[color_error(), "#f1f5f9", color_success()],
+                            color_continuous_scale=[
+                                color_error(),
+                                theme_surface(),
+                                color_success(),
+                            ],
                             color_continuous_midpoint=0,
                             title="Monthly Returns Heatmap",
                         )

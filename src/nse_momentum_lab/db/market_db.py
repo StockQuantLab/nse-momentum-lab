@@ -184,7 +184,7 @@ class MarketDataDB:
         try:
             self.con.execute(f"""
                 CREATE OR REPLACE {view_qualifier} {view_name} AS
-                SELECT * FROM read_parquet('{self._sql_literal(glob_path)}', hive_partitioning=false)
+                SELECT * FROM read_parquet('{self._sql_literal(glob_path)}', hive_partitioning=false, union_by_name=true)
             """)
             # Validate that the view is queryable.
             self.con.execute(f"SELECT * FROM {view_name} LIMIT 1").fetchall()
@@ -323,6 +323,10 @@ class MarketDataDB:
                 exit_date       DATE,
                 entry_price     DOUBLE,
                 exit_price      DOUBLE,
+                position_value  DOUBLE,
+                gross_pnl       DOUBLE,
+                net_pnl         DOUBLE,
+                total_costs     DOUBLE,
                 pnl_pct         DOUBLE,
                 pnl_r           DOUBLE,
                 exit_reason     VARCHAR,
@@ -331,12 +335,18 @@ class MarketDataDB:
                 filters_passed  INTEGER,
                 year            INTEGER,
                 entry_time      TIME,
-                exit_time       TIME
+                exit_time       TIME,
+                commission_model VARCHAR
             )
         """)
         # Backward compatibility: add timestamp columns to existing catalogs.
         self._ensure_column("bt_trade", "entry_time", "TIME")
         self._ensure_column("bt_trade", "exit_time", "TIME")
+        self._ensure_column("bt_trade", "position_value", "DOUBLE")
+        self._ensure_column("bt_trade", "gross_pnl", "DOUBLE")
+        self._ensure_column("bt_trade", "net_pnl", "DOUBLE")
+        self._ensure_column("bt_trade", "total_costs", "DOUBLE")
+        self._ensure_column("bt_trade", "commission_model", "VARCHAR")
 
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS bt_yearly_metric (
@@ -441,7 +451,15 @@ class MarketDataDB:
             pass
 
         escaped_path = str(target_path).replace("\\", "/").replace("'", "''")
-        self.con.execute(f"ATTACH '{escaped_path}' AS bt_read")
+        try:
+            self.con.execute(f"ATTACH '{escaped_path}' AS bt_read")
+        except Exception as exc:
+            logger.warning(
+                "Skipping backtest dashboard snapshot refresh because %s is locked: %s",
+                target_path,
+                exc,
+            )
+            return
         try:
             self.con.execute(
                 "CREATE OR REPLACE TABLE bt_read.bt_experiment AS SELECT * FROM bt_experiment"
@@ -455,7 +473,10 @@ class MarketDataDB:
                 "AS SELECT * FROM bt_execution_diagnostic"
             )
         finally:
-            self.con.execute("DETACH bt_read")
+            try:
+                self.con.execute("DETACH bt_read")
+            except Exception as exc:
+                logger.warning("Failed to detach bt_read after snapshot refresh: %s", exc)
 
     def _view_snapshot(self, view: str) -> dict[str, int | str | None]:
         if (view == "v_daily" and not self._has_daily) or (view == "v_5min" and not self._has_5min):
@@ -634,6 +655,10 @@ class MarketDataDB:
                 t.get("exit_date"),
                 t.get("entry_price"),
                 t.get("exit_price"),
+                t.get("position_value"),
+                t.get("gross_pnl"),
+                t.get("net_pnl"),
+                t.get("total_costs"),
                 t.get("pnl_pct", 0),
                 t.get("r_multiple", 0),
                 t.get("exit_reason", "unknown"),
@@ -643,6 +668,7 @@ class MarketDataDB:
                 t.get("year"),
                 t.get("entry_time"),
                 t.get("exit_time"),
+                t.get("commission_model"),
             )
             for t in trades
         ]
@@ -651,9 +677,10 @@ class MarketDataDB:
             self.con.executemany(
                 """INSERT INTO bt_trade
                    (exp_id, symbol, entry_date, exit_date, entry_price, exit_price,
-                    pnl_pct, pnl_r, exit_reason, holding_days, gap_pct, filters_passed, year,
-                    entry_time, exit_time)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    position_value, gross_pnl, net_pnl, total_costs, pnl_pct, pnl_r,
+                    exit_reason, holding_days, gap_pct, filters_passed, year,
+                    entry_time, exit_time, commission_model)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
             self.con.execute("COMMIT")
@@ -1176,20 +1203,112 @@ class MarketDataDB:
     ) -> None:
         """Build modular feature store (feat_daily_core, feat_intraday_core, etc.)."""
         from nse_momentum_lab.features import create_legacy_feat_daily_view
+        from nse_momentum_lab.features.progress import FeatureBuildProgressReporter
 
         if since_date is not None and not force:
-            daily_rows = self.build_feat_daily_core(force=force, since_date=since_date)
-            intraday_rows = self.build_feat_intraday_core(force=force, since_date=since_date)
-            event_rows = self.build_feat_event_core(force=force, since_date=since_date)
-            derived_rows = self.build_2lynch_derived(force=force, since_date=since_date)
-            logger.info(
-                "Incremental feature build complete since %s: daily=%d intraday=%d event=%d derived=%d",
-                since_date,
-                daily_rows,
-                intraday_rows,
-                event_rows,
-                derived_rows,
+            progress = FeatureBuildProgressReporter()
+            source_summary = self._summarize_feature_sources()
+            progress.emit(
+                stage="start",
+                message=(
+                    f"Starting incremental feature build since {since_date} ({source_summary})"
+                ),
+                status="running",
+                progress_pct=0.0,
+                step=0,
+                step_total=4,
+                pending_features=4,
             )
+            try:
+                daily_rows = self.build_feat_daily_core(force=force, since_date=since_date)
+                progress.emit(
+                    stage="feat_daily_core",
+                    message=f"feat_daily_core rebuilt since {since_date}: {daily_rows:,} rows",
+                    status="success",
+                    progress_pct=25.0,
+                    step=1,
+                    step_total=4,
+                    pending_features=3,
+                    feature_name="feat_daily_core",
+                    row_count=daily_rows,
+                )
+                intraday_rows = self.build_feat_intraday_core(
+                    force=force,
+                    since_date=since_date,
+                    progress=progress,
+                )
+                progress.emit(
+                    stage="feat_intraday_core",
+                    message=(
+                        f"feat_intraday_core rebuilt since {since_date}: {intraday_rows:,} rows"
+                    ),
+                    status="success",
+                    progress_pct=50.0,
+                    step=2,
+                    step_total=4,
+                    pending_features=2,
+                    feature_name="feat_intraday_core",
+                    row_count=intraday_rows,
+                )
+                event_rows = self.build_feat_event_core(force=force, since_date=since_date)
+                progress.emit(
+                    stage="feat_event_core",
+                    message=f"feat_event_core rebuilt since {since_date}: {event_rows:,} rows",
+                    status="success",
+                    progress_pct=75.0,
+                    step=3,
+                    step_total=4,
+                    pending_features=1,
+                    feature_name="feat_event_core",
+                    row_count=event_rows,
+                )
+                derived_rows = self.build_2lynch_derived(force=force, since_date=since_date)
+                progress.emit(
+                    stage="feat_2lynch_derived",
+                    message=(
+                        f"feat_2lynch_derived rebuilt since {since_date}: {derived_rows:,} rows"
+                    ),
+                    status="success",
+                    progress_pct=100.0,
+                    step=4,
+                    step_total=4,
+                    pending_features=0,
+                    feature_name="feat_2lynch_derived",
+                    row_count=derived_rows,
+                )
+                logger.info(
+                    "Incremental feature build complete since %s: daily=%d intraday=%d event=%d derived=%d",
+                    since_date,
+                    daily_rows,
+                    intraday_rows,
+                    event_rows,
+                    derived_rows,
+                )
+                progress.emit(
+                    stage="complete",
+                    message=(
+                        f"Incremental feature build complete since {since_date}: "
+                        f"daily={daily_rows} intraday={intraday_rows} event={event_rows} "
+                        f"derived={derived_rows}"
+                    ),
+                    status="success",
+                    progress_pct=100.0,
+                    step=4,
+                    step_total=4,
+                    pending_features=0,
+                )
+            except Exception as exc:
+                progress.emit(
+                    stage="failed",
+                    message=f"Incremental feature build failed since {since_date}: {exc}",
+                    status="failed",
+                    progress_pct=None,
+                    step=None,
+                    step_total=4,
+                    pending_features=None,
+                    error_message=str(exc),
+                )
+                raise
         else:
             from nse_momentum_lab.features import IncrementalFeatureMaterializer
 
@@ -1213,6 +1332,7 @@ class MarketDataDB:
         force: bool = False,
         dataset_hash: str | None = None,
         since_date: date | None = None,
+        symbols: list[str] | None = None,
     ) -> int:
         """Build feat_daily_core materialized table.
 
@@ -1226,12 +1346,17 @@ class MarketDataDB:
             force=force,
             dataset_hash=dataset_hash,
             since_date=since_date,
+            symbols=symbols,
         )
 
     def build_feat_intraday_core(
         self,
         force: bool = False,
         since_date: date | None = None,
+        symbols: list[str] | None = None,
+        year_start: int | None = None,
+        year_end: int | None = None,
+        progress=None,
     ) -> int:
         """Build feat_intraday_core materialized table.
 
@@ -1239,7 +1364,15 @@ class MarketDataDB:
         """
         from nse_momentum_lab.features.intraday_core import build_feat_intraday_core
 
-        return build_feat_intraday_core(self.con, force=force, since_date=since_date)
+        return build_feat_intraday_core(
+            self.con,
+            force=force,
+            since_date=since_date,
+            symbols=symbols,
+            year_start=year_start,
+            year_end=year_end,
+            progress=progress,
+        )
 
     def build_feat_event_core(
         self,
@@ -1258,6 +1391,7 @@ class MarketDataDB:
         self,
         force: bool = False,
         since_date: date | None = None,
+        symbols: list[str] | None = None,
     ) -> int:
         """Build feat_2lynch_derived materialized table.
 
@@ -1265,7 +1399,7 @@ class MarketDataDB:
         """
         from nse_momentum_lab.features.strategy_derived import build_2lynch_derived
 
-        return build_2lynch_derived(self.con, force=force, since_date=since_date)
+        return build_2lynch_derived(self.con, force=force, since_date=since_date, symbols=symbols)
 
     def drop_and_rebuild(self, use_modular: bool = True) -> None:
         """Drop all materialized tables and rebuild from Parquet.
@@ -1381,9 +1515,9 @@ class MarketDataDB:
             return None
 
         row = self.con.execute(
-            """SELECT symbol, trading_date, ret_1d, ret_5d, atr_20, range_pct,
+            """SELECT symbol, date AS trading_date, ret_1d, ret_5d, atr_20, range_pct,
                       close_pos_in_range, ma_20, ma_65, ma_7, ma_65_sma, rs_252, vol_20, dollar_vol_20
-               FROM feat_daily WHERE symbol = ? AND trading_date = ?""",
+               FROM feat_daily WHERE symbol = ? AND date = ?""",
             [symbol, trading_date],
         ).fetchone()
 
@@ -1735,6 +1869,28 @@ class MarketDataDB:
         logger.info("market_monitor_daily built: %d rows", n)
         return n
 
+    def _summarize_feature_sources(self) -> str:
+        """Summarize active source views for operator progress messages."""
+        parts: list[str] = []
+        for view_name, label in (("v_daily", "daily"), ("v_5min", "5min")):
+            try:
+                row = self.con.execute(
+                    f"""
+                    SELECT
+                        COUNT(*)::BIGINT AS rows,
+                        COUNT(DISTINCT symbol)::BIGINT AS symbols
+                    FROM {view_name}
+                    """
+                ).fetchone()
+                if row:
+                    parts.append(
+                        f"{label}={int(row[1]) if row[1] is not None else 0:,} symbols/"
+                        f"{int(row[0]) if row[0] is not None else 0:,} rows"
+                    )
+            except Exception:
+                continue
+        return ", ".join(parts) if parts else "sources unavailable"
+
     def build_market_monitor_incremental(
         self,
         since_date: date | None = None,
@@ -1915,7 +2071,7 @@ class MarketDataDB:
         return self.con.execute(
             f"""SELECT symbol, AVG(dollar_vol_20) AS avg_dollar_vol_20
                 FROM feat_daily
-                WHERE symbol IN ({placeholders}) AND trading_date >= ? AND trading_date <= ?
+                WHERE symbol IN ({placeholders}) AND date >= ? AND date <= ?
                 GROUP BY symbol""",
             [*symbols, start_date, end_date],
         ).pl()
@@ -2092,8 +2248,8 @@ def get_backtest_db(read_only: bool = False) -> MarketDataDB:
     """
     global _backtest_db
     if _backtest_db is None:
-        env_name = "BACKTEST_DASHBOARD_DUCKDB_PATH" if read_only else "BACKTEST_DUCKDB_PATH"
-        default_path = BACKTEST_DASHBOARD_DUCKDB_FILE if read_only else BACKTEST_DUCKDB_FILE
+        env_name = "BACKTEST_DUCKDB_PATH"
+        default_path = BACKTEST_DUCKDB_FILE
         backtest_path = Path(os.getenv(env_name, str(default_path)))
         _backtest_db = MarketDataDB(db_path=backtest_path, read_only=read_only)
     return _backtest_db

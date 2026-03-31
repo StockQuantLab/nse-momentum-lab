@@ -107,9 +107,7 @@ def build_parser():
     module = _load_runner_module()
 
     parser = module.build_parser()
-    parser.description = (
-        "Run repeated breakdown optimization presets for reproducible experiments."
-    )
+    parser.description = "Run repeated breakdown optimization presets for reproducible experiments."
     parser.formatter_class = argparse.RawTextHelpFormatter
     parser.add_argument(
         "--step",
@@ -223,10 +221,7 @@ def main() -> None:
         # Keep 4%% leg stable: Option-B profile + no phase-1 filter overrides.
         common_4pct = dict(common)
 
-        print(
-            f"\n===== Running breakdown step: {step} "
-            f"({STEP_PRESETS[step]['description']}) ====="
-        )
+        print(f"\n===== Running breakdown step: {step} ({STEP_PRESETS[step]['description']}) =====")
         exp_4 = module._run_variant(
             runner,
             label=f"4% breakdown ({step})",

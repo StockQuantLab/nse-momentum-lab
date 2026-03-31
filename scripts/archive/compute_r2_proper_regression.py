@@ -45,7 +45,7 @@ def compute_linear_rise2(prices: np.ndarray, window_size: int = 65) -> np.ndarra
     # For each position in the series
     for i in range(window_size - 1, n):
         # Get window of prices
-        window = prices[i - window_size + 1:i + 1]
+        window = prices[i - window_size + 1 : i + 1]
 
         # Remove NaN values
         valid_mask = ~np.isnan(window)
@@ -119,11 +119,9 @@ def compute_rise2_for_symbol_polars(symbol: str, db, window_size: int = 65) -> p
     r2_values = compute_linear_rise2(closes, window_size)
 
     # Return as Polars DataFrame
-    return pl.DataFrame({
-        "symbol": [symbol] * len(dates),
-        "trading_date": dates,
-        "r2_65": r2_values
-    })
+    return pl.DataFrame(
+        {"symbol": [symbol] * len(dates), "trading_date": dates, "r2_65": r2_values}
+    )
 
 
 def main():
@@ -199,7 +197,7 @@ def main():
     print(f"\n{'=' * 80}")
     print("RESULTS:")
     print(f"  Total rows: {result[0]:,}")
-    print(f"  Positive R² (> 0): {result[1]:,} ({result[1]/result[0]*100:.1f}%)")
+    print(f"  Positive R² (> 0): {result[1]:,} ({result[1] / result[0] * 100:.1f}%)")
     print(f"  Medium trend (>= 0.5): {result[2]:,}")
     print(f"  High trend (>= 0.7): {result[3]:,}")
     print(f"  Very high trend (>= 0.8): {result[4]:,}")
@@ -221,7 +219,9 @@ def main():
 
     print("\nBACKTEST PERIOD (2020-2024):")
     print(f"  Total rows: {backtest_result[0]:,}")
-    print(f"  High trend (>= 0.7): {backtest_result[1]:,} ({backtest_result[1]/backtest_result[0]*100:.1f}%)")
+    print(
+        f"  High trend (>= 0.7): {backtest_result[1]:,} ({backtest_result[1] / backtest_result[0] * 100:.1f}%)"
+    )
     print(f"  Average R²: {backtest_result[2]:.4f}")
 
 

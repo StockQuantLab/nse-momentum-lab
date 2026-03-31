@@ -39,9 +39,8 @@ def _build_threshold_breakout_candidate_query(
 ) -> tuple[str, list[object]]:
     """Build candidate query for 2LYNCH threshold breakout strategy (long).
 
-    Uses the identical 2LYNCH filter stack (H, N, 2, Y, C, L) as the legacy 4% baseline.
-    The threshold is a configurable parameter; all other filters are canonical 2LYNCH.
-    filter_2 = 'Not Up 2 Days': at least one of the 2 days before the breakout was down.
+    The entry contract uses the prior-day watchlist features only. Same-day
+    breakout-day data is reserved for the intraday trigger, not for admission.
     """
     symbols_placeholders = ",".join("?" for _ in symbols)
     threshold = getattr(params, "breakout_threshold", 0.04)
@@ -58,63 +57,92 @@ def _build_threshold_breakout_candidate_query(
         ),
         with_lag AS (
             SELECT
-                symbol, date AS trading_date, open, high, low, close, volume,
-                LAG(date) OVER (PARTITION BY symbol ORDER BY date) AS prev_trading_date,
+                symbol,
+                date AS trading_date,
+                LAG(date) OVER (PARTITION BY symbol ORDER BY date) AS watch_date,
+                open,
+                high,
+                low,
+                close,
+                volume,
                 LAG(close) OVER (PARTITION BY symbol ORDER BY date) AS prev_close,
                 LAG(high) OVER (PARTITION BY symbol ORDER BY date) AS prev_high,
                 LAG(low) OVER (PARTITION BY symbol ORDER BY date) AS prev_low,
                 LAG(open) OVER (PARTITION BY symbol ORDER BY date) AS prev_open,
-                (LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date)
-                 - LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag1,
+                LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date) AS prev_close_2,
+                LAG(open, 2) OVER (PARTITION BY symbol ORDER BY date) AS prev_open_2,
+                LAG(volume) OVER (PARTITION BY symbol ORDER BY date) AS prev_volume,
                 (LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date)
                  - LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag2,
+                / NULLIF(LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date), 0) AS watch_ret_1d_lag1,
+                (LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date)
+                 - LAG(close, 4) OVER (PARTITION BY symbol ORDER BY date))
+                / NULLIF(LAG(close, 4) OVER (PARTITION BY symbol ORDER BY date), 0) AS watch_ret_1d_lag2,
                 (open - LAG(close) OVER (PARTITION BY symbol ORDER BY date))
                 / NULLIF(LAG(close) OVER (PARTITION BY symbol ORDER BY date), 0) AS gap_pct,
-                close * volume AS value_traded_inr
-            FROM numbered_daily WHERE rn > 1
+                LAG(close) OVER (PARTITION BY symbol ORDER BY date)
+                  * LAG(volume) OVER (PARTITION BY symbol ORDER BY date) AS watch_value_traded_inr
+            FROM numbered_daily
         ),
         breakout_days AS (
             SELECT * FROM with_lag
             WHERE ((high - prev_close) / NULLIF(prev_close, 0)) >= ?
               AND prev_close IS NOT NULL
-              AND close >= ?
-              AND value_traded_inr >= ?
-              AND volume >= ?
-              AND ret_1d_lag1 IS NOT NULL
+              AND watch_date IS NOT NULL
+              AND prev_close >= ?
+              AND watch_value_traded_inr >= ?
+              AND prev_volume >= ?
+              AND watch_ret_1d_lag1 IS NOT NULL
         ),
         with_features AS (
             SELECT g.*,
-                f.close_pos_in_range, f.ma_20, f.ret_5d, f.atr_20,
-                f.vol_dryup_ratio, f.atr_compress_ratio, f.range_percentile,
-                f.prior_breakouts_30d, f.prior_breakouts_90d, f.r2_65,
-                f.ma_7, f.ma_65_sma,
-                f_prev.vol_dryup_ratio AS prev_vol_dryup_ratio,
-                f_prev.atr_compress_ratio AS prev_atr_compress_ratio,
-                f_prev.range_percentile AS prev_range_percentile
+                f.close_pos_in_range,
+                f.ma_20,
+                f.ret_5d,
+                f.atr_20,
+                f.vol_dryup_ratio,
+                f.atr_compress_ratio,
+                f.range_percentile,
+                f.prior_breakouts_30d,
+                f.r2_65,
+                f.ma_7,
+                f.ma_65_sma
             FROM breakout_days g
-            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.date
-            LEFT JOIN feat_daily f_prev
-              ON g.symbol = f_prev.symbol AND g.prev_trading_date = f_prev.date
+            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.watch_date = f.date
         )
         SELECT
-            symbol, trading_date, open, high, low, close, prev_close, prev_high, prev_low, prev_open, gap_pct,
-            value_traded_inr, close_pos_in_range,
-            (close > ma_20) AS above_ma20,
-            (ret_5d > 0) AS positive_momentum,
-            atr_20, vol_dryup_ratio, atr_compress_ratio, range_percentile, r2_65,
-            prev_vol_dryup_ratio, prev_atr_compress_ratio, prev_range_percentile,
-            prior_breakouts_30d, prior_breakouts_90d,
+            symbol,
+            trading_date,
+            watch_date,
+            open,
+            high,
+            low,
+            close,
+            prev_close,
+            prev_high,
+            prev_low,
+            prev_open,
+            gap_pct,
+            watch_value_traded_inr AS value_traded_inr,
+            close_pos_in_range,
             (close_pos_in_range >= 0.70) AS filter_h,
             ((prev_high - prev_low) < (atr_20 * 0.5) OR prev_close < prev_open) AS filter_n,
             (COALESCE(prior_breakouts_30d, 0) <= 2) AS filter_y,
             (vol_dryup_ratio < 1.3) AS filter_c,
             (CAST(close > ma_20 AS INTEGER) + CAST(ret_5d > 0 AS INTEGER)
              + CAST(COALESCE(NULLIF(r2_65, 0), 0) >= 0.70 AS INTEGER) >= 2) AS filter_l,
-            (ret_1d_lag1 <= 0 OR ret_1d_lag2 <= 0) AS filter_2
+            (watch_ret_1d_lag1 <= 0) AS filter_2,
+            (close > ma_20) AS above_ma20,
+            (ret_5d > 0) AS positive_momentum,
+            atr_20,
+            vol_dryup_ratio,
+            atr_compress_ratio,
+            range_percentile,
+            r2_65,
+            prior_breakouts_30d
         FROM with_features
         WHERE close_pos_in_range IS NOT NULL
+          AND watch_date IS NOT NULL
         ORDER BY trading_date, symbol
         """
     params_tuple: list[object] = [
@@ -266,58 +294,96 @@ def _build_threshold_breakdown_candidate_query(
         ),
         with_lag AS (
             SELECT
-                symbol, date AS trading_date, open, high, low, close, volume,
+                symbol,
+                date AS trading_date,
+                LAG(date) OVER (PARTITION BY symbol ORDER BY date) AS watch_date,
+                open,
+                high,
+                low,
+                close,
+                volume,
                 LAG(close) OVER (PARTITION BY symbol ORDER BY date) AS prev_close,
                 LAG(high) OVER (PARTITION BY symbol ORDER BY date) AS prev_high,
                 LAG(low) OVER (PARTITION BY symbol ORDER BY date) AS prev_low,
                 LAG(open) OVER (PARTITION BY symbol ORDER BY date) AS prev_open,
-                (LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date)
-                 - LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag1,
+                LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date) AS prev_close_2,
+                LAG(open, 2) OVER (PARTITION BY symbol ORDER BY date) AS prev_open_2,
+                LAG(volume) OVER (PARTITION BY symbol ORDER BY date) AS prev_volume,
                 (LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date)
                  - LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag2,
+                / NULLIF(LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date), 0) AS watch_ret_1d_lag1,
+                (LAG(close, 3) OVER (PARTITION BY symbol ORDER BY date)
+                 - LAG(close, 4) OVER (PARTITION BY symbol ORDER BY date))
+                / NULLIF(LAG(close, 4) OVER (PARTITION BY symbol ORDER BY date), 0) AS watch_ret_1d_lag2,
                 (open - LAG(close) OVER (PARTITION BY symbol ORDER BY date))
                 / NULLIF(LAG(close) OVER (PARTITION BY symbol ORDER BY date), 0) AS gap_pct,
-                close * volume AS value_traded_inr
-            FROM numbered_daily WHERE rn > 1
+                LAG(close) OVER (PARTITION BY symbol ORDER BY date)
+                  * LAG(volume) OVER (PARTITION BY symbol ORDER BY date) AS watch_value_traded_inr
+            FROM numbered_daily
         ),
         breakdown_days AS (
             SELECT * FROM with_lag
             WHERE ((prev_close - low) / NULLIF(prev_close, 0)) >= ?
               AND prev_close IS NOT NULL
-              AND close >= ?
-              AND value_traded_inr >= ?
-              AND volume >= ?
-              AND ret_1d_lag1 IS NOT NULL
+              AND watch_date IS NOT NULL
+              AND prev_close >= ?
+              AND watch_value_traded_inr >= ?
+              AND prev_volume >= ?
+              AND watch_ret_1d_lag1 IS NOT NULL
               {gap_down_filter}
         ){breadth_cte},
         with_features AS (
             SELECT g.*,
-                f.close_pos_in_range, f.ma_20, f.ret_5d, f.atr_20,
-                f.vol_dryup_ratio, f.atr_compress_ratio, f.range_percentile,
-                f.prior_breakouts_30d, f.prior_breakouts_90d, f.r2_65,
-            f.prior_breakdowns_90d{atr_expansion_select},
-                f.ma_7, f.ma_65_sma, f.rs_252
+                f.close_pos_in_range,
+                f.ma_20,
+                f.ret_5d,
+                f.atr_20,
+                f.vol_dryup_ratio,
+                f.atr_compress_ratio,
+                f.range_percentile,
+                f.prior_breakouts_30d,
+                f.prior_breakouts_90d,
+                f.r2_65,
+                f.prior_breakdowns_90d{atr_expansion_select},
+                f.ma_7,
+                f.ma_65_sma,
+                f.rs_252
                 {breadth_select}
             FROM breakdown_days g
-            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.trading_date = f.date
+            LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.watch_date = f.date
         )
         SELECT
-            symbol, trading_date, open, high, low, close, prev_close, prev_high, gap_pct,
-            value_traded_inr, close_pos_in_range,
+            symbol,
+            trading_date,
+            watch_date,
+            open,
+            high,
+            low,
+            close,
+            prev_close,
+            prev_high,
+            gap_pct,
+            watch_value_traded_inr AS value_traded_inr,
+            close_pos_in_range,
             (close < ma_20) AS below_ma20,
             (ret_5d < 0) AS negative_momentum,
-            atr_20, vol_dryup_ratio, atr_compress_ratio, range_percentile,
-            prior_breakouts_90d, prior_breakdowns_90d, r2_65, rs_252,
+            atr_20,
+            vol_dryup_ratio,
+            atr_compress_ratio,
+            range_percentile,
+            prior_breakouts_90d,
+            prior_breakdowns_90d,
+            r2_65,
+            rs_252,
             (close_pos_in_range <= 0.30) AS filter_h,
-            {filter_n_sql},
+            {filter_n_sql.replace("atr_20", "atr_20")},
             (COALESCE(prior_breakouts_30d, 0) <= 2 AND COALESCE(rs_252, 1.0) < ?{breakdown_counter_clause}) AS filter_y,
             (vol_dryup_ratio < 1.3) AS filter_c,
             {filter_l_sql},
-            (ret_1d_lag1 >= 0 OR ret_1d_lag2 >= 0) AS filter_2
+            (watch_ret_1d_lag1 >= 0) AS filter_2
         FROM with_features
         WHERE close_pos_in_range IS NOT NULL
+          AND watch_date IS NOT NULL
         {atr_expansion_where}
         {breadth_where}
         ORDER BY trading_date, symbol

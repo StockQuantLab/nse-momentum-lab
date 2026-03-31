@@ -29,6 +29,7 @@ from apps.nicegui.components import (
     color_warning,
     divider,
     empty_state,
+    hex_to_rgba,
     kpi_grid,
     page_header,
     page_layout,
@@ -225,19 +226,6 @@ def _color_for_pair(up: int, down: int) -> str:
     return "cell-neutral"
 
 
-def _rgba(hex_color: str, alpha: float) -> str:
-    """Convert a theme hex color to a Plotly-safe rgba string."""
-    color = hex_color.strip().lstrip("#")
-    if len(color) == 3:
-        color = "".join(ch * 2 for ch in color)
-    if len(color) != 6:
-        return hex_color
-    red = int(color[0:2], 16)
-    green = int(color[2:4], 16)
-    blue = int(color[4:6], 16)
-    return f"rgba({red}, {green}, {blue}, {alpha})"
-
-
 def _year_table_row(row: dict[str, object]) -> dict:
     """Normalize a market-monitor row for the year table."""
     trading_date = _coerce_date(row.get("trading_date"))
@@ -245,7 +233,7 @@ def _year_table_row(row: dict[str, object]) -> dict:
 
     def _int(key: str) -> int:
         value = row.get(key, 0)
-        return int(value) if not _is_missing(value) else 0
+        return int(value) if not _is_missing(value) else 0  # type: ignore[call-overload]
 
     def _flt(key: str) -> float:
         value = row.get(key, 0)
@@ -372,17 +360,17 @@ async def market_monitor_page() -> None:
         ma20_breadth = (
             latest.get("pct_above_ma20", 0) if not _is_missing(latest.get("pct_above_ma20")) else 0
         )
-        success_bg = _rgba(color_success(), 0.25)
-        success_border = _rgba(color_success(), 0.3)
-        success_fill = _rgba(color_success(), 0.1)
-        success_fill_soft = _rgba(color_success(), 0.06)
-        error_bg = _rgba(color_error(), 0.25)
-        error_border = _rgba(color_error(), 0.3)
-        error_fill = _rgba(color_error(), 0.1)
-        error_fill_soft = _rgba(color_error(), 0.06)
-        warning_bg = _rgba(color_warning(), 0.25)
-        warning_border = _rgba(color_warning(), 0.3)
-        info_bg = _rgba(color_info(), 0.25)
+        success_bg = hex_to_rgba(color_success(), 0.25)
+        success_border = hex_to_rgba(color_success(), 0.3)
+        success_fill = hex_to_rgba(color_success(), 0.1)
+        success_fill_soft = hex_to_rgba(color_success(), 0.06)
+        error_bg = hex_to_rgba(color_error(), 0.25)
+        error_border = hex_to_rgba(color_error(), 0.3)
+        error_fill = hex_to_rgba(color_error(), 0.1)
+        error_fill_soft = hex_to_rgba(color_error(), 0.06)
+        warning_bg = hex_to_rgba(color_warning(), 0.25)
+        warning_border = hex_to_rgba(color_warning(), 0.3)
+        info_bg = hex_to_rgba(color_info(), 0.25)
 
         # ========================================================================
         # MARKET HEALTH DASHBOARD - Enhanced Cards with Visual Indicators
@@ -391,7 +379,7 @@ async def market_monitor_page() -> None:
             ui.card()
             .classes(f"w-full p-5 {SPACE_SECTION}")
             .style(
-                f"background: linear-gradient(145deg, {theme_surface()}, {theme_surface_hover()}40); border: 1px solid {theme_surface_border()}; border-radius: 16px;"
+                f"background: {theme_surface()}; border: 1px solid {theme_surface_border()}; border-radius: 16px;"
             )
         ):
             ui.label("MARKET HEALTH DASHBOARD").classes(
@@ -469,7 +457,7 @@ async def market_monitor_page() -> None:
             ui.card()
             .classes(f"w-full p-5 {SPACE_SECTION}")
             .style(
-                f"background: linear-gradient(145deg, {theme_surface()}, {theme_surface_hover()}35); border: 1px solid {theme_surface_border()}; border-left: 4px solid {color_info()}; border-radius: 16px;"
+                f"background: {theme_surface()}; border: 1px solid {theme_surface_border()}; border-left: 4px solid {color_info()}; border-radius: 16px;"
             )
         ):
             ui.label("REGIME STATUS").classes(f"text-sm font-bold tracking-wider {SPACE_SM}").style(
@@ -495,7 +483,7 @@ async def market_monitor_page() -> None:
             ui.card()
             .classes("w-full p-5")
             .style(
-                f"background: linear-gradient(145deg, {theme_surface()}, {theme_surface_hover()}35); border: 1px solid {theme_surface_border()}; border-radius: 16px;"
+                f"background: {theme_surface()}; border: 1px solid {theme_surface_border()}; border-radius: 16px;"
             )
         ):
             ui.label("MARKET BREADTH HISTORY").classes(
@@ -553,7 +541,7 @@ async def market_monitor_page() -> None:
             history_styles_html = f"""
         <style>
             .mm-history-card {{
-                background: linear-gradient(145deg, {theme_surface()}, {theme_surface_hover()}40);
+                background: {theme_surface()};
                 border: 1px solid {theme_surface_border()};
                 border-radius: 16px;
                 box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
@@ -657,18 +645,78 @@ async def market_monitor_page() -> None:
             ui.add_head_html(history_styles_html)
 
             history_columns = [
-                {"name": "date_display", "label": "Date", "field": "date_display"},
-                {"name": "primary_display", "label": "Regime", "field": "primary_display"},
-                {"name": "up_4pct_display", "label": "4%↑", "field": "up_4pct_display"},
-                {"name": "down_4pct_display", "label": "4%↓", "field": "down_4pct_display"},
-                {"name": "ratio_5d_display", "label": "5D BR", "field": "ratio_5d_display"},
-                {"name": "ratio_10d_display", "label": "10D BR", "field": "ratio_10d_display"},
-                {"name": "t2108_display", "label": "MA40", "field": "t2108_display"},
-                {"name": "up_25q_display", "label": "25Q", "field": "up_25q_display"},
-                {"name": "up_25m_display", "label": "25M", "field": "up_25m_display"},
-                {"name": "up_50m_display", "label": "50M", "field": "up_50m_display"},
-                {"name": "up_13_34_display", "label": "13/34", "field": "up_13_34_display"},
-                {"name": "ma20_display", "label": "MA20", "field": "ma20_display"},
+                {
+                    "name": "date_display",
+                    "label": "Date",
+                    "field": "date_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "primary_display",
+                    "label": "Regime",
+                    "field": "primary_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "up_4pct_display",
+                    "label": "4%↑",
+                    "field": "up_4pct_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "down_4pct_display",
+                    "label": "4%↓",
+                    "field": "down_4pct_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "ratio_5d_display",
+                    "label": "5D BR",
+                    "field": "ratio_5d_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "ratio_10d_display",
+                    "label": "10D BR",
+                    "field": "ratio_10d_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "t2108_display",
+                    "label": "MA40",
+                    "field": "t2108_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "up_25q_display",
+                    "label": "25Q",
+                    "field": "up_25q_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "up_25m_display",
+                    "label": "25M",
+                    "field": "up_25m_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "up_50m_display",
+                    "label": "50M",
+                    "field": "up_50m_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "up_13_34_display",
+                    "label": "13/34",
+                    "field": "up_13_34_display",
+                    "sortable": True,
+                },
+                {
+                    "name": "ma20_display",
+                    "label": "MA20",
+                    "field": "ma20_display",
+                    "sortable": True,
+                },
             ]
 
             def render_history_table(frame: pl.DataFrame) -> None:
@@ -778,7 +826,7 @@ async def market_monitor_page() -> None:
 
 
 def _create_chart_layout(title: str, height: int = 240) -> dict:
-    grid_color = _rgba(theme_surface_border(), 0.35)
+    grid_color = hex_to_rgba(theme_surface_border(), 0.35)
     return {
         "title": {
             "text": title,
@@ -789,7 +837,7 @@ def _create_chart_layout(title: str, height: int = 240) -> dict:
         "height": height,
         "margin": dict(l=40, r=20, t=40, b=35),
         "paper_bgcolor": "rgba(0,0,0,0)",
-        "plot_bgcolor": _rgba(theme_surface_hover(), 0.12),
+        "plot_bgcolor": hex_to_rgba(theme_surface_hover(), 0.12),
         "font": dict(color=theme_text_primary(), size=10),
         "legend": dict(
             orientation="h",
@@ -833,7 +881,7 @@ def _create_4pct_chart(df: pl.DataFrame) -> None:
             line=dict(color=color_success(), width=2.5, shape="spline"),
             marker=dict(size=5, color=color_success(), line=dict(width=1, color=theme_surface())),
             fill="tozeroy",
-            fillcolor=_rgba(color_success(), 0.1),
+            fillcolor=hex_to_rgba(color_success(), 0.1),
         )
     )
     fig.add_trace(
@@ -903,14 +951,14 @@ def _create_t2108_chart(df: pl.DataFrame) -> None:
     fig.add_hrect(
         y0=T2108_OVERBOUGHT,
         y1=100,
-        fillcolor=_rgba(color_error(), 0.1),
+        fillcolor=hex_to_rgba(color_error(), 0.1),
         layer="below",
         line_width=0,
     )
     fig.add_hrect(
         y0=0,
         y1=T2108_OVERSOLD,
-        fillcolor=_rgba(color_success(), 0.1),
+        fillcolor=hex_to_rgba(color_success(), 0.1),
         layer="below",
         line_width=0,
     )
@@ -924,7 +972,7 @@ def _create_t2108_chart(df: pl.DataFrame) -> None:
             line=dict(color=color_primary(), width=2.5, shape="spline"),
             marker=dict(size=5, color=color_primary(), line=dict(width=1, color=theme_surface())),
             fill="tozeroy",
-            fillcolor=_rgba(color_primary(), 0.15),
+            fillcolor=hex_to_rgba(color_primary(), 0.15),
         )
     )
     fig.add_hline(
@@ -952,7 +1000,9 @@ def _create_ma_breadth_chart(df: pl.DataFrame) -> None:
     fig = go.Figure()
 
     # Add middle zone
-    fig.add_hrect(y0=40, y1=60, fillcolor=_rgba(color_warning(), 0.08), layer="below", line_width=0)
+    fig.add_hrect(
+        y0=40, y1=60, fillcolor=hex_to_rgba(color_warning(), 0.08), layer="below", line_width=0
+    )
 
     fig.add_trace(
         go.Scatter(

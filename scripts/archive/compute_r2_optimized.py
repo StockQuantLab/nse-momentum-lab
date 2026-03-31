@@ -33,7 +33,9 @@ def compute_r2_optimized():
     # Check current state
     print("\n[CHECKING CURRENT STATE]")
     total_rows = db.con.execute("SELECT COUNT(*) FROM feat_daily").fetchone()[0]
-    r2_zero_count = db.con.execute("SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL").fetchone()[0]
+    r2_zero_count = db.con.execute(
+        "SELECT COUNT(*) FROM feat_daily WHERE r2_65 = 0.0 OR r2_65 IS NULL"
+    ).fetchone()[0]
 
     print(f"  Total rows: {total_rows:,}")
     print(f"  R² = 0.0 or NULL: {r2_zero_count:,}")
@@ -54,7 +56,9 @@ def compute_r2_optimized():
         pass
 
     # Get symbols
-    symbols_result = db.con.execute("SELECT DISTINCT symbol FROM v_daily ORDER BY symbol LIMIT 100").fetchall()
+    symbols_result = db.con.execute(
+        "SELECT DISTINCT symbol FROM v_daily ORDER BY symbol LIMIT 100"
+    ).fetchall()
     symbols = [row[0] for row in symbols_result]
 
     print("\n[TEST RUN - First 100 symbols]")
@@ -113,7 +117,7 @@ def compute_r2_optimized():
             completed += 1
 
             if (i + 1) % 10 == 0:
-                print(f"    Progress: {i+1}/{len(symbols)} completed...", flush=True)
+                print(f"    Progress: {i + 1}/{len(symbols)} completed...", flush=True)
 
         except Exception as e:
             print(f"    ERROR {symbol}: {e}")
@@ -171,7 +175,7 @@ def _compute_r2_fast(closes: np.ndarray, period: int = 65) -> np.ndarray:
     cumsum_x2_lagged = np.roll(cumsum_x2, 1)
     cumsum_x2_lagged[0] = 0
 
-    cumsum_y2 = np.cumsum(closes ** 2)
+    cumsum_y2 = np.cumsum(closes**2)
     cumsum_y2_lagged = np.roll(cumsum_y2, 1)
     cumsum_y2_lagged[0] = 0
 
@@ -187,7 +191,7 @@ def _compute_r2_fast(closes: np.ndarray, period: int = 65) -> np.ndarray:
         sum_y2 = cumsum_y2[i] - cumsum_y2_lagged[i - period]
 
         # Calculate slope and intercept
-        denominator = n_points * sum_x2 - sum_x ** 2
+        denominator = n_points * sum_x2 - sum_x**2
 
         if abs(denominator) < 1e-10:
             r2[i] = 0.0
@@ -197,8 +201,8 @@ def _compute_r2_fast(closes: np.ndarray, period: int = 65) -> np.ndarray:
 
             # Calculate R²
             y_mean = sum_y / n_points
-            ss_tot = sum_y2 - 2 * y_mean * sum_y + n_points * y_mean ** 2
-            ss_res = sum_y2 - 2 * slope * sum_yx + slope ** 2 * sum_x2
+            ss_tot = sum_y2 - 2 * y_mean * sum_y + n_points * y_mean**2
+            ss_res = sum_y2 - 2 * slope * sum_yx + slope**2 * sum_x2
 
             if abs(ss_tot) < 1e-10:
                 r2[i] = 0.0
@@ -213,6 +217,7 @@ if __name__ == "__main__":
 
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     compute_r2_optimized()

@@ -265,7 +265,9 @@ async def analyze_experiment() -> dict[str, Any]:
                 )
 
             # Check exit reasons
-            time_stops = len([t for t in trades if t["exit_reason"] in ("TIME_STOP", "TIME_STOP_DAY3")])
+            time_stops = len(
+                [t for t in trades if t["exit_reason"] in ("TIME_STOP", "TIME_STOP_DAY3")]
+            )
             if time_stops > len(trades) * 0.5:
                 print_info("ℹ Most trades hit time stops - consider extending holding period")
                 print_info("  or adjusting stop loss strategy for Indian market volatility")

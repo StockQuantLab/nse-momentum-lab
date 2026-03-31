@@ -7,11 +7,13 @@ import json
 import logging
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import polars as pl
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from nse_momentum_lab.db.market_db import get_backtest_db, get_market_db
@@ -19,6 +21,7 @@ from nse_momentum_lab.db.models import MdOhlcvAdj, PaperPosition, RefSymbol
 from nse_momentum_lab.db.paper import (
     create_or_update_paper_session,
     get_paper_feed_state,
+    get_paper_session,
     get_paper_session_summary,
     list_paper_session_signals,
     list_session_signals,
@@ -198,13 +201,18 @@ class PaperRuntimeScaffold:
             return {}
 
         wanted = {symbol.strip().upper() for symbol in symbols if symbol.strip()}
+        cache_mtime_ns = INSTRUMENT_CACHE_PATH.stat().st_mtime_ns
+        full_map = PaperRuntimeScaffold._load_cached_instrument_token_map(cache_mtime_ns)
+        return {symbol: token for symbol, token in full_map.items() if symbol in wanted}
+
+    @staticmethod
+    @lru_cache(maxsize=4)
+    def _load_cached_instrument_token_map(_cache_mtime_ns: int) -> dict[str, int]:
         resolved: dict[str, int] = {}
         with INSTRUMENT_CACHE_PATH.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             for row in reader:
                 tradingsymbol = str(row.get("tradingsymbol") or "").strip().upper()
-                if tradingsymbol not in wanted:
-                    continue
                 try:
                     resolved[tradingsymbol] = int(str(row.get("instrument_token") or "").strip())
                 except ValueError:
@@ -279,9 +287,14 @@ class PaperRuntimeScaffold:
         existing = {row.symbol.strip().upper(): row for row in result.scalars().all() if row.symbol}
         missing = [symbol for symbol in wanted if symbol not in existing]
         if missing:
-            for symbol in missing:
-                db_session.add(RefSymbol(symbol=symbol, series="EQ", status="ACTIVE"))
-            await db_session.flush()
+            insert_stmt = (
+                pg_insert(RefSymbol)
+                .values(
+                    [{"symbol": symbol, "series": "EQ", "status": "ACTIVE"} for symbol in missing]
+                )
+                .on_conflict_do_nothing(index_elements=[RefSymbol.symbol, RefSymbol.series])
+            )
+            await db_session.execute(insert_stmt)
             result = await db_session.execute(select(RefSymbol).where(RefSymbol.symbol.in_(wanted)))
             existing = {
                 row.symbol.strip().upper(): row for row in result.scalars().all() if row.symbol
@@ -932,7 +945,7 @@ class PaperRuntimeScaffold:
                     notes=plan.notes,
                 )
                 await self._persist_queue_from_experiment(db_session, plan, queue_stats)
-            elif plan.mode == "live" and plan.strategy_params.get("_live_watchlist_rows"):
+            elif plan.strategy_params.get("_live_watchlist_rows"):
                 queue_stats = await self._fetch_queue_from_watchlist(db_session, plan)
                 effective_symbols = list(cast(list[str], queue_stats.get("symbols", [])))
                 await create_or_update_paper_session(
@@ -1005,7 +1018,8 @@ class PaperRuntimeScaffold:
                     "feed_mode": plan.feed_mode,
                     "feed_source": plan.feed_source,
                     "experiment_id": plan.experiment_id,
-                    "instrument_tokens": effective_tokens,
+                    "token_count": len(effective_tokens),
+                    "symbol_count": len(effective_symbols),
                     "observe_only": plan.observe_only,
                 },
             )
@@ -1192,11 +1206,11 @@ class PaperRuntimeScaffold:
         minutes_from_open = max(0, int((now_ist - market_open).total_seconds() // 60))
 
         async with sessionmaker() as db_session:
-            summary = await get_paper_session_summary(db_session, session_id)
-            if summary is None:
+            session_row = await get_paper_session(db_session, session_id)
+            if session_row is None:
                 return {"session_id": session_id, "triggered": 0, "executed": 0}
 
-            today = self._coerce_date(summary["session"].get("trade_date")) or _utc_today()
+            today = session_row.trade_date or _utc_today()
             signals = self._normalize_runtime_signals(
                 await list_session_signals(db_session, session_id)
             )
@@ -1298,7 +1312,7 @@ class PaperRuntimeScaffold:
 
             executed = 0
             if promoted_signals:
-                trader = self._get_trader(session_id, summary["session"].get("risk_config"))
+                trader = self._get_trader(session_id, session_row.risk_config or {})
                 await self._sync_trader_state(db_session, session_id, trader, today)
                 prices: dict[int, dict[date, dict[str, float]]] = {}
                 for signal in promoted_signals:

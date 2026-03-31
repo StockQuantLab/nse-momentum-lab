@@ -11,8 +11,7 @@ from nse_momentum_lab.services.kite.token_workflow import (
 
 def test_extract_request_token_from_callback_url() -> None:
     value = (
-        "http://127.0.0.1:8004/auth/kite/callback"
-        "?request_token=abc123&action=login&status=success"
+        "http://127.0.0.1:8004/auth/kite/callback?request_token=abc123&action=login&status=success"
     )
     assert extract_request_token(value) == "abc123"
 

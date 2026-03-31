@@ -52,6 +52,9 @@ Thumbs.db
 # Local agent metadata
 .codex/
 .claude/
+agents.md
+memory.md
+claude.md
 
 # Doppler secrets (local only, never commit)
 doppler.json

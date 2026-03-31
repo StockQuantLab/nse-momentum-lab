@@ -4,12 +4,12 @@ import logging
 import random
 import threading
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
-import pandas as pd
+import polars as pl
 
 from nse_momentum_lab.services.kite.auth import KiteAuth, get_kite_auth
 from nse_momentum_lab.services.kite.client import KiteAPIError
@@ -29,6 +29,25 @@ RETRY_BASE_DELAY_SECONDS = 1.0
 RETRY_MAX_DELAY_SECONDS = 30.0
 RETRY_JITTER_SECONDS = 0.5
 IST = ZoneInfo("Asia/Kolkata")
+DAILY_FRAME_SCHEMA: dict[str, pl.DataType] = {
+    "symbol": pl.Utf8,
+    "date": pl.Date,
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "volume": pl.Int64,
+}
+FIVE_MIN_FRAME_SCHEMA: dict[str, pl.DataType] = {
+    "symbol": pl.Utf8,
+    "date": pl.Date,
+    "candle_time": pl.Datetime(time_unit="ns"),
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "volume": pl.Int64,
+}
 
 
 class TokenBucketRateLimiter:
@@ -94,19 +113,45 @@ class KiteFetcher:
         start_date: date,
         end_date: date,
         exchange: str = "NSE",
-    ) -> pd.DataFrame:
+    ) -> pl.DataFrame:
         instrument_token = self.auth.get_instrument_token(symbol, exchange)
         if instrument_token is None:
             logger.warning("No Kite instrument token found for %s on %s", symbol, exchange)
             return self._empty_daily_frame()
 
-        candles = self._fetch_historical_data(
-            instrument_token=instrument_token,
-            interval=KITE_DAILY_INTERVAL,
-            start_date=start_date,
-            end_date=end_date,
+        days_span = (end_date - start_date).days + 1
+        if days_span <= MAX_DAILY_CANDLES:
+            candles = self._fetch_historical_data(
+                instrument_token=instrument_token,
+                interval=KITE_DAILY_INTERVAL,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            return self._normalize_daily_candles(symbol, candles)
+
+        # Chunk into MAX_DAILY_CANDLES-day windows for long date ranges
+        frames: list[pl.DataFrame] = []
+        chunk_start = start_date
+        while chunk_start <= end_date:
+            chunk_end = min(end_date, chunk_start + timedelta(days=MAX_DAILY_CANDLES - 1))
+            candles = self._fetch_historical_data(
+                instrument_token=instrument_token,
+                interval=KITE_DAILY_INTERVAL,
+                start_date=chunk_start,
+                end_date=chunk_end,
+            )
+            frame = self._normalize_daily_candles(symbol, candles)
+            if not frame.is_empty():
+                frames.append(frame)
+            chunk_start = chunk_end + timedelta(days=1)
+
+        if not frames:
+            return self._empty_daily_frame()
+        return (
+            pl.concat(frames, how="vertical_relaxed")
+            .unique(subset=["symbol", "date"], keep="last")
+            .sort(["symbol", "date"])
         )
-        return self._normalize_daily_candles(symbol, candles)
 
     def fetch_5min_ohlcv(
         self,
@@ -114,13 +159,13 @@ class KiteFetcher:
         start_date: date,
         end_date: date,
         exchange: str = "NSE",
-    ) -> pd.DataFrame:
+    ) -> pl.DataFrame:
         instrument_token = self.auth.get_instrument_token(symbol, exchange)
         if instrument_token is None:
             logger.warning("No Kite instrument token found for %s on %s", symbol, exchange)
             return self._empty_5min_frame()
 
-        frames: list[pd.DataFrame] = []
+        frames: list[pl.DataFrame] = []
         chunk_start = start_date
         while chunk_start <= end_date:
             chunk_end = min(end_date, chunk_start + timedelta(days=MAX_5MIN_DAYS_PER_CHUNK - 1))
@@ -131,19 +176,18 @@ class KiteFetcher:
                 end_date=chunk_end,
             )
             frame = self._normalize_5min_candles(symbol, candles)
-            if not frame.empty:
+            if not frame.is_empty():
                 frames.append(frame)
             chunk_start = chunk_end + timedelta(days=1)
 
         if not frames:
             return self._empty_5min_frame()
 
-        combined = pd.concat(frames, ignore_index=True)
-        combined = combined.drop_duplicates(subset=["symbol", "candle_time"], keep="last")
-        combined = combined.sort_values(["symbol", "candle_time"], kind="stable").reset_index(
-            drop=True
+        return (
+            pl.concat(frames, how="vertical_relaxed")
+            .unique(subset=["symbol", "candle_time"], keep="last")
+            .sort(["symbol", "candle_time"])
         )
-        return combined
 
     def _fetch_historical_data(
         self,
@@ -238,67 +282,78 @@ class KiteFetcher:
         self,
         symbol: str,
         candles: list[dict[str, Any]] | list[list[Any]],
-    ) -> pd.DataFrame:
-        rows: list[dict[str, Any]] = []
+    ) -> pl.DataFrame:
+        dates: list[date] = []
+        opens: list[float] = []
+        highs: list[float] = []
+        lows: list[float] = []
+        closes: list[float] = []
+        volumes: list[int] = []
         for candle in candles:
             normalized = self._normalize_candle(symbol, candle)
             if normalized is None:
                 continue
             candle_time = normalized["candle_time"]
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "date": candle_time.date(),
-                    "open": normalized["open"],
-                    "high": normalized["high"],
-                    "low": normalized["low"],
-                    "close": normalized["close"],
-                    "volume": normalized["volume"],
-                }
-            )
-        if not rows:
+            dates.append(candle_time.date())
+            opens.append(float(normalized["open"]))
+            highs.append(float(normalized["high"]))
+            lows.append(float(normalized["low"]))
+            closes.append(float(normalized["close"]))
+            volumes.append(int(normalized["volume"]))
+        if not dates:
             return self._empty_daily_frame()
-        frame = pd.DataFrame(
-            rows,
-            columns=["symbol", "date", "open", "high", "low", "close", "volume"],
+        return pl.DataFrame(
+            {
+                "symbol": [symbol] * len(dates),
+                "date": dates,
+                "open": opens,
+                "high": highs,
+                "low": lows,
+                "close": closes,
+                "volume": volumes,
+            },
+            schema=DAILY_FRAME_SCHEMA,
         )
-        frame["date"] = pd.to_datetime(frame["date"]).dt.date
-        frame["volume"] = frame["volume"].astype("int64")
-        return frame
 
     def _normalize_5min_candles(
         self,
         symbol: str,
         candles: list[dict[str, Any]] | list[list[Any]],
-    ) -> pd.DataFrame:
-        rows: list[dict[str, Any]] = []
+    ) -> pl.DataFrame:
+        dates: list[date] = []
+        candle_times: list[datetime] = []
+        opens: list[float] = []
+        highs: list[float] = []
+        lows: list[float] = []
+        closes: list[float] = []
+        volumes: list[int] = []
         for candle in candles:
             normalized = self._normalize_candle(symbol, candle)
             if normalized is None:
                 continue
             candle_time = normalized["candle_time"]
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "date": candle_time.date(),
-                    "candle_time": candle_time,
-                    "open": normalized["open"],
-                    "high": normalized["high"],
-                    "low": normalized["low"],
-                    "close": normalized["close"],
-                    "volume": normalized["volume"],
-                }
-            )
-        if not rows:
+            dates.append(candle_time.date())
+            candle_times.append(candle_time)
+            opens.append(float(normalized["open"]))
+            highs.append(float(normalized["high"]))
+            lows.append(float(normalized["low"]))
+            closes.append(float(normalized["close"]))
+            volumes.append(int(normalized["volume"]))
+        if not dates:
             return self._empty_5min_frame()
-        frame = pd.DataFrame(
-            rows,
-            columns=["symbol", "date", "candle_time", "open", "high", "low", "close", "volume"],
+        return pl.DataFrame(
+            {
+                "symbol": [symbol] * len(dates),
+                "date": dates,
+                "candle_time": candle_times,
+                "open": opens,
+                "high": highs,
+                "low": lows,
+                "close": closes,
+                "volume": volumes,
+            },
+            schema=FIVE_MIN_FRAME_SCHEMA,
         )
-        frame["date"] = pd.to_datetime(frame["date"]).dt.date
-        frame["candle_time"] = pd.to_datetime(frame["candle_time"])
-        frame["volume"] = frame["volume"].astype("int64")
-        return frame
 
     def _normalize_candle(
         self,
@@ -318,14 +373,17 @@ class KiteFetcher:
             logger.debug("Skipping malformed Kite candle for %s: %r", symbol, candle)
             return None
 
-        candle_time = pd.Timestamp(raw_time)
-        if candle_time.tzinfo is None:
-            candle_time = candle_time.tz_localize(IST)
+        if isinstance(raw_time, datetime):
+            candle_time = raw_time
         else:
-            candle_time = candle_time.tz_convert(IST)
-        candle_time = candle_time.tz_localize(None)
+            candle_time = datetime.fromisoformat(str(raw_time).replace("Z", "+00:00"))
+        if candle_time.tzinfo is None:
+            candle_time = candle_time.replace(tzinfo=IST)
+        else:
+            candle_time = candle_time.astimezone(IST)
+        candle_time = candle_time.replace(tzinfo=None)
         return {
-            "candle_time": candle_time.to_pydatetime(),
+            "candle_time": candle_time,
             "open": float(open_price),
             "high": float(high_price),
             "low": float(low_price),
@@ -333,13 +391,11 @@ class KiteFetcher:
             "volume": int(volume or 0),
         }
 
-    def _empty_daily_frame(self) -> pd.DataFrame:
-        return pd.DataFrame(columns=["symbol", "date", "open", "high", "low", "close", "volume"])
+    def _empty_daily_frame(self) -> pl.DataFrame:
+        return pl.DataFrame(schema=DAILY_FRAME_SCHEMA)
 
-    def _empty_5min_frame(self) -> pd.DataFrame:
-        return pd.DataFrame(
-            columns=["symbol", "date", "candle_time", "open", "high", "low", "close", "volume"]
-        )
+    def _empty_5min_frame(self) -> pl.DataFrame:
+        return pl.DataFrame(schema=FIVE_MIN_FRAME_SCHEMA)
 
 
 _kite_fetcher: KiteFetcher | None = None

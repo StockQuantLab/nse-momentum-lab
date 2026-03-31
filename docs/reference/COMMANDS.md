@@ -1,7 +1,7 @@
 # Command Reference - nse-momentum-lab
 
 **Version**: Multi-Strategy Platform (Phase 1–7 complete)
-**Last Updated**: 2026-03-27
+**Last Updated**: 2026-03-30
 
 ---
 
@@ -140,6 +140,12 @@ http://localhost:8501/daily_summary
 
 Market data is loaded from Zerodha Parquet files via DuckDB. See `nse_momentum_lab.db.market_db`.
 
+#### Today-only ingest for 2026-03-30
+```bash
+doppler run -- uv run nseml-kite-ingest --date 2026-03-30
+doppler run -- uv run nseml-kite-ingest --date 2026-03-30 --5min --resume
+```
+
 ### Corporate Action Adjustment
 
 #### Run adjustment
@@ -253,18 +259,76 @@ doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
 # Normal short-window refresh from a known catch-up date
 doppler run -- uv run nseml-build-features --since YYYY-MM-DD
 
+# Smart missing: check ALL feature tables, upsert only gaps
+doppler run -- uv run nseml-build-features --missing
+
+# Rebuild a specific table only
+doppler run -- uv run nseml-build-features --feature-set intraday --force --allow-full-rebuild
+
 # Explicit full rebuild only when necessary
 doppler run -- uv run nseml-build-features --force --allow-full-rebuild
+
+# Symbol-level feature rebuild
+doppler run -- uv run nseml-build-features --symbols RELIANCE,TCS,INFY
+doppler run -- uv run nseml-build-features --symbols-file data/missing_symbols.txt
 
 # Incremental market monitor refresh
 doppler run -- uv run nseml-market-monitor --incremental --since YYYY-MM-DD
 ```
 
 Notes:
+- `nseml-build-features --missing` checks each table independently (feat_daily_core, feat_intraday_core, feat_2lynch_derived) and upserts only what's missing per table.
 - `nseml-build-features --since` is the normal operator path for short refreshes.
 - `--force` is reserved for exceptional full rebuilds and requires `--allow-full-rebuild`.
-- `nseml-market-monitor --incremental` keeps the breadth table aligned with recent data without dropping the table.
-- For table inventory and load modes, use `docs/operations/TABLE_LOAD_MATRIX.md`.
+- `--feature-set` rebuilds a single table without touching others.
+- All build commands now log per-step elapsed time.
+
+#### Data quality report
+```bash
+# Quick CLI report: coverage, feature health, freshness, gaps, anomalies
+doppler run -- uv run nseml-hygiene --report
+
+# Preview dead (delisted) symbols
+doppler run -- uv run nseml-hygiene --dry-run
+
+# Purge dead symbols from parquet + DuckDB
+doppler run -- uv run nseml-hygiene --purge --confirm
+```
+
+#### Database verification
+```bash
+doppler run -- uv run nseml-db-verify
+```
+**What it does**:
+1. Verifies PostgreSQL runtime tables exist and are readable
+2. Verifies DuckDB runtime coverage and `feat_daily`
+3. Checks the 5-minute parquet lake for legacy `03:45` timestamp files
+4. Fails fast if the timestamp regression reappears
+
+**Intraday build note**:
+- `feat_intraday_core` uses CPR-style symbol batches and symbol-specific parquet reads.
+- Tune `INTRADAY_CORE_BATCH_SIZE` if you need smaller or larger batches.
+- Keep DuckDB memory and spill limits set at launch time (`DUCKDB_MEMORY_LIMIT`, `DUCKDB_THREADS`).
+- The legacy yearly helper is hard-gated and should not be used in normal operations.
+
+#### Symbol-scoped ingestion
+```bash
+# Ingest a symbol subset for one day
+doppler run -- uv run nseml-kite-ingest --date 2026-03-27 --symbols RELIANCE,TCS,INFY
+
+# Ingest from a file (no symbol limit)
+doppler run -- uv run nseml-kite-ingest --symbols-file data/missing_symbols_daily.txt --from 2025-04-01 --to 2026-03-27
+
+# Auto-detect missing symbols from tradeable master
+doppler run -- uv run nseml-kite-ingest --missing
+
+# Backfill against the full current Kite master universe
+doppler run -- uv run nseml-kite-ingest --backfill --universe current-master
+```
+
+Notes:
+- `--symbols` (CSV, max 50), `--symbols-file` (file, no limit), `--missing` (auto-detect from tradeable master).
+- `--universe current-master` switches the universe resolver for full-master backfills.
 
 **Important**: DuckDB is single-writer. Stop the dashboard before running a backtest.
 Backtest results are stored in DuckDB (`bt_experiment`, `bt_trade`, `bt_yearly_metric`) and
@@ -293,11 +357,6 @@ doppler run -- uv run nseml-backtest-batch --params-json '{\"strategies\": [\"th
 
 ### Paper Trading Commands
 
-#### Walk-forward validation
-```bash
-doppler run -- uv run nseml-paper walk-forward --session-id <SESSION_ID> --strategy thresholdbreakout --start-date 2026-03-01 --end-date 2026-03-20 --train-days 5 --test-days 3 --roll-interval-days 1
-```
-
 #### Replay a historical day
 ```bash
 doppler run -- uv run nseml-paper replay-day --session-id <SESSION_ID> --trade-date 2026-03-25
@@ -307,10 +366,20 @@ doppler run -- uv run nseml-paper replay-day --session-id <SESSION_ID> --trade-d
 ```bash
 doppler run -- uv run nseml-paper daily-prepare --trade-date 2026-03-27 --mode live --all-symbols
 ```
+See also: [`docs/operations/pre-open-live-paper.md`](../operations/pre-open-live-paper.md)
+`daily-prepare` is the readiness check for live/replay startup; it does not require a
+separate validation session.
+
+#### Daily fast simulation
+```bash
+doppler run -- uv run nseml-paper daily-sim --trade-date 2026-03-27 --experiment-id <EXP_ID>
+```
+`daily-sim` is the fast historical path for comparing a single trade date against backtest
+logic. It uses the DuckDB backtest engine and does not create a paper session.
 
 #### Daily live session
 ```bash
-doppler run -- uv run nseml-paper daily-live --trade-date 2026-03-27 --all-symbols --execute
+doppler run -- uv run nseml-paper daily-live --trade-date 2026-03-27 --all-symbols --watchlist --run
 ```
 
 #### Daily replay session
@@ -321,6 +390,7 @@ doppler run -- uv run nseml-paper daily-replay --trade-date 2026-03-25 --all-sym
 #### Session status
 ```bash
 doppler run -- uv run nseml-paper status --session-id <SESSION_ID>
+doppler run -- uv run nseml-paper status --session-id <SESSION_ID> --summary
 ```
 
 #### Flatten open positions

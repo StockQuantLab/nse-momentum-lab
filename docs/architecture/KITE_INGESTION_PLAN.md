@@ -27,7 +27,7 @@ DuckDB daily view globs `data/parquet/daily/*/*.parquet`, so both baseline and k
 | FastAPI auth routes | Removed (not required for local 2FA flow) | ✅ |
 | Ingestion API routes | `POST /ingestion/kite/daily`, `POST /ingestion/kite/5min`, `GET /ingestion/kite/status` | ✅ |
 | Scheduler lifecycle | Singleton scheduler (`get_kite_scheduler`) | ✅ |
-| Symbol resolution | Local parquet universe first, Kite fallback | ✅ |
+| Symbol resolution | Local parquet universe first, Kite fallback; optional current-master backfill mode | ✅ |
 | Instrument master caching | `data/raw/kite/instruments/NSE.csv` + in-memory map | ✅ |
 | Cache miss behavior | One per-exchange API refresh, then miss cache | ✅ |
 | Retry/backoff | Shared token-bucket pacing + exponential retry for transient Kite errors | ✅ |
@@ -51,12 +51,28 @@ DuckDB daily view globs `data/parquet/daily/*/*.parquet`, so both baseline and k
 
 1. Resolve symbols from baseline daily universe (`data/parquet/daily/*/all.parquet`).
 2. If local universe unavailable, resolve from Kite instrument master.
-3. Resolve instrument token from memory cache, then `NSE.csv`, then API refresh-on-miss.
-4. Fetch with retry/backoff and write parquet with dedup.
-5. Persist checkpoint progress and resume on rerun.
+3. Use `--universe current-master` to force a full current-master backfill instead of local-first resolution.
+4. Resolve instrument token from memory cache, then `NSE.csv`, then API refresh-on-miss.
+5. Fetch with retry/backoff and write parquet with dedup.
+6. Persist checkpoint progress and resume on rerun.
 
 The daily ingest command loads only the requested date window. It does not backfill the full
-archive unless you pass a broad range or `--backfill`.
+archive unless you pass a broad range or `--backfill`. Use `--universe current-master` when you
+want to ingest the full current Kite master rather than the local parquet universe.
+
+### Symbol-scoped ingest
+
+The ingest CLI also supports a direct symbol list:
+
+```bash
+doppler run -- uv run nseml-kite-ingest --date 2026-03-27 --symbols RELIANCE,TCS,INFY
+doppler run -- uv run nseml-kite-ingest --from 2026-03-24 --to 2026-03-27 --symbols RELIANCE,TCS,INFY
+```
+
+Notes:
+- `--symbols` bypasses universe resolution and uses the explicit list.
+- This is the supported way to limit ingestion to a specific subset of symbols.
+- `nseml-build-features` is not symbol-scoped; it rebuilds feature tables by feature set and date window.
 
 Current operational state as of `2026-03-27`:
 - Daily ingestion is caught up through `2026-03-27`.
@@ -96,6 +112,8 @@ doppler run -- uv run nseml-kite-ingest --today --update-features
 doppler run -- uv run nseml-kite-ingest --today --5min --resume
 doppler run -- uv run nseml-kite-ingest --date 2026-03-06
 doppler run -- uv run nseml-kite-ingest --from 2026-03-05 --to 2026-03-06 --save-raw
+doppler run -- uv run nseml-kite-ingest --backfill --universe current-master
+doppler run -- uv run nseml-kite-ingest --backfill --5min --universe current-master --resume
 ```
 
 Short catch-up windows should stay incremental:

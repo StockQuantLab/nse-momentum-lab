@@ -7,10 +7,12 @@ from datetime import date, datetime
 from math import ceil
 from typing import Any
 
+from nse_momentum_lab.db.market_db import PARQUET_DIR
 from nse_momentum_lab.services.kite.auth import get_kite_auth
 from nse_momentum_lab.services.kite.fetcher import HISTORICAL_REQUESTS_PER_SECOND
 from nse_momentum_lab.services.kite.scheduler import BACKFILL_START_DATE, get_kite_scheduler
-from nse_momentum_lab.utils.constants import IngestionDataset
+from nse_momentum_lab.services.kite.tradeable import get_parquet_symbols, get_tradeable_symbols
+from nse_momentum_lab.utils.constants import IngestionDataset, IngestionUniverse
 from nse_momentum_lab.utils.time_utils import IST
 
 
@@ -32,7 +34,11 @@ def _parse_date(value: str | None) -> date | None:
 
 
 def _estimate_backfill_cost(
-    symbols: list[str] | None, start_date: date, end_date: date, is_5min: bool
+    symbols: list[str] | None,
+    start_date: date,
+    end_date: date,
+    is_5min: bool,
+    universe: IngestionUniverse,
 ) -> dict[str, Any]:
     """Estimate API calls and time for backfill."""
     scheduler = get_kite_scheduler()
@@ -41,6 +47,7 @@ def _estimate_backfill_cost(
         dataset=IngestionDataset.FIVE_MIN if is_5min else IngestionDataset.DAILY,
         start_date=start_date,
         end_date=end_date,
+        universe=universe,
     )
     symbol_count = len(resolved)
     days = (end_date - start_date).days + 1
@@ -49,7 +56,8 @@ def _estimate_backfill_cost(
         chunks = ceil(days / 60)
         requests = symbol_count * chunks
     else:
-        requests = symbol_count
+        chunks = ceil(days / 2000)
+        requests = symbol_count * chunks
     estimated_seconds = requests / HISTORICAL_REQUESTS_PER_SECOND
 
     return {
@@ -76,8 +84,24 @@ def main() -> int:
     parser.add_argument(
         "--5min", dest="use_5min", action="store_true", help="Run 5-minute ingestion"
     )
-    parser.add_argument("--symbols", help="Comma-separated symbol list")
+    parser.add_argument("--symbols", help="Comma-separated symbol list (max 50)")
+    parser.add_argument(
+        "--symbols-file",
+        dest="symbols_file",
+        help="Path to a text file with one symbol per line (no limit)",
+    )
+    parser.add_argument(
+        "--missing",
+        action="store_true",
+        help="Auto-detect tradeable symbols missing from local parquet and ingest them",
+    )
     parser.add_argument("--backfill", action="store_true", help="Use the default backfill window")
+    parser.add_argument(
+        "--universe",
+        choices=[item.value for item in IngestionUniverse],
+        default=IngestionUniverse.LOCAL_FIRST.value,
+        help="Symbol universe selection (default: local-first)",
+    )
     parser.add_argument("--save-raw", action="store_true", help="Persist raw CSV snapshots")
     parser.add_argument(
         "--update-features",
@@ -93,6 +117,7 @@ def main() -> int:
     parser.add_argument("--resume", dest="resume", action="store_true", default=True)
     parser.add_argument("--no-resume", dest="resume", action="store_false")
     args = parser.parse_args()
+    universe = IngestionUniverse(args.universe)
 
     scheduler = get_kite_scheduler()
     if args.refresh_instruments:
@@ -101,6 +126,34 @@ def main() -> int:
         return 0
 
     symbols = validate_symbols_csv(args.symbols)
+
+    if args.symbols_file:
+        from pathlib import Path
+
+        p = Path(args.symbols_file)
+        if not p.exists():
+            parser.error(f"symbols file not found: {p}")
+        symbols = [line.strip().upper() for line in p.read_text().splitlines() if line.strip()]
+        symbols = list(dict.fromkeys(symbols))  # deduplicate, preserve order
+        if not symbols:
+            parser.error("symbols file is empty")
+        logging.info("Loaded %d symbols from %s", len(symbols), p)
+
+    if args.missing:
+        tradeable = get_tradeable_symbols()
+        if not tradeable:
+            parser.error("Cannot load tradeable symbols from instrument master")
+        dataset_label = "5min" if args.use_5min else "daily"
+        layout = "5min" if args.use_5min else "daily"
+        existing = get_parquet_symbols(PARQUET_DIR / dataset_label, layout=layout)
+        symbols = sorted(tradeable - existing)
+        if not symbols:
+            print(
+                f"No missing {dataset_label} symbols found — parquet covers the full tradeable master."
+            )
+            return 0
+        logging.info("Auto-detected %d missing %s symbols", len(symbols), dataset_label)
+
     today = datetime.now(IST).date()
     if args.backfill:
         start_date = BACKFILL_START_DATE
@@ -120,7 +173,7 @@ def main() -> int:
     if start_date > end_date:
         parser.error("--from must be on or before --to")
 
-    cost_estimate = _estimate_backfill_cost(symbols, start_date, end_date, args.use_5min)
+    cost_estimate = _estimate_backfill_cost(symbols, start_date, end_date, args.use_5min, universe)
     logging.info(
         "Backfill cost estimate: %d symbols, %d days, ~%d requests, ~%.1f min",
         cost_estimate["symbols"],
@@ -138,6 +191,7 @@ def main() -> int:
             end_date=end_date,
             save_raw=args.save_raw,
             resume=args.resume,
+            universe=universe,
         )
     else:
         result = scheduler.run_daily_range_ingestion(
@@ -147,6 +201,7 @@ def main() -> int:
             update_features=args.update_features,
             save_raw=args.save_raw,
             resume=args.resume,
+            universe=universe,
         )
 
     print(json.dumps(result, indent=2, sort_keys=True))

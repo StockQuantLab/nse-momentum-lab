@@ -21,6 +21,17 @@ from nse_momentum_lab.db.market_db import get_market_db
 logger = logging.getLogger(__name__)
 
 CandidateState = Literal["WATCH", "ARMED", "TRIGGERED", "REJECTED"]
+_WATCHLIST_CACHE: dict[tuple[Any, ...], pl.DataFrame] = {}
+_WATCHLIST_CACHE_MAX_ENTRIES = 32
+
+
+def _cache_watchlist(key: tuple[Any, ...], frame: pl.DataFrame) -> pl.DataFrame:
+    if len(_WATCHLIST_CACHE) >= _WATCHLIST_CACHE_MAX_ENTRIES and key not in _WATCHLIST_CACHE:
+        oldest_key = next(iter(_WATCHLIST_CACHE))
+        _WATCHLIST_CACHE.pop(oldest_key, None)
+    cached = frame.clone()
+    _WATCHLIST_CACHE[key] = cached
+    return cached.clone()
 
 
 def _build_latest_bar_fallback_watchlist(
@@ -105,6 +116,19 @@ def build_prior_day_watchlist(
     if not symbols or trade_date is None:
         return pl.DataFrame()
 
+    cache_key = (
+        tuple(symbols),
+        trade_date.isoformat(),
+        strategy,
+        round(float(threshold), 6),
+        direction.lower().strip(),
+        round(float(min_price), 6),
+        int(min_filters),
+    )
+    cached = _WATCHLIST_CACHE.get(cache_key)
+    if cached is not None:
+        return cached.clone()
+
     context_end = trade_date - timedelta(days=1)
     context_start = context_end - timedelta(days=90)
 
@@ -112,30 +136,36 @@ def build_prior_day_watchlist(
 
     placeholders = ", ".join("?" for _ in symbols)
     is_long = direction.lower() != "short"
+    used_fallback = False
 
     if is_long:
         query = f"""
-        WITH numbered_daily AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date) AS rn
+        WITH base_daily AS (
+            SELECT
+                symbol,
+                date,
+                close,
+                high,
+                low,
+                open,
+                volume,
+                LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date) AS prev_close,
+                LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date) AS prev_close_2,
+                LAG(open, 1) OVER (PARTITION BY symbol ORDER BY date) AS prev_open,
+                (LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date)
+                 - LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date))
+                / NULLIF(LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag1,
+                close * volume AS value_traded_inr,
+                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS latest_rn
             FROM v_daily
             WHERE date BETWEEN CAST(? AS DATE)
                   AND CAST(? AS DATE)
               AND symbol IN ({placeholders})
         ),
-        with_lag AS (
-            SELECT
-                symbol, date, close, high, low, open, volume,
-                LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date) AS prev_close,
-                LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date) AS prev_close_2,
-                (LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date)
-                 - LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag1,
-                close * volume AS value_traded_inr
-            FROM numbered_daily WHERE rn > 1
-        ),
         latest AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS latest_rn
-            FROM with_lag
+            SELECT *
+            FROM base_daily
+            WHERE latest_rn = 1
         ),
         with_features AS (
             SELECT l.*,
@@ -143,9 +173,14 @@ def build_prior_day_watchlist(
                 f.vol_dryup_ratio, f.atr_compress_ratio, f.range_percentile,
                 f.prior_breakouts_30d, f.r2_65, f.ma_65_sma,
                 (f.close_pos_in_range >= 0.70) AS filter_h,
-                ((l.prev_close - COALESCE(lag(close, 1) OVER (PARTITION BY symbol ORDER BY date), l.close))
+                (
+                 (
+                  l.prev_close
+                  - COALESCE(l.prev_close_2, l.close)
+                 )
                  < (f.atr_20 * 0.5)
-                 OR l.prev_close < COALESCE(lag(open, 1) OVER (PARTITION BY symbol ORDER BY date), l.open)
+                 OR l.prev_close
+                    < COALESCE(l.prev_open, l.open)
                 ) AS filter_n,
                 (COALESCE(f.prior_breakouts_30d, 0) <= 2) AS filter_y,
                 (f.vol_dryup_ratio < 1.3) AS filter_c,
@@ -155,7 +190,6 @@ def build_prior_day_watchlist(
                 (l.ret_1d_lag1 <= 0) AS filter_2
             FROM latest l
             LEFT JOIN feat_daily f ON l.symbol = f.symbol AND l.date = f.date
-            WHERE l.latest_rn = 1
         )
         SELECT
             symbol,
@@ -179,27 +213,32 @@ def build_prior_day_watchlist(
         params = [context_start.isoformat(), context_end.isoformat(), *symbols, min_price]
     else:
         query = f"""
-        WITH numbered_daily AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date) AS rn
+        WITH base_daily AS (
+            SELECT
+                symbol,
+                date,
+                close,
+                high,
+                low,
+                open,
+                volume,
+                LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date) AS prev_close,
+                LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date) AS prev_close_2,
+                LAG(open, 1) OVER (PARTITION BY symbol ORDER BY date) AS prev_open,
+                (LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date)
+                 - LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date))
+                / NULLIF(LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag1,
+                close * volume AS value_traded_inr,
+                ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS latest_rn
             FROM v_daily
             WHERE date BETWEEN CAST(? AS DATE)
                   AND CAST(? AS DATE)
               AND symbol IN ({placeholders})
         ),
-        with_lag AS (
-            SELECT
-                symbol, date, close, high, low, open, volume,
-                LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date) AS prev_close,
-                LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date) AS prev_close_2,
-                (LAG(close, 1) OVER (PARTITION BY symbol ORDER BY date)
-                 - LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date))
-                / NULLIF(LAG(close, 2) OVER (PARTITION BY symbol ORDER BY date), 0) AS ret_1d_lag1,
-                close * volume AS value_traded_inr
-            FROM numbered_daily WHERE rn > 1
-        ),
         latest AS (
-            SELECT *, ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS latest_rn
-            FROM with_lag
+            SELECT *
+            FROM base_daily
+            WHERE latest_rn = 1
         ),
         with_features AS (
             SELECT l.*,
@@ -207,9 +246,14 @@ def build_prior_day_watchlist(
                 f.vol_dryup_ratio, f.range_percentile,
                 f.prior_breakdowns_90d, f.prior_breakouts_30d, f.r2_65, f.ma_65_sma,
                 (f.close_pos_in_range <= 0.30) AS filter_h,
-                ((l.prev_close - COALESCE(lag(close, 1) OVER (PARTITION BY symbol ORDER BY date), l.close))
+                (
+                 (
+                  l.prev_close
+                  - COALESCE(l.prev_close_2, l.close)
+                 )
                  < (f.atr_20 * 0.5)
-                 OR l.prev_close > COALESCE(lag(open, 1) OVER (PARTITION BY symbol ORDER BY date), l.open)
+                 OR l.prev_close
+                    > COALESCE(l.prev_open, l.open)
                 ) AS filter_n,
                 (COALESCE(f.prior_breakdowns_90d, 0) <= 2) AS filter_y,
                 (f.vol_dryup_ratio < 1.3) AS filter_c,
@@ -219,7 +263,6 @@ def build_prior_day_watchlist(
                 (l.ret_1d_lag1 >= 0) AS filter_2
             FROM latest l
             LEFT JOIN feat_daily f ON l.symbol = f.symbol AND l.date = f.date
-            WHERE l.latest_rn = 1
         )
         SELECT
             symbol,
@@ -248,7 +291,18 @@ def build_prior_day_watchlist(
         logger.exception(
             "Primary watchlist query failed for %d symbols on %s", len(symbols), trade_date
         )
-        result = pl.DataFrame()
+        try:
+            result = _build_latest_bar_fallback_watchlist(
+                symbols=symbols,
+                trade_date=trade_date,
+                min_price=min_price,
+            )
+            used_fallback = not result.is_empty()
+        except Exception:
+            logger.exception(
+                "Fallback watchlist query failed for %d symbols on %s", len(symbols), trade_date
+            )
+            result = pl.DataFrame()
 
     if result.is_empty() and min_filters <= 0:
         logger.info(
@@ -262,18 +316,19 @@ def build_prior_day_watchlist(
                 trade_date=trade_date,
                 min_price=min_price,
             )
+            used_fallback = not result.is_empty()
         except Exception:
             logger.exception(
                 "Fallback watchlist query failed for %d symbols on %s", len(symbols), trade_date
             )
             result = pl.DataFrame()
 
-    if result.is_empty():
-        return result
+    if result.is_empty() or used_fallback:
+        return _cache_watchlist(cache_key, result)
 
     # Apply min_filters threshold
     result = result.filter(pl.col("filters_passed") >= min_filters)
-    return result
+    return _cache_watchlist(cache_key, result)
 
 
 def check_intraday_trigger(

@@ -47,6 +47,8 @@ class KiteStreamConfig:
 class KiteStreamRunner:
     """Official KiteTicker-backed paper/live feed runner scaffold."""
 
+    feed_state_update_interval_seconds = 5.0
+
     def __init__(
         self,
         *,
@@ -62,6 +64,7 @@ class KiteStreamRunner:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ticker: Any | None = None
         self._stop_requested = False
+        self._last_tick_persisted_at: datetime | None = None
 
     @staticmethod
     def _resolve_mode_constant(ws: Any, mode: str) -> Any:
@@ -83,7 +86,7 @@ class KiteStreamRunner:
                 is_stale=False,
                 subscription_count=len(self.config.instrument_tokens),
                 metadata_json={
-                    "instrument_tokens": self.config.instrument_tokens,
+                    "token_count": len(self.config.instrument_tokens),
                     "mode": self.config.mode,
                 },
             )
@@ -232,7 +235,7 @@ class KiteStreamRunner:
                 last_tick_at=last_tick_at,
                 last_quote_at=last_quote_at,
                 metadata_json={
-                    "instrument_tokens": self.config.instrument_tokens,
+                    "token_count": len(self.config.instrument_tokens),
                     "mode": self.config.mode,
                     "stream_status": status,
                 },
@@ -240,6 +243,10 @@ class KiteStreamRunner:
 
     async def _record_ticks(self, ticks: list[dict[str, Any]]) -> None:
         now = datetime.now(tz=UTC)
+        if self._last_tick_persisted_at is not None:
+            elapsed = (now - self._last_tick_persisted_at).total_seconds()
+            if elapsed < self.feed_state_update_interval_seconds:
+                return
         instrument_tokens = sorted(
             {
                 int(token)
@@ -260,11 +267,12 @@ class KiteStreamRunner:
                 last_quote_at=now,
                 metadata_json={
                     "tick_count": len(ticks),
-                    "instrument_tokens": self.config.instrument_tokens,
+                    "token_count": len(self.config.instrument_tokens),
                     "last_tick_tokens": instrument_tokens[:25],
                     "mode": self.config.mode,
                 },
             )
+        self._last_tick_persisted_at = now
 
     async def _handle_ticks(self, ticks: list[dict[str, Any]]) -> None:
         await self._record_ticks(ticks)

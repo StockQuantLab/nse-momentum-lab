@@ -20,7 +20,7 @@ Use this instead of reading code for routine load behavior.
 
 | Table | Purpose | Load mode | Command |
 |---|---|---|---|
-| `bt_experiment` | Backtest run metadata and metrics | Append per run | `nseml-backtest`, `nseml-paper walk-forward` |
+| `bt_experiment` | Backtest run metadata and metrics | Append per run | `nseml-backtest`, `nseml-paper daily-sim` |
 | `bt_trade` | Backtest trades | Append per run | Same as above |
 | `bt_yearly_metric` | Per-year metrics | Append per run | Same as above |
 | `bt_execution_diagnostic` | Execution audit rows | Append per run | Same as above |
@@ -37,8 +37,8 @@ Use this instead of reading code for routine load behavior.
 
 | Table | Purpose | Load mode | Command |
 |---|---|---|---|
-| `paper_session` | Paper / walk-forward session state | App-managed | `nseml-paper ...` |
-| `walk_forward_fold` | Walk-forward fold results | App-managed | `nseml-paper walk-forward` |
+| `paper_session` | Replay/live paper session state | App-managed | `nseml-paper ...` |
+| `walk_forward_fold` | Legacy validation fold rows (no longer used operationally) | Legacy | Deprecated |
 | `signal`, `paper_order`, `paper_fill`, `paper_position` | Paper execution ledger | App-managed | `nseml-paper ...` |
 | `job_run` | Background job tracking | App-managed | Pipeline workers |
 | `dataset_manifest`, `partition_manifest`, `incremental_refresh_state` | Incremental lineage and partition tracking | App-managed | Ingest / refresh services |
@@ -48,7 +48,7 @@ Use this instead of reading code for routine load behavior.
 1. Use `--since YYYY-MM-DD` for catch-up windows after a short data append.
 2. Use `--force --allow-full-rebuild` only when you intentionally want a full rebuild.
 3. Run `nseml-db-verify` after ingest and feature refresh to confirm the runtime tables are current.
-4. For walk-forward, refresh in this order:
+4. For replay/live readiness, refresh in this order:
    `nseml-kite-ingest` -> `nseml-build-features --since YYYY-MM-DD` -> `nseml-market-monitor --incremental --since YYYY-MM-DD`.
 
 ## Where operators should look

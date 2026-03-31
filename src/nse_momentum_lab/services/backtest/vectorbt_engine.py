@@ -8,7 +8,6 @@ from datetime import date, time, timedelta
 
 import numpy as np
 import pandas as pd
-import polars as pl
 import vectorbt as vbt
 
 from nse_momentum_lab.db.market_db import get_market_db
@@ -150,23 +149,31 @@ class VectorBTEngine:
         }
         """
         db = get_market_db()
-        result = {}
+        result = {symbol: {} for symbol in symbols}
 
         # Batch query all symbols at once instead of N+1 individual queries
         df = db.query_daily_multi(symbols, start_date.isoformat(), end_date.isoformat())
 
-        for symbol in symbols:
-            symbol_df = df.filter(pl.col("symbol") == symbol)
-            result[symbol] = {}
-            for row in symbol_df.iter_rows(named=True):
-                trading_date = row["date"]
-                result[symbol][trading_date] = {
-                    "open": float(row["open"]),
-                    "high": float(row["high"]),
-                    "low": float(row["low"]),
-                    "close": float(row["close"]),
-                    "volume": int(row["volume"]),
+        for symbol_df in df.partition_by("symbol", maintain_order=True):
+            symbol = str(symbol_df.get_column("symbol")[0])
+            dates = symbol_df.get_column("date").to_list()
+            opens = symbol_df.get_column("open").to_list()
+            highs = symbol_df.get_column("high").to_list()
+            lows = symbol_df.get_column("low").to_list()
+            closes = symbol_df.get_column("close").to_list()
+            volumes = symbol_df.get_column("volume").to_list()
+            result[symbol] = {
+                trading_date: {
+                    "open": float(open_price),
+                    "high": float(high_price),
+                    "low": float(low_price),
+                    "close": float(close_price),
+                    "volume": int(volume),
                 }
+                for trading_date, open_price, high_price, low_price, close_price, volume in zip(
+                    dates, opens, highs, lows, closes, volumes, strict=False
+                )
+            }
 
         return result
 
@@ -181,27 +188,60 @@ class VectorBTEngine:
 
         df = db.get_features_range(symbols, start_date.isoformat(), end_date.isoformat())
 
-        result = {}
-        for symbol in symbols:
-            symbol_df = df.filter(pl.col("symbol") == symbol)
-            result[symbol] = {}
-            for row in symbol_df.iter_rows(named=True):
-                result[symbol][row["trading_date"]] = {
-                    "ret_1d": float(row["ret_1d"]) if row["ret_1d"] is not None else None,
-                    "ret_5d": float(row["ret_5d"]) if row["ret_5d"] is not None else None,
-                    "atr_20": float(row["atr_20"]) if row["atr_20"] is not None else None,
-                    "range_pct": float(row["range_pct"]) if row["range_pct"] is not None else None,
-                    "close_pos_in_range": float(row["close_pos_in_range"])
-                    if row["close_pos_in_range"] is not None
-                    else None,
-                    "ma_20": float(row["ma_20"]) if row["ma_20"] is not None else None,
-                    "ma_65": float(row["ma_65"]) if row["ma_65"] is not None else None,
-                    "rs_252": float(row["rs_252"]) if row["rs_252"] is not None else None,
-                    "vol_20": float(row["vol_20"]) if row["vol_20"] is not None else None,
-                    "dollar_vol_20": float(row["dollar_vol_20"])
-                    if row["dollar_vol_20"] is not None
-                    else None,
+        result = {symbol: {} for symbol in symbols}
+        for symbol_df in df.partition_by("symbol", maintain_order=True):
+            symbol = str(symbol_df.get_column("symbol")[0])
+            trading_dates = symbol_df.get_column("trading_date").to_list()
+            ret_1d = symbol_df.get_column("ret_1d").to_list()
+            ret_5d = symbol_df.get_column("ret_5d").to_list()
+            atr_20 = symbol_df.get_column("atr_20").to_list()
+            range_pct = symbol_df.get_column("range_pct").to_list()
+            close_pos_in_range = symbol_df.get_column("close_pos_in_range").to_list()
+            ma_20 = symbol_df.get_column("ma_20").to_list()
+            ma_65 = symbol_df.get_column("ma_65").to_list()
+            rs_252 = symbol_df.get_column("rs_252").to_list()
+            vol_20 = symbol_df.get_column("vol_20").to_list()
+            dollar_vol_20 = symbol_df.get_column("dollar_vol_20").to_list()
+            result[symbol] = {
+                trading_date: {
+                    "ret_1d": float(ret1) if ret1 is not None else None,
+                    "ret_5d": float(ret5) if ret5 is not None else None,
+                    "atr_20": float(atr) if atr is not None else None,
+                    "range_pct": float(rng) if rng is not None else None,
+                    "close_pos_in_range": float(close_pos) if close_pos is not None else None,
+                    "ma_20": float(ma20) if ma20 is not None else None,
+                    "ma_65": float(ma65) if ma65 is not None else None,
+                    "rs_252": float(rs) if rs is not None else None,
+                    "vol_20": float(vol20) if vol20 is not None else None,
+                    "dollar_vol_20": float(dollar_vol) if dollar_vol is not None else None,
                 }
+                for (
+                    trading_date,
+                    ret1,
+                    ret5,
+                    atr,
+                    rng,
+                    close_pos,
+                    ma20,
+                    ma65,
+                    rs,
+                    vol20,
+                    dollar_vol,
+                ) in zip(
+                    trading_dates,
+                    ret_1d,
+                    ret_5d,
+                    atr_20,
+                    range_pct,
+                    close_pos_in_range,
+                    ma_20,
+                    ma_65,
+                    rs_252,
+                    vol_20,
+                    dollar_vol_20,
+                    strict=False,
+                )
+            }
 
         return result
 
@@ -213,35 +253,56 @@ class VectorBTEngine:
         end_date: date,
         field: str,
     ) -> pd.DataFrame:
-        all_dates = set()
-        for symbol_id in symbols:
-            if symbol_id in price_data:
-                all_dates.update(price_data[symbol_id].keys())
+        return self._prepare_price_matrices(
+            price_data=price_data,
+            symbols=symbols,
+            start_date=start_date,
+            end_date=end_date,
+            fields=[field],
+        )[field]
 
-        valid_dates = sorted([d for d in all_dates if start_date <= d <= end_date])
-
+    def _prepare_price_matrices(
+        self,
+        *,
+        price_data: dict[int, dict[date, dict[str, float]]],
+        symbols: list[int],
+        start_date: date,
+        end_date: date,
+        fields: list[str],
+    ) -> dict[str, pd.DataFrame]:
+        valid_dates = sorted(
+            {
+                trading_date
+                for symbol_id in symbols
+                if symbol_id in price_data
+                for trading_date in price_data[symbol_id]
+                if start_date <= trading_date <= end_date
+            }
+        )
         if not valid_dates:
-            return pd.DataFrame()
+            return {field: pd.DataFrame() for field in fields}
 
-        price_matrix: dict[int, list[float]] = {}
-        for symbol_id in symbols:
-            if symbol_id in price_data:
-                symbol_prices = price_data[symbol_id]
-                values: list[float] = []
-                for d in valid_dates:
-                    if d in symbol_prices:
-                        values.append(
-                            symbol_prices[d].get(
-                                field, symbol_prices[d].get(field.replace("_adj", ""), np.nan)
-                            )
-                        )
-                    else:
-                        values.append(np.nan)
-                price_matrix[symbol_id] = values
+        symbol_ids = [symbol_id for symbol_id in symbols if symbol_id in price_data]
+        date_to_idx = {trading_date: idx for idx, trading_date in enumerate(valid_dates)}
+        matrices = {
+            field: np.full((len(valid_dates), len(symbol_ids)), np.nan, dtype=float)
+            for field in fields
+        }
 
-        df = pd.DataFrame(price_matrix, index=pd.DatetimeIndex(valid_dates))
-        df.index.name = "date"
-        return df
+        for col_idx, symbol_id in enumerate(symbol_ids):
+            for trading_date, values in price_data[symbol_id].items():
+                row_idx = date_to_idx.get(trading_date)
+                if row_idx is None:
+                    continue
+                for field in fields:
+                    raw_value = values.get(field, values.get(field.replace("_adj", ""), np.nan))
+                    matrices[field][row_idx, col_idx] = raw_value
+
+        index = pd.DatetimeIndex(valid_dates, name="date")
+        return {
+            field: pd.DataFrame(matrix, index=index, columns=symbol_ids)
+            for field, matrix in matrices.items()
+        }
 
     def prepare_signals(
         self,
@@ -711,34 +772,17 @@ class VectorBTEngine:
             days=self.config.time_stop_days + 5
         )  # Buffer for weekends/holidays
 
-        close_df = self.prepare_price_matrix(
-            price_data,
-            symbol_ids,
-            min_date,
-            max_date,
-            "close_adj",
+        price_matrices = self._prepare_price_matrices(
+            symbols=symbol_ids,
+            price_data=price_data,
+            start_date=min_date,
+            end_date=max_date,
+            fields=["close_adj", "open_adj", "high_adj", "low_adj"],
         )
-        open_df = self.prepare_price_matrix(
-            price_data,
-            symbol_ids,
-            min_date,
-            max_date,
-            "open_adj",
-        )
-        high_df = self.prepare_price_matrix(
-            price_data,
-            symbol_ids,
-            min_date,
-            max_date,
-            "high_adj",
-        )
-        low_df = self.prepare_price_matrix(
-            price_data,
-            symbol_ids,
-            min_date,
-            max_date,
-            "low_adj",
-        )
+        close_df = price_matrices["close_adj"]
+        open_df = price_matrices["open_adj"]
+        high_df = price_matrices["high_adj"]
+        low_df = price_matrices["low_adj"]
 
         if close_df.empty:
             return VectorBTResult(strategy_name=strategy_name, entry_mode="gap_open", trades=[])

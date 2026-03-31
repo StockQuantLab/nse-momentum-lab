@@ -38,7 +38,9 @@ class TestWalkForwardFramework:
         assert windows[1].test_start == date(2026, 3, 9)
         assert windows[1].test_end == date(2026, 3, 10)
 
-    def test_generate_rolling_windows_from_sessions_returns_empty_when_insufficient_data(self) -> None:
+    def test_generate_rolling_windows_from_sessions_returns_empty_when_insufficient_data(
+        self,
+    ) -> None:
         framework = WalkForwardFramework()
 
         windows = list(

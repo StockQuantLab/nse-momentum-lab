@@ -8,7 +8,7 @@
 - Corporate action adjustment (splits/bonus/rights)
 - Feature computation + 4% breakout + 2LYNCH scan engine
 - Backtest engine with experiment registry
-- Walk-forward promotion gate + paper trading ledger + risk governance
+- Paper trading ledger + risk governance
 - Daily summary + failure analysis rollups
 - FastAPI read APIs + NiceGUI dashboard
 - Pre-commit hooks for linting and testing

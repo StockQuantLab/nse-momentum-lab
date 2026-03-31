@@ -125,21 +125,27 @@ def run_single_backtest(
         return None
 
     df_pl = pl.from_pandas(df)
-    df_pl = df_pl.with_columns([
-        pl.col("filter_h").fill_null(False),
-        pl.col("filter_n").fill_null(False),
-        pl.col("filter_y").fill_null(True),
-        pl.col("filter_c").fill_null(False),
-        pl.col("filter_l").fill_null(False),
-    ])
+    df_pl = df_pl.with_columns(
+        [
+            pl.col("filter_h").fill_null(False),
+            pl.col("filter_n").fill_null(False),
+            pl.col("filter_y").fill_null(True),
+            pl.col("filter_c").fill_null(False),
+            pl.col("filter_l").fill_null(False),
+        ]
+    )
 
-    df_pl = df_pl.with_columns([
-        (pl.col("filter_h").cast(int) +
-         pl.col("filter_n").cast(int) +
-         pl.col("filter_y").cast(int) +
-         pl.col("filter_c").cast(int) +
-         pl.col("filter_l").cast(int)).alias("filters_passed")
-    ])
+    df_pl = df_pl.with_columns(
+        [
+            (
+                pl.col("filter_h").cast(int)
+                + pl.col("filter_n").cast(int)
+                + pl.col("filter_y").cast(int)
+                + pl.col("filter_c").cast(int)
+                + pl.col("filter_l").cast(int)
+            ).alias("filters_passed")
+        ]
+    )
 
     df_filtered = df_pl.filter(pl.col("filters_passed") >= min_filters)
     if df_filtered.height == 0:
@@ -192,13 +198,15 @@ def run_single_backtest(
         if isinstance(sig_date, datetime):
             sig_date = sig_date.date()
 
-        vbt_signals.append((
-            sig_date,
-            symbol_id,
-            symbol,
-            row["low"],
-            {"gap_pct": row["gap_pct"], "atr": row["atr_20"] if row["atr_20"] else 0.0}
-        ))
+        vbt_signals.append(
+            (
+                sig_date,
+                symbol_id,
+                symbol,
+                row["low"],
+                {"gap_pct": row["gap_pct"], "atr": row["atr_20"] if row["atr_20"] else 0.0},
+            )
+        )
 
     if not vbt_signals:
         return None
@@ -213,8 +221,9 @@ def run_single_backtest(
     )
 
     # Count weak follow-through
-    weak_ft = sum(1 for t in result.trades
-                  if t.exit_reason and "weak" in t.exit_reason.value.lower())
+    weak_ft = sum(
+        1 for t in result.trades if t.exit_reason and "weak" in t.exit_reason.value.lower()
+    )
 
     return {
         "num_stocks": len(symbols),
@@ -242,38 +251,44 @@ def main():
         epilog=__doc__,
     )
     parser.add_argument(
-        "--num-stocks", "-n",
+        "--num-stocks",
+        "-n",
         type=int,
         default=100,
         help="Number of top liquid stocks to test (default: 100)",
     )
     parser.add_argument(
-        "--min-price", "-p",
+        "--min-price",
+        "-p",
         type=int,
         default=10,
         choices=[10, 30, 50, 100],
         help="Minimum stock price (default: 10)",
     )
     parser.add_argument(
-        "--min-filters", "-f",
+        "--min-filters",
+        "-f",
         type=int,
         default=4,
         choices=[3, 4, 5, 6],
         help="Minimum filters to pass (default: 4)",
     )
     parser.add_argument(
-        "--all", "-a",
+        "--all",
+        "-a",
         action="store_true",
         help="Test all combinations of parameters",
     )
     parser.add_argument(
-        "--risk-per-trade", "-r",
+        "--risk-per-trade",
+        "-r",
         type=float,
         default=1.0,
         help="Risk per trade in %% (default: 1.0)",
     )
     parser.add_argument(
-        "--quiet", "-q",
+        "--quiet",
+        "-q",
         action="store_true",
         help="Less verbose output",
     )
@@ -283,7 +298,8 @@ def main():
     # Fix encoding for Windows
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     print("\n" + "=" * 80)
     print("2LYNCH BREAKOUT BACKTEST")
@@ -307,8 +323,10 @@ def main():
     # Define test configurations
     if args.all:
         configs = [
-            (10, 4), (10, 5),
-            (30, 4), (30, 5),
+            (10, 4),
+            (10, 5),
+            (30, 4),
+            (30, 5),
             (50, 4),
         ]
     else:
@@ -335,7 +353,9 @@ def main():
         if result:
             results.append(result)
             if not args.quiet:
-                print(f"  Signals: {result['filtered_signals']} ({result['signals_per_year']:.1f}/yr)")
+                print(
+                    f"  Signals: {result['filtered_signals']} ({result['signals_per_year']:.1f}/yr)"
+                )
                 print(f"  Trades: {result['trades']}")
                 print(f"  Return: {result['return']:+.2f}%")
                 print(f"  Win Rate: {result['win_rate']:.1f}%")
@@ -351,14 +371,18 @@ def main():
     print(f"SUMMARY - {len(symbols)} STOCKS")
     print(f"{'=' * 100}")
 
-    print(f"\n{'Config':<20} {'Signals/yr':>12} {'Return %':>12} {'Win %':>10} {'Sharpe':>8} {'DD%':>8} {'WeakFT%':>10}")
+    print(
+        f"\n{'Config':<20} {'Signals/yr':>12} {'Return %':>12} {'Win %':>10} {'Sharpe':>8} {'DD%':>8} {'WeakFT%':>10}"
+    )
     print(f"{'-' * 100}")
 
     for r in results:
         config = f"Rs.{r['min_price']}+,{r['min_filters']}/6"
-        print(f"{config:<20} {r['signals_per_year']:>11.1f} "
-              f"{r['return']:>11.2f}% {r['win_rate']:>9.1f}% "
-              f"{r['sharpe']:>7.2f} {r['max_drawdown']:>7.1f}% {r['weak_ft_pct']:>9.1f}%")
+        print(
+            f"{config:<20} {r['signals_per_year']:>11.1f} "
+            f"{r['return']:>11.2f}% {r['win_rate']:>9.1f}% "
+            f"{r['sharpe']:>7.2f} {r['max_drawdown']:>7.1f}% {r['weak_ft_pct']:>9.1f}%"
+        )
 
     print(f"\n{'=' * 100}\n")
 

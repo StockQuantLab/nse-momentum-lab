@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import duckdb
-import pandas as pd
+import polars as pl
 
 
 @dataclass
@@ -36,35 +36,36 @@ def _infer_symbol(path: Path) -> str:
     return stem.strip().upper()
 
 
-def _normalize_daily_csv(path: Path, symbol: str) -> pd.DataFrame:
-    df = pd.read_csv(path, usecols=["Date", "Open", "High", "Low", "Close", "Volume"])
-    if df.empty:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "date", "symbol"])
+def _normalize_daily_csv(path: Path, symbol: str) -> pl.DataFrame:
+    df = pl.read_csv(path, columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+    if df.is_empty():
+        return pl.DataFrame(
+            schema={
+                "open": pl.Float64,
+                "high": pl.Float64,
+                "low": pl.Float64,
+                "close": pl.Float64,
+                "volume": pl.Int64,
+                "date": pl.Date,
+                "symbol": pl.Utf8,
+            }
+        )
 
-    # Parse calendar date directly from YYYY-MM-DD prefix. This intentionally
-    # ignores timezone offset in vendor strings to avoid UTC date shifting.
-    date_str = df["Date"].astype(str).str.slice(0, 10)
-    parsed = pd.to_datetime(date_str, format="%Y-%m-%d", errors="coerce")
-    bad = parsed.isna().sum()
-    if bad:
-        parsed_fallback = pd.to_datetime(df["Date"], errors="coerce")
-        parsed = parsed.fillna(parsed_fallback)
-
-    out = pd.DataFrame(
-        {
-            "open": pd.to_numeric(df["Open"], errors="coerce"),
-            "high": pd.to_numeric(df["High"], errors="coerce"),
-            "low": pd.to_numeric(df["Low"], errors="coerce"),
-            "close": pd.to_numeric(df["Close"], errors="coerce"),
-            "volume": pd.to_numeric(df["Volume"], errors="coerce").fillna(0).astype("int64"),
-            "date": parsed.dt.date,
-            "symbol": symbol,
-        }
+    out = (
+        df.with_columns(
+            pl.col("Date").cast(pl.Utf8).str.slice(0, 10).str.strptime(pl.Date, "%Y-%m-%d", strict=False).alias("date"),
+            pl.col("Open").cast(pl.Float64, strict=False).alias("open"),
+            pl.col("High").cast(pl.Float64, strict=False).alias("high"),
+            pl.col("Low").cast(pl.Float64, strict=False).alias("low"),
+            pl.col("Close").cast(pl.Float64, strict=False).alias("close"),
+            pl.col("Volume").cast(pl.Int64, strict=False).fill_null(0).alias("volume"),
+            pl.lit(symbol).alias("symbol"),
+        )
+        .drop_nulls(["date", "open", "high", "low", "close"])
+        .select(["open", "high", "low", "close", "volume", "date", "symbol"])
+        .unique(subset=["date"], keep="last")
+        .sort("date")
     )
-
-    out = out.dropna(subset=["date", "open", "high", "low", "close"])
-    out = out.sort_values("date")
-    out = out.drop_duplicates(subset=["date"], keep="last")
     return out
 
 
@@ -91,8 +92,8 @@ def rebuild_daily_parquet(
     for idx, path in enumerate(csv_files, start=1):
         symbol = _infer_symbol(path)
         df = _normalize_daily_csv(path, symbol)
-        stats.rows_in += int(pd.read_csv(path, usecols=["Date"]).shape[0])
-        stats.rows_out += len(df)
+        stats.rows_in += df.height
+        stats.rows_out += df.height
         stats.symbols += 1
 
         symbol_dir = out_dir / symbol
@@ -100,7 +101,7 @@ def rebuild_daily_parquet(
         target = symbol_dir / "all.parquet"
         tmp = symbol_dir / "all.parquet.tmp"
 
-        df.to_parquet(tmp, index=False)
+        df.write_parquet(tmp)
         tmp.replace(target)
 
         if idx % 200 == 0 or idx == len(csv_files):
@@ -132,7 +133,9 @@ def validate_daily_parquet(out_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Rebuild daily parquet from raw CSV files")
     parser.add_argument("--raw-dir", default="data/raw/daily", help="Raw daily CSV directory")
-    parser.add_argument("--out-dir", default="data/parquet/daily", help="Daily parquet output directory")
+    parser.add_argument(
+        "--out-dir", default="data/parquet/daily", help="Daily parquet output directory"
+    )
     parser.add_argument("--limit", type=int, default=None, help="Limit number of symbols")
     parser.add_argument(
         "--no-clean",

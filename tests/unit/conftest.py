@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-
 _UNIT_TMP_ROOT = Path(__file__).resolve().parents[2] / ".unit-tmp"
 _UNIT_TMP_ROOT.mkdir(parents=True, exist_ok=True)
 

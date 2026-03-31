@@ -37,7 +37,7 @@ def add_r2_column_double():
     print("\n[VERIFICATION]")
     columns = db.con.execute("DESCRIBE feat_daily").fetchall()
     for col in columns:
-        if col[0] == 'r2_65':
+        if col[0] == "r2_65":
             print(f"  {col[0]}: {col[1]}")
             break
 
@@ -53,6 +53,7 @@ if __name__ == "__main__":
 
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     add_r2_column_double()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from nse_momentum_lab.services.backtest.cost_model import CostModel, cost_model_from_name
 from nse_momentum_lab.services.backtest.engine import (
     ExitReason,
     PositionSide,
@@ -52,6 +53,7 @@ __all__ = [
     "FILTER_Y",
     "BacktestSignal",
     "BufferedProgressWriter",
+    "CostModel",
     "ExitReason",
     "ExperimentRegistry",
     "FilterChecker",
@@ -68,6 +70,7 @@ __all__ = [
     "WalkForwardWindow",
     "build_filter_ctes",
     "build_filter_sql_clause",
+    "cost_model_from_name",
     "run_vectorbt_backtest",
     "run_walk_forward",
 ]

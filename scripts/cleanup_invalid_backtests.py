@@ -231,9 +231,7 @@ def main() -> None:
             )
         invalid_map = explicit_invalid
 
-    invalid_runs = sorted(
-        invalid_map.values(), key=lambda r: (r.created_at is None, r.created_at)
-    )
+    invalid_runs = sorted(invalid_map.values(), key=lambda r: (r.created_at is None, r.created_at))
     if not invalid_runs:
         print("[CLEANUP] No invalid runs found.")
         return

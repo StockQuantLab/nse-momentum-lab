@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import httpx
 
-from nse_momentum_lab.services.kite.client import KiteConnectClient
+from nse_momentum_lab.services.kite.client import (
+    DEFAULT_HTTPX_LIMITS,
+    DEFAULT_HTTPX_TIMEOUT,
+    KiteConnectClient,
+)
 
 
 class _DummyClient:
@@ -28,6 +32,20 @@ class _DummyClient:
 
 
 class TestKiteConnectClient:
+    def test_default_client_uses_tuned_httpx_limits(self) -> None:
+        client = KiteConnectClient(api_key="kite-key", api_secret="kite-secret")
+        try:
+            timeout = client._client.timeout
+            limits = client._client._transport._pool._max_connections  # type: ignore[attr-defined]
+        finally:
+            client.close()
+
+        assert timeout.connect == DEFAULT_HTTPX_TIMEOUT.connect
+        assert timeout.read == DEFAULT_HTTPX_TIMEOUT.read
+        assert timeout.write == DEFAULT_HTTPX_TIMEOUT.write
+        assert timeout.pool == DEFAULT_HTTPX_TIMEOUT.pool
+        assert limits == DEFAULT_HTTPX_LIMITS.max_connections
+
     def test_login_url_appends_api_key(self) -> None:
         client = KiteConnectClient(
             api_key="kite-key",

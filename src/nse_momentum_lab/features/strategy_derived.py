@@ -249,11 +249,77 @@ def _build_2lynch_derived_incremental(con, *, since_date: date, dataset_hash: st
     return n
 
 
+def _build_2lynch_derived_symbols(con, symbols: list[str], dataset_hash: str) -> int:
+    """Rebuild feat_2lynch_derived rows for the given symbols only."""
+    filter_table = "_fld_sym_filter"
+    source_view = "_fld_sym_src"
+    delta_table = "_fld_sym_delta"
+
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {filter_table} (symbol VARCHAR)")
+    if symbols:
+        phs = ",".join(["(?)"] * len(symbols))
+        con.execute(f"INSERT INTO {filter_table} VALUES {phs}", symbols)
+
+    con.execute(
+        f"CREATE OR REPLACE TEMP VIEW {source_view} AS "
+        f"SELECT * FROM feat_daily_core "
+        f"WHERE symbol IN (SELECT symbol FROM {filter_table})"
+    )
+
+    table_exists = True
+    try:
+        con.execute("SELECT 1 FROM feat_2lynch_derived LIMIT 1").fetchone()
+    except Exception:
+        table_exists = False
+
+    try:
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+        con.execute(f"CREATE TEMP TABLE {delta_table} AS {_derived_sql_for_source(source_view)}")
+
+        if table_exists:
+            placeholders = ",".join(["?"] * len(symbols))
+            con.execute(
+                f"DELETE FROM feat_2lynch_derived WHERE symbol IN ({placeholders})", symbols
+            )
+            con.execute(f"INSERT INTO feat_2lynch_derived SELECT * FROM {delta_table}")
+        else:
+            con.execute(f"CREATE TABLE feat_2lynch_derived AS SELECT * FROM {delta_table}")
+            con.execute(
+                "CREATE INDEX idx_feat_2lynch_symbol_date ON feat_2lynch_derived(symbol, trading_date)"
+            )
+            con.execute(
+                "CREATE INDEX idx_feat_2lynch_close_pos_in_range ON feat_2lynch_derived(close_pos_in_range)"
+            )
+            con.execute(
+                "CREATE INDEX idx_feat_2lynch_vol_dryup_ratio ON feat_2lynch_derived(vol_dryup_ratio)"
+            )
+    finally:
+        con.execute(f"DROP VIEW IF EXISTS {source_view}")
+        con.execute(f"DROP TABLE IF EXISTS {delta_table}")
+        con.execute(f"DROP TABLE IF EXISTS {filter_table}")
+
+    row = con.execute("SELECT COUNT(*) FROM feat_2lynch_derived").fetchone()
+    n = int(row[0]) if row and row[0] is not None else 0
+    con.execute(
+        """
+        INSERT OR REPLACE INTO bt_materialization_state
+        (table_name, dataset_hash, query_version, row_count, updated_at)
+        VALUES (?, ?, ?, ?, current_timestamp)
+    """,
+        ["feat_2lynch_derived", dataset_hash, FEAT_2LYNCH_DERIVED_VERSION, n],
+    )
+    logger.info(
+        "feat_2lynch_derived symbol-level rebuild (%d symbols): %d total rows", len(symbols), n
+    )
+    return n
+
+
 def build_2lynch_derived(
     con,  # DuckDBPyConnection
     force: bool = False,
     dataset_hash: str | None = None,
     since_date: date | None = None,
+    symbols: list[str] | None = None,
 ) -> int:
     """
     Build the feat_2lynch_derived materialized table.
@@ -282,6 +348,14 @@ def build_2lynch_derived(
         ).fetchone()
         dataset_hash = core_row[0] if core_row and core_row[0] else None
 
+    if symbols is not None:
+        if not symbols:
+            row = con.execute("SELECT COUNT(*) FROM feat_2lynch_derived").fetchone()
+            return int(row[0]) if row and row[0] is not None else 0
+        return _build_2lynch_derived_symbols(
+            con, symbols=symbols, dataset_hash=dataset_hash or "unknown"
+        )
+
     if since_date is not None and not force:
         return _build_2lynch_derived_incremental(
             con, since_date=since_date, dataset_hash=dataset_hash or "unknown"
@@ -295,7 +369,7 @@ def build_2lynch_derived(
                 "WHERE table_name = 'feat_2lynch_derived'"
             ).fetchone()
             if row:
-                _table_name, current_dataset_hash, query_version, row_count = row
+                _, current_dataset_hash, query_version, row_count = row
                 if (
                     query_version == FEAT_2LYNCH_DERIVED_VERSION
                     and current_dataset_hash == dataset_hash
@@ -307,11 +381,19 @@ def build_2lynch_derived(
             pass  # Table doesn't exist yet
 
     # Drop and rebuild
+    import time as _time
+
     logger.info("Building feat_2lynch_derived materialized table...")
     con.execute("DROP TABLE IF EXISTS feat_2lynch_derived")
+
+    logger.info("  Phase 1/3: Executing CREATE TABLE (derived features from feat_daily_core)...")
+    t0 = _time.monotonic()
     con.execute(FEAT_2LYNCH_DERIVED_SQL)
+    logger.info("  Phase 1/3: SQL complete in %.1fs", _time.monotonic() - t0)
 
     # Create indexes for common candidate queries
+    logger.info("  Phase 2/3: Creating indexes...")
+    t0 = _time.monotonic()
     con.execute(
         "CREATE INDEX idx_feat_2lynch_symbol_date ON feat_2lynch_derived(symbol, trading_date)"
     )
@@ -321,6 +403,7 @@ def build_2lynch_derived(
     con.execute(
         "CREATE INDEX idx_feat_2lynch_vol_dryup_ratio ON feat_2lynch_derived(vol_dryup_ratio)"
     )
+    logger.info("  Phase 2/3: Indexes created in %.1fs", _time.monotonic() - t0)
 
     row = con.execute("SELECT COUNT(*) FROM feat_2lynch_derived").fetchone()
     n = int(row[0]) if row and row[0] is not None else 0
@@ -329,6 +412,7 @@ def build_2lynch_derived(
     if dataset_hash is None:
         dataset_hash = "unknown"
 
+    logger.info("  Phase 3/3: Updating materialization state...")
     con.execute(
         """
         INSERT OR REPLACE INTO bt_materialization_state

@@ -5,6 +5,8 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from sqlalchemy.dialects import postgresql
+
 from nse_momentum_lab.services.paper.runtime import PaperRuntimePlan, PaperRuntimeScaffold
 
 
@@ -30,6 +32,34 @@ def _sessionmaker_mock(session: AsyncMock | None = None) -> MagicMock:
 
 
 class TestPaperRuntimeScaffold:
+    def test_ensure_ref_symbols_uses_conflict_safe_upsert(self) -> None:
+        runtime = PaperRuntimeScaffold()
+        db_session = AsyncMock()
+        first_result = MagicMock()
+        first_result.scalars.return_value.all.return_value = [
+            SimpleNamespace(symbol="ABC", symbol_id=101)
+        ]
+        second_result = MagicMock()
+        second_result.scalars.return_value.all.return_value = [
+            SimpleNamespace(symbol="ABC", symbol_id=101),
+            SimpleNamespace(symbol="XYZ", symbol_id=202),
+        ]
+        db_session.execute = AsyncMock(side_effect=[first_result, MagicMock(), second_result])
+
+        result = asyncio.run(runtime._ensure_ref_symbols(db_session, ["ABC", "XYZ"]))
+
+        assert sorted(result) == ["ABC", "XYZ"]
+        insert_stmt = db_session.execute.await_args_list[1].args[0]
+        compiled = str(
+            insert_stmt.compile(
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "ON CONFLICT" in compiled.upper()
+        assert "DO NOTHING" in compiled.upper()
+        db_session.flush.assert_not_awaited()
+
     def test_build_feed_plan_without_tokens(self) -> None:
         runtime = PaperRuntimeScaffold(feed_batch_size=100)
         plan = PaperRuntimePlan(
@@ -183,7 +213,9 @@ class TestPaperRuntimeScaffold:
         mock_list_session_signals.return_value = [{"signal_id": 1}]
         mock_summary.return_value = {"session": {"session_id": "paper-rt"}}
 
-        with patch.object(runtime, "_fetch_queue_from_runtime", new_callable=AsyncMock) as mock_fetch:
+        with patch.object(
+            runtime, "_fetch_queue_from_runtime", new_callable=AsyncMock
+        ) as mock_fetch:
             with patch.object(
                 runtime, "_persist_queue_from_experiment", new_callable=AsyncMock
             ) as mock_persist:
@@ -202,6 +234,78 @@ class TestPaperRuntimeScaffold:
         mock_create.assert_awaited_once()
         assert result["queue_size"] == 1
         assert result["actionable_queue_size"] == 1
+
+    @patch(
+        "nse_momentum_lab.services.paper.runtime.upsert_paper_feed_state", new_callable=AsyncMock
+    )
+    @patch(
+        "nse_momentum_lab.services.paper.runtime.list_paper_session_signals", new_callable=AsyncMock
+    )
+    @patch(
+        "nse_momentum_lab.services.paper.runtime.get_paper_session_summary", new_callable=AsyncMock
+    )
+    @patch(
+        "nse_momentum_lab.services.paper.runtime.create_or_update_paper_session",
+        new_callable=AsyncMock,
+    )
+    def test_prepare_session_loads_watchlist_queue_for_replay(
+        self,
+        mock_create: AsyncMock,
+        mock_summary: AsyncMock,
+        mock_list_session_signals: AsyncMock,
+        mock_feed_state: AsyncMock,
+    ) -> None:
+        runtime = PaperRuntimeScaffold(feed_batch_size=100)
+        plan = PaperRuntimePlan(
+            session_id="paper-replay-watchlist",
+            strategy_name="thresholdbreakout",
+            trade_date=date(2026, 3, 23),
+            mode="replay",
+            strategy_params={
+                "_live_watchlist_rows": [
+                    {
+                        "symbol": "ABC",
+                        "last_close": 100.0,
+                        "atr_20": 2.0,
+                        "filters_passed": 3,
+                    }
+                ],
+                "breakout_threshold": 0.02,
+            },
+        )
+        sessionmaker = _sessionmaker_mock()
+        mock_feed_state.return_value = SimpleNamespace(
+            session_id="paper-replay-watchlist",
+            source="duckdb",
+            mode="full",
+            status="READY",
+            subscription_count=1,
+            is_stale=False,
+        )
+        mock_list_session_signals.return_value = [{"signal_id": 1}]
+        mock_summary.return_value = {"session": {"session_id": "paper-replay-watchlist"}}
+
+        with patch.object(
+            runtime, "_fetch_queue_from_watchlist", new_callable=AsyncMock
+        ) as mock_fetch:
+            with patch.object(
+                runtime, "_persist_queue_from_experiment", new_callable=AsyncMock
+            ) as mock_persist:
+                mock_fetch.return_value = {
+                    "rows": [{"symbol": "ABC", "status": "watching_intraday_trigger"}],
+                    "queue_size": 1,
+                    "actionable_queue_size": 0,
+                    "symbols": ["ABC"],
+                    "ref_symbols": {"ABC": SimpleNamespace(symbol="ABC", symbol_id=101)},
+                    "missing_symbols": [],
+                }
+                result = asyncio.run(runtime.prepare_session(sessionmaker, plan, status="RUNNING"))
+
+        mock_fetch.assert_awaited_once()
+        mock_persist.assert_awaited_once()
+        mock_create.assert_awaited_once()
+        assert result["queue_size"] == 1
+        assert result["actionable_queue_size"] == 0
 
     def test_strategy_hash_for_runtime_plan_is_deterministic(self) -> None:
         runtime = PaperRuntimeScaffold()
@@ -286,7 +390,9 @@ class TestPaperRuntimeScaffold:
             "_ensure_ref_symbols",
             new=AsyncMock(return_value={"TCS": SimpleNamespace(symbol_id=7, symbol="TCS")}),
         ):
-            with patch.object(runtime, "_resolve_instrument_token_map", return_value={"TCS": 12345}):
+            with patch.object(
+                runtime, "_resolve_instrument_token_map", return_value={"TCS": 12345}
+            ):
                 result = asyncio.run(runtime._fetch_queue_from_watchlist(db_session, plan))
 
         assert result["queue_size"] == 1
@@ -361,7 +467,9 @@ class TestPaperRuntimeScaffold:
                 }
             ),
         ):
-            with patch.object(runtime, "_resolve_instrument_token_map", return_value={"TCS": 12345, "INFY": 67890}):
+            with patch.object(
+                runtime, "_resolve_instrument_token_map", return_value={"TCS": 12345, "INFY": 67890}
+            ):
                 result = asyncio.run(runtime._fetch_queue_from_watchlist(db_session, plan))
 
         assert result["queue_size"] == 2
@@ -369,20 +477,21 @@ class TestPaperRuntimeScaffold:
         assert result["rows"][0]["watch_state"] == "WATCH"
         assert result["rows"][0]["instrument_token"] == 12345
 
-    @patch(
-        "nse_momentum_lab.services.paper.runtime.get_paper_session_summary", new_callable=AsyncMock
-    )
+    @patch("nse_momentum_lab.services.paper.runtime.get_paper_session", new_callable=AsyncMock)
     @patch("nse_momentum_lab.services.paper.runtime.list_session_signals", new_callable=AsyncMock)
     @patch("nse_momentum_lab.services.paper.live_watchlist.check_intraday_trigger")
     def test_process_live_ticks_uses_signal_entry_cutoff_minutes(
         self,
         mock_check_trigger: MagicMock,
         mock_list_signals: AsyncMock,
-        mock_summary: AsyncMock,
+        mock_get_session: AsyncMock,
     ) -> None:
         runtime = PaperRuntimeScaffold()
         sessionmaker = _sessionmaker_mock()
-        mock_summary.return_value = {"session": {"session_id": "paper-live", "trade_date": date(2026, 3, 27)}}
+        mock_get_session.return_value = SimpleNamespace(
+            session_id="paper-live",
+            trade_date=date(2026, 3, 27),
+        )
         mock_list_signals.return_value = [
             {
                 "signal_id": 1,
@@ -418,6 +527,68 @@ class TestPaperRuntimeScaffold:
         )
 
         assert mock_check_trigger.call_args.kwargs["entry_cutoff_minutes"] == 180
+
+    @patch("nse_momentum_lab.services.paper.runtime.get_paper_session", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.services.paper.runtime.list_session_signals", new_callable=AsyncMock)
+    @patch("nse_momentum_lab.services.paper.live_watchlist.check_intraday_trigger")
+    def test_process_live_ticks_uses_session_risk_config_after_trigger(
+        self,
+        mock_check_trigger: MagicMock,
+        mock_list_signals: AsyncMock,
+        mock_get_session: AsyncMock,
+    ) -> None:
+        runtime = PaperRuntimeScaffold()
+        sessionmaker = _sessionmaker_mock()
+        mock_get_session.return_value = SimpleNamespace(
+            session_id="paper-live",
+            trade_date=date(2026, 3, 27),
+            risk_config={"max_positions": 5},
+        )
+        mock_list_signals.return_value = [
+            {
+                "signal_id": 1,
+                "symbol_id": 101,
+                "state": "ARCHIVED",
+                "planned_entry_date": None,
+                "asof_date": date(2026, 3, 26),
+                "metadata_json": {
+                    "symbol": "TCS",
+                    "watch_state": "WATCH",
+                    "instrument_token": 12345,
+                    "prev_close": 100.0,
+                    "threshold": 0.001,
+                    "direction": "long",
+                    "entry_cutoff_minutes": 180,
+                },
+            }
+        ]
+        mock_check_trigger.return_value = {
+            "triggered": True,
+            "trigger_price": 100.2,
+            "state": "TRIGGERED",
+            "reason": "high >= 100.10",
+        }
+        trader = MagicMock()
+        trader.process_signals = AsyncMock(return_value=[{"signal_id": 1}])
+
+        with (
+            patch.object(runtime, "_get_trader", return_value=trader) as mock_get_trader,
+            patch.object(runtime, "_sync_trader_state", new=AsyncMock()) as mock_sync_trader_state,
+        ):
+            result = asyncio.run(
+                runtime.process_live_ticks(
+                    sessionmaker,
+                    "paper-live",
+                    [{"instrument_token": 12345, "last_price": 100.2}],
+                    observe_only=False,
+                )
+            )
+
+        mock_get_trader.assert_called_once_with("paper-live", {"max_positions": 5})
+        mock_sync_trader_state.assert_awaited_once()
+        trader.process_signals.assert_awaited_once()
+        assert result["triggered"] == 1
+        assert result["executed"] == 1
 
     @patch(
         "nse_momentum_lab.services.paper.runtime.get_paper_session_summary", new_callable=AsyncMock

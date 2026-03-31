@@ -142,8 +142,11 @@ def main() -> None:
         "--dry-run", action="store_true", help="Parse/aggregate only; do not write to DB"
     )
     p.add_argument(
-        "--limit", "-n", type=int, default=None,
-        help="Limit number of files to process (useful for testing batches)"
+        "--limit",
+        "-n",
+        type=int,
+        default=None,
+        help="Limit number of files to process (useful for testing batches)",
     )
     args = p.parse_args()
 

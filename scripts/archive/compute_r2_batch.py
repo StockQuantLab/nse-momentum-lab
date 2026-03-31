@@ -27,7 +27,7 @@ def compute_r2_vectorized(prices: np.ndarray, window_size: int = 65) -> np.ndarr
 
     for i in range(window_size - 1, n):
         # Get window
-        window = prices[i - window_size + 1:i + 1]
+        window = prices[i - window_size + 1 : i + 1]
 
         # Remove NaN
         valid = ~np.isnan(window)
@@ -121,7 +121,7 @@ def main():
             if len(batch_updates) >= 10000:
                 db.con.executemany(
                     "UPDATE feat_daily SET r2_65 = ? WHERE symbol = ? AND trading_date = ?",
-                    batch_updates
+                    batch_updates,
                 )
                 batch_updates = []
 
@@ -131,8 +131,7 @@ def main():
     # Final batch
     if batch_updates:
         db.con.executemany(
-            "UPDATE feat_daily SET r2_65 = ? WHERE symbol = ? AND trading_date = ?",
-            batch_updates
+            "UPDATE feat_daily SET r2_65 = ? WHERE symbol = ? AND trading_date = ?", batch_updates
         )
 
     # Verify
@@ -149,7 +148,7 @@ def main():
     print(f"\n{'=' * 80}")
     print("RESULTS:")
     print(f"  Total rows: {result[0]:,}")
-    print(f"  Positive R² (> 0): {result[1]:,} ({result[1]/result[0]*100:.1f}%)")
+    print(f"  Positive R² (> 0): {result[1]:,} ({result[1] / result[0] * 100:.1f}%)")
     print(f"  Medium trend (>= 0.5): {result[2]:,}")
     print(f"  High trend (>= 0.7): {result[3]:,}")
     print(f"  Average R²: {result[4]:.4f}")

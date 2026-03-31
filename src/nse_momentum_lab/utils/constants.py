@@ -49,6 +49,13 @@ class IngestionDataset(StrEnum):
     FIVE_MIN = "5min"
 
 
+class IngestionUniverse(StrEnum):
+    """Symbol universe selection for Kite ingestion."""
+
+    LOCAL_FIRST = "local-first"
+    CURRENT_MASTER = "current-master"
+
+
 # Exit time defaults for different exit reasons
 # Maps exit reason categories to their typical exit times
 EXIT_TIME_OPEN = time(9, 15)  # Market open

@@ -112,19 +112,25 @@ def run_trade_backtest(
         df_pl = pl.from_pandas(df)
 
         # Apply filters (4/6 = 3/5 since filter_n is always true)
-        df_pl = df_pl.with_columns([
-            pl.col("filter_h").fill_null(False),
-            pl.col("filter_y").fill_null(True),
-            pl.col("filter_c").fill_null(False),
-            pl.col("filter_l").fill_null(False),
-        ])
+        df_pl = df_pl.with_columns(
+            [
+                pl.col("filter_h").fill_null(False),
+                pl.col("filter_y").fill_null(True),
+                pl.col("filter_c").fill_null(False),
+                pl.col("filter_l").fill_null(False),
+            ]
+        )
 
-        df_pl = df_pl.with_columns([
-            (pl.col("filter_h").cast(int) +
-             pl.col("filter_y").cast(int) +
-             pl.col("filter_c").cast(int) +
-             pl.col("filter_l").cast(int)).alias("filters_passed")
-        ])
+        df_pl = df_pl.with_columns(
+            [
+                (
+                    pl.col("filter_h").cast(int)
+                    + pl.col("filter_y").cast(int)
+                    + pl.col("filter_c").cast(int)
+                    + pl.col("filter_l").cast(int)
+                ).alias("filters_passed")
+            ]
+        )
 
         df_filtered = df_pl.filter(pl.col("filters_passed") >= 3)
 
@@ -158,7 +164,9 @@ def run_trade_backtest(
                         "low_adj": float(row["low"]),
                     }
 
-                vol_df = db.get_features_range([symbol], start_date.isoformat(), end_date.isoformat())
+                vol_df = db.get_features_range(
+                    [symbol], start_date.isoformat(), end_date.isoformat()
+                )
                 if not vol_df.is_empty():
                     avg_vol = vol_df.select(pl.col("dollar_vol_20").drop_nulls().mean()).item()
                     value_traded_inr[symbol_id] = avg_vol if avg_vol else 50_000_000.0
@@ -182,13 +190,15 @@ def run_trade_backtest(
 
             signal_map[(symbol_id, sig_date)] = row
 
-            vbt_signals.append((
-                sig_date,
-                symbol_id,
-                symbol,
-                row["low"],
-                {"gap_pct": row["gap_pct"], "atr": row["atr_20"] if row["atr_20"] else 0.0}
-            ))
+            vbt_signals.append(
+                (
+                    sig_date,
+                    symbol_id,
+                    symbol,
+                    row["low"],
+                    {"gap_pct": row["gap_pct"], "atr": row["atr_20"] if row["atr_20"] else 0.0},
+                )
+            )
 
         if not vbt_signals:
             continue
@@ -226,25 +236,27 @@ def run_trade_backtest(
 
             sig_attrs = signal_map.get((int(t.symbol), t.entry_date), {})
 
-            all_trades.append({
-                "year": year,
-                "entry_date": t.entry_date,
-                "exit_date": t.exit_date,
-                "symbol": t.symbol,
-                "entry_price": t.entry_price,
-                "exit_price": t.exit_price,
-                "pnl_pct": pct_change,
-                "r_multiple": t.pnl_r if t.pnl_r else 0.0,
-                "exit_reason": t.exit_reason.value if t.exit_reason else "unknown",
-                "holding_days": holding_days,
-                "gap_pct": sig_attrs.get("gap_pct", 0),
-                "atr": sig_attrs.get("atr", 0),
-                "close_pos_in_range": sig_attrs.get("close_pos_in_range", 0),
-                "filter_h": sig_attrs.get("filter_h", False),
-                "filter_y": sig_attrs.get("filter_y", True),
-                "filter_c": sig_attrs.get("filter_c", False),
-                "filter_l": sig_attrs.get("filter_l", False),
-            })
+            all_trades.append(
+                {
+                    "year": year,
+                    "entry_date": t.entry_date,
+                    "exit_date": t.exit_date,
+                    "symbol": t.symbol,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "pnl_pct": pct_change,
+                    "r_multiple": t.pnl_r if t.pnl_r else 0.0,
+                    "exit_reason": t.exit_reason.value if t.exit_reason else "unknown",
+                    "holding_days": holding_days,
+                    "gap_pct": sig_attrs.get("gap_pct", 0),
+                    "atr": sig_attrs.get("atr", 0),
+                    "close_pos_in_range": sig_attrs.get("close_pos_in_range", 0),
+                    "filter_h": sig_attrs.get("filter_h", False),
+                    "filter_y": sig_attrs.get("filter_y", True),
+                    "filter_c": sig_attrs.get("filter_c", False),
+                    "filter_l": sig_attrs.get("filter_l", False),
+                }
+            )
 
     return all_trades
 
@@ -254,7 +266,8 @@ def run_trade_analysis():
 
     if sys.platform == "win32":
         import io
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
     print("\n" + "=" * 80)
     print("2LYNCH TRADE ANALYSIS")
@@ -284,8 +297,8 @@ def run_trade_analysis():
     losers = trades_df.filter(pl.col("pnl_pct") < 0)
 
     print(f"\nTotal Trades: {total}")
-    print(f"Winners: {len(winners)} ({len(winners)/total*100:.1f}%)")
-    print(f"Losers: {len(losers)} ({len(losers)/total*100:.1f}%)")
+    print(f"Winners: {len(winners)} ({len(winners) / total * 100:.1f}%)")
+    print(f"Losers: {len(losers)} ({len(losers) / total * 100:.1f}%)")
 
     avg_win = winners["pnl_pct"].mean() if len(winners) > 0 else 0
     avg_loss = losers["pnl_pct"].mean() if len(losers) > 0 else 0
@@ -297,110 +310,156 @@ def run_trade_analysis():
     print("GAP SIZE ANALYSIS")
     print(f"{'=' * 80}")
 
-    trades_df = trades_df.with_columns([
-        (pl.col("gap_pct") * 100).alias("gap_pct_display")
-    ])
+    trades_df = trades_df.with_columns([(pl.col("gap_pct") * 100).alias("gap_pct_display")])
 
-    gap_analysis = trades_df.group_by(
-        pl.col("gap_pct_display").cut([6, 8, 10], labels=["4-6%", "6-8%", "8-10%", "10%+"], left_closed=True)
-    ).agg(
-        pl.len().alias("count"),
-        pl.col("pnl_pct").mean().alias("avg_pnl"),
-        pl.col("r_multiple").mean().alias("avg_r"),
-        (pl.col("pnl_pct") > 0).sum().alias("wins"),
-    ).sort("gap_pct_display")
+    gap_analysis = (
+        trades_df.group_by(
+            pl.col("gap_pct_display").cut(
+                [6, 8, 10], labels=["4-6%", "6-8%", "8-10%", "10%+"], left_closed=True
+            )
+        )
+        .agg(
+            pl.len().alias("count"),
+            pl.col("pnl_pct").mean().alias("avg_pnl"),
+            pl.col("r_multiple").mean().alias("avg_r"),
+            (pl.col("pnl_pct") > 0).sum().alias("wins"),
+        )
+        .sort("gap_pct_display")
+    )
 
     print(f"\n{'Gap Size':<12} {'Count':>6} {'Avg PnL%':>10} {'Avg R':>7} {'Win%':>6}")
     for row in gap_analysis.iter_rows(named=True):
-        win_pct = (row['wins'] / row['count'] * 100) if row['count'] > 0 else 0
-        print(f"{row['gap_pct_display']!s:<12} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%")
+        win_pct = (row["wins"] / row["count"] * 100) if row["count"] > 0 else 0
+        print(
+            f"{row['gap_pct_display']!s:<12} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%"
+        )
 
     # Close position analysis
     print(f"\n{'=' * 80}")
     print("CLOSE POSITION IN RANGE ANALYSIS")
     print(f"{'=' * 80}")
 
-    pos_analysis = trades_df.group_by(
-        pl.col("close_pos_in_range").cut([0.5, 0.7, 0.85], labels=["<50%", "50-70%", "70-85%", "85%+"], left_closed=True)
-    ).agg(
-        pl.len().alias("count"),
-        pl.col("pnl_pct").mean().alias("avg_pnl"),
-        pl.col("r_multiple").mean().alias("avg_r"),
-        (pl.col("pnl_pct") > 0).sum().alias("wins"),
-    ).sort("close_pos_in_range")
+    pos_analysis = (
+        trades_df.group_by(
+            pl.col("close_pos_in_range").cut(
+                [0.5, 0.7, 0.85], labels=["<50%", "50-70%", "70-85%", "85%+"], left_closed=True
+            )
+        )
+        .agg(
+            pl.len().alias("count"),
+            pl.col("pnl_pct").mean().alias("avg_pnl"),
+            pl.col("r_multiple").mean().alias("avg_r"),
+            (pl.col("pnl_pct") > 0).sum().alias("wins"),
+        )
+        .sort("close_pos_in_range")
+    )
 
     print(f"\n{'Close Position':<12} {'Count':>6} {'Avg PnL%':>10} {'Avg R':>7} {'Win%':>6}")
     for row in pos_analysis.iter_rows(named=True):
-        win_pct = (row['wins'] / row['count'] * 100) if row['count'] > 0 else 0
-        print(f"{row['close_pos_in_range']!s:<12} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%")
+        win_pct = (row["wins"] / row["count"] * 100) if row["count"] > 0 else 0
+        print(
+            f"{row['close_pos_in_range']!s:<12} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%"
+        )
 
     # Day of week analysis
     print(f"\n{'=' * 80}")
     print("DAY OF WEEK ANALYSIS")
     print(f"{'=' * 80}")
 
-    trades_df = trades_df.with_columns([
-        pl.col("entry_date").dt.weekday().alias("day_of_week")  # 1=Mon, 7=Sun
-    ])
+    trades_df = trades_df.with_columns(
+        [
+            pl.col("entry_date").dt.weekday().alias("day_of_week")  # 1=Mon, 7=Sun
+        ]
+    )
 
-    dow_analysis = trades_df.group_by("day_of_week").agg(
-        pl.len().alias("count"),
-        pl.col("pnl_pct").mean().alias("avg_pnl"),
-        pl.col("r_multiple").mean().alias("avg_r"),
-        (pl.col("pnl_pct") > 0).sum().alias("wins"),
-    ).sort("day_of_week")
+    dow_analysis = (
+        trades_df.group_by("day_of_week")
+        .agg(
+            pl.len().alias("count"),
+            pl.col("pnl_pct").mean().alias("avg_pnl"),
+            pl.col("r_multiple").mean().alias("avg_r"),
+            (pl.col("pnl_pct") > 0).sum().alias("wins"),
+        )
+        .sort("day_of_week")
+    )
 
     print(f"\n{'Day':<8} {'Count':>6} {'Avg PnL%':>10} {'Avg R':>7} {'Win%':>6}")
     for row in dow_analysis.iter_rows(named=True):
-        win_pct = (row['wins'] / row['count'] * 100) if row['count'] > 0 else 0
+        win_pct = (row["wins"] / row["count"] * 100) if row["count"] > 0 else 0
         dow_names = {1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat", 7: "Sun"}
-        day_name = dow_names.get(row['day_of_week'], str(row['day_of_week']))
-        print(f"{day_name:<8} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%")
+        day_name = dow_names.get(row["day_of_week"], str(row["day_of_week"]))
+        print(
+            f"{day_name:<8} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%"
+        )
 
     # Month analysis
     print(f"\n{'=' * 80}")
     print("MONTH ANALYSIS")
     print(f"{'=' * 80}")
 
-    trades_df = trades_df.with_columns([
-        pl.col("entry_date").dt.month().alias("month")
-    ])
+    trades_df = trades_df.with_columns([pl.col("entry_date").dt.month().alias("month")])
 
-    month_analysis = trades_df.group_by("month").agg(
-        pl.len().alias("count"),
-        pl.col("pnl_pct").mean().alias("avg_pnl"),
-        pl.col("r_multiple").mean().alias("avg_r"),
-        (pl.col("pnl_pct") > 0).sum().alias("wins"),
-    ).sort("month")
+    month_analysis = (
+        trades_df.group_by("month")
+        .agg(
+            pl.len().alias("count"),
+            pl.col("pnl_pct").mean().alias("avg_pnl"),
+            pl.col("r_multiple").mean().alias("avg_r"),
+            (pl.col("pnl_pct") > 0).sum().alias("wins"),
+        )
+        .sort("month")
+    )
 
     print(f"\n{'Month':<8} {'Count':>6} {'Avg PnL%':>10} {'Avg R':>7} {'Win%':>6}")
     for row in month_analysis.iter_rows(named=True):
-        win_pct = (row['wins'] / row['count'] * 100) if row['count'] > 0 else 0
-        month_names = {1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-                       7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec"}
-        month_name = month_names.get(row['month'], str(row['month']))
-        print(f"{month_name:<8} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%")
+        win_pct = (row["wins"] / row["count"] * 100) if row["count"] > 0 else 0
+        month_names = {
+            1: "Jan",
+            2: "Feb",
+            3: "Mar",
+            4: "Apr",
+            5: "May",
+            6: "Jun",
+            7: "Jul",
+            8: "Aug",
+            9: "Sep",
+            10: "Oct",
+            11: "Nov",
+            12: "Dec",
+        }
+        month_name = month_names.get(row["month"], str(row["month"]))
+        print(
+            f"{month_name:<8} {row['count']:>6} {row['avg_pnl']:>9.2f}% {row['avg_r']:>6.2f}R {win_pct:>5.1f}%"
+        )
 
     # Exit reason detailed analysis
     print(f"\n{'=' * 80}")
     print("EXIT REASON DETAILED ANALYSIS")
     print(f"{'=' * 80}")
 
-    exit_analysis = trades_df.group_by("exit_reason").agg(
-        pl.len().alias("count"),
-        pl.col("pnl_pct").mean().alias("avg_pnl"),
-        pl.col("pnl_pct").min().alias("min_pnl"),
-        pl.col("pnl_pct").max().alias("max_pnl"),
-        pl.col("r_multiple").mean().alias("avg_r"),
-        pl.col("holding_days").mean().alias("avg_hold"),
-        (pl.col("pnl_pct") > 0).sum().alias("wins"),
-    ).sort("count", descending=True)
+    exit_analysis = (
+        trades_df.group_by("exit_reason")
+        .agg(
+            pl.len().alias("count"),
+            pl.col("pnl_pct").mean().alias("avg_pnl"),
+            pl.col("pnl_pct").min().alias("min_pnl"),
+            pl.col("pnl_pct").max().alias("max_pnl"),
+            pl.col("r_multiple").mean().alias("avg_r"),
+            pl.col("holding_days").mean().alias("avg_hold"),
+            (pl.col("pnl_pct") > 0).sum().alias("wins"),
+        )
+        .sort("count", descending=True)
+    )
 
-    print(f"\n{'Exit Reason':<30} {'Count':>6} {'Win%':>6} {'Avg PnL%':>9} {'Range%':>12} {'Avg R':>6} {'Hold':>5}")
+    print(
+        f"\n{'Exit Reason':<30} {'Count':>6} {'Win%':>6} {'Avg PnL%':>9} {'Range%':>12} {'Avg R':>6} {'Hold':>5}"
+    )
     for row in exit_analysis.iter_rows(named=True):
-        win_pct = (row['wins'] / row['count'] * 100) if row['count'] > 0 else 0
+        win_pct = (row["wins"] / row["count"] * 100) if row["count"] > 0 else 0
         range_pct = f"{row['min_pnl']:.1f}% to {row['max_pnl']:.1f}%"
-        print(f"{row['exit_reason']:<30} {row['count']:>6} {win_pct:>5.1f}% {row['avg_pnl']:>8.2f}% {range_pct:>12} {row['avg_r']:>5.2f}R {row['avg_hold']:>4.1f}d")
+        print(
+            f"{row['exit_reason']:<30} {row['count']:>6} {win_pct:>5.1f}% {row['avg_pnl']:>8.2f}% {range_pct:>12} {row['avg_r']:>5.2f}R {row['avg_hold']:>4.1f}d"
+        )
 
     # Winner vs Loser profiles
     print(f"\n{'=' * 80}")
@@ -448,8 +507,12 @@ def run_trade_analysis():
             avg_fail = filter_fail["pnl_pct"].mean()
 
             print(f"\n{display_name}:")
-            print(f"  When PASSES: {len(filter_pass):>3} trades, {win_pass:.1f}% win, avg {avg_pass:+.2f}%")
-            print(f"  When FAILS:  {len(filter_fail):>3} trades, {win_fail:.1f}% win, avg {avg_fail:+.2f}%")
+            print(
+                f"  When PASSES: {len(filter_pass):>3} trades, {win_pass:.1f}% win, avg {avg_pass:+.2f}%"
+            )
+            print(
+                f"  When FAILS:  {len(filter_fail):>3} trades, {win_fail:.1f}% win, avg {avg_fail:+.2f}%"
+            )
 
     # Key insights
     print(f"\n{'=' * 80}")

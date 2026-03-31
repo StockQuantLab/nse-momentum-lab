@@ -13,7 +13,7 @@ current operating model and the remaining operator caveats:
 | Area | Current state | Assessment |
 |---|---|---|
 | Strategy/backtest engine | Mature breakout and breakdown research path with 5-minute entry-day execution | Operational |
-| Walk-forward support | `src/nse_momentum_lab/services/backtest/walkforward.py` and optimizer fold loop exist | Operational promotion gate |
+| Walk-forward support | `src/nse_momentum_lab/services/backtest/walkforward.py` and optimizer fold loop exist | Research validation tool |
 | Paper-trading schema | Session-aware paper tables and legacy compatibility tables exist in PostgreSQL | Operational |
 | Paper runtime | `src/nse_momentum_lab/services/paper/runtime.py` manages daily prepare, replay, and live sessions | Operational |
 | API | Paper session and feed-state endpoints exist | Operational |
@@ -23,7 +23,7 @@ current operating model and the remaining operator caveats:
 
 ### Remaining caveats
 
-1. Walk-forward is still the research/promotion gate, not the same thing as a daily live-readiness check.
+1. Walk-forward is a research validation tool, not a prerequisite for daily live-readiness checks.
 2. Replay/live can still be misconfigured if the selected universe or runtime tables are stale.
 3. The canonical operational threshold and session config should be changed deliberately, not ad hoc.
 4. Older sessions can clutter the ledger if they are not archived.
@@ -38,7 +38,7 @@ The implementation here mirrors the useful parts of `cpr-pivot-lab`:
 1. A session-oriented paper runtime with explicit commands for `prepare`, `walk-forward`, `replay`, `live`, `pause`, `resume`, `flatten`, and `stop`.
 2. PostgreSQL ownership of mutable paper state such as sessions, open positions, order events, and feed status.
 3. DuckDB ownership of immutable historical archive and reporting.
-4. A daily workflow that treats walk-forward validation as an operational checkpoint before live paper execution.
+4. A daily workflow that can start from runtime readiness alone; walk-forward remains optional research validation.
 5. A dual-mode ledger view: active live session state first, archived paper results second.
 6. Zerodha Kite v4 should be the single broker API surface for paper/live market data and order routing.
 
@@ -51,7 +51,7 @@ This separation is the operating model now used in NSE Momentum Lab.
 1. Keep trading math deterministic and shared across backtest and paper execution.
 2. Keep mutable operational state in PostgreSQL only.
 3. Keep historical archive and analytics in DuckDB only.
-4. Treat walk-forward as the promotion gate between research and paper execution.
+4. Treat walk-forward as optional research validation rather than a hard gate for daily paper startup.
 5. Preserve every candidate, accepted signal, skipped signal, order event, and exit reason for audit.
 6. Prefer a daily replayable workflow before attempting full live intraday automation.
 
@@ -97,14 +97,14 @@ No custom strategy logic should live in the orchestration layer.
 
 ## Implemented Workflow
 
-### 1. Walk-forward promotion gate
+### 1. Walk-forward research validation
 
-Walk-forward is implemented as the research/promotion gate:
+Walk-forward is implemented as the research validation flow:
 
 - generates folds from actual trading sessions in `v_daily`
 - persists fold outputs and lineage
 - supports cleanup and rerun of stale sessions
-- remains separate from daily paper bootstrapping
+- remains separate from daily paper bootstrapping and is not required for live/replay startup
 
 Current command examples:
 

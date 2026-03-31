@@ -99,13 +99,13 @@ def strategy_page() -> None:
             if "total_return_pct" in experiments_df.columns:
                 returns = experiments_df["total_return_pct"].drop_nulls()
                 with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT} {SPACE_LG}"):
-                    ui.label(f"Best Return: {returns.max():.1f}%").style(
+                    ui.label(f"Best Return: {float(returns.max()):.1f}%").style(
                         f"color: {color_success()};"
                     )
-                    ui.label(f"Median Return: {returns.median():.1f}%").style(
+                    ui.label(f"Median Return: {float(returns.median()):.1f}%").style(
                         f"color: {theme_text_secondary()};"
                     )
-                    ui.label(f"Worst Return: {returns.min():.1f}%").style(
+                    ui.label(f"Worst Return: {float(returns.min()):.1f}%").style(
                         f"color: {color_error()};"
                     )
 
