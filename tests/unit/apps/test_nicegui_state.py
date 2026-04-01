@@ -61,6 +61,7 @@ def test_build_experiment_options_includes_breakout_threshold() -> None:
 
     assert "2LYNCHBreakout 2%" in label
     assert "2025-01-01 to 2026-03-27" in label
+    assert "ID exp-1" in label
     assert options[label] == "exp-1"
 
 

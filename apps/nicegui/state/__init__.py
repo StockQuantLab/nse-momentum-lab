@@ -491,7 +491,7 @@ def _run_window_display(row: dict) -> str:
 def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
     """Build {label: exp_id} dict with human-readable labels, latest first.
 
-    Label format: "2LYNCHBreakout 4% | 2025-04-01 to 2026-03-10 | 991 trades | Ret 136.4% | Mar 12 13:52"
+    Label format: "2LYNCHBreakout 4% | 2025-04-01 to 2026-03-10 | 991 trades | Ret 136.4% | Mar 12 13:52 | ID 2efe9e046f6e91bb"
     """
     options: dict[str, str] = {}
     for row in experiments_df.iter_rows(named=True):
@@ -499,6 +499,7 @@ def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
         window = _run_window_display(row)
         trades = int(row.get("total_trades", 0) or 0)
         ret = float(row.get("total_return_pct", 0) or 0)
+        exp_id = str(row["exp_id"])
 
         # Created-at date for disambiguation
         created = ""
@@ -509,8 +510,8 @@ def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
             except AttributeError, TypeError:
                 created = f" | {str(created_val)[:16]}"
 
-        label = f"{strategy} | {window} | {trades:,} trades | Ret {ret:.1f}%{created}"
-        options[label] = row["exp_id"]
+        label = f"{strategy} | {window} | {trades:,} trades | Ret {ret:.1f}%{created} | ID {exp_id}"
+        options[label] = exp_id
     return options
 
 
