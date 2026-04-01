@@ -6,6 +6,7 @@ Provides persistent connections and reactive state across all pages.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging as _logging
 import sys
 import threading as _threading
@@ -513,6 +514,34 @@ def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
         label = f"{strategy} | {window} | {trades:,} trades | Ret {ret:.1f}%{created} | ID {exp_id}"
         options[label] = exp_id
     return options
+
+
+def get_experiment_param_items(experiment: dict) -> list[tuple[str, str]]:
+    """Return sorted parameter key/value pairs for a stored experiment."""
+    raw_params = str(experiment.get("params_json") or "").strip()
+    if not raw_params:
+        return []
+
+    try:
+        params = json.loads(raw_params)
+    except json.JSONDecodeError:
+        return [("params_json", raw_params)]
+
+    if not isinstance(params, dict):
+        return [("params_json", raw_params)]
+
+    def _format_value(value: object) -> str:
+        if value is None:
+            return "None"
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return str(value)
+        if isinstance(value, (list, dict)):
+            return json.dumps(value, sort_keys=True)
+        return str(value)
+
+    return [(key, _format_value(params[key])) for key in sorted(params.keys())]
 
 
 def format_time(value) -> str:

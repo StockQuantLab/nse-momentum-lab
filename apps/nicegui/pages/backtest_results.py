@@ -26,6 +26,7 @@ from nicegui import ui
 from apps.nicegui.state import (
     get_experiments,
     get_experiment,
+    get_experiment_param_items,
     get_experiment_trades,
     get_experiment_execution_diagnostics,
     get_experiment_yearly_metrics,
@@ -172,6 +173,26 @@ async def backtest_page() -> None:
                 ],
                 columns=5,
             )
+
+            with ui.expansion("Run Parameters", icon="tune", value=False).classes("w-full"):
+                ui.label("Stored run parameters for this experiment.").classes("text-sm").style(
+                    f"color: {color_gray()};"
+                )
+                param_items = get_experiment_param_items(exp)
+                if not param_items:
+                    ui.label("No stored parameters found.").classes("text-sm").style(
+                        f"color: {color_gray()};"
+                    )
+                else:
+                    with ui.column().classes("w-full gap-1 mt-2"):
+                        for key, value in param_items:
+                            with ui.row().classes("w-full items-start justify-between gap-4"):
+                                ui.label(key).classes("text-xs font-mono").style(
+                                    f"color: {color_info()}; min-width: 220px;"
+                                )
+                                ui.label(value).classes("text-xs font-mono text-right break-all").style(
+                                    f"color: {theme_text_secondary()};"
+                                )
 
             divider()
 

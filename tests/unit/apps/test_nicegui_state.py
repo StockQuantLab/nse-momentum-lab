@@ -65,6 +65,20 @@ def test_build_experiment_options_includes_breakout_threshold() -> None:
     assert options[label] == "exp-1"
 
 
+def test_get_experiment_param_items_returns_sorted_params() -> None:
+    exp = {
+        "params_json": '{"breakout_threshold": 0.04, "universe_size": 100000, "breakout_use_current_day_c_quality": false}',
+    }
+
+    items = state.get_experiment_param_items(exp)
+
+    assert items == [
+        ("breakout_threshold", "0.04"),
+        ("breakout_use_current_day_c_quality", "false"),
+        ("universe_size", "100000"),
+    ]
+
+
 def test_market_monitor_latest_uses_cache(monkeypatch) -> None:
     calls: list[str] = []
     sample = pl.DataFrame([{"trading_date": datetime(2026, 3, 30, tzinfo=UTC), "posture": "aggressive"}])

@@ -17,7 +17,12 @@ if str(_apps_root) not in sys.path:
 import plotly.graph_objects as go
 from nicegui import ui
 
-from apps.nicegui.state import get_experiments, get_experiment, build_experiment_options
+from apps.nicegui.state import (
+    get_experiments,
+    get_experiment,
+    get_experiment_param_items,
+    build_experiment_options,
+)
 from apps.nicegui.components import (
     page_layout,
     divider,
@@ -100,6 +105,53 @@ async def compare_page() -> None:
         selected = {"exp1": initial_exp1, "exp2": initial_exp2}
         has_selected = {"value": bool(initial_exp1 or initial_exp2)}
 
+        def _render_params_panel(slot_title: str, slot_label: str | None, exp_id: str | None) -> None:
+            with ui.expansion(slot_title, icon="tune", value=False).classes("w-full mt-2"):
+                if not exp_id:
+                    ui.label("Select an experiment to view stored parameters.").classes(
+                        "text-sm"
+                    ).style(f"color: {theme_text_muted()};")
+                    return
+
+                exp = get_experiment(exp_id)
+                if not exp:
+                    ui.label("Could not load experiment details.").classes("text-sm").style(
+                        f"color: {theme_text_muted()};"
+                    )
+                    return
+
+                ui.label(f"{slot_label or slot_title} | ID {exp_id}").classes(
+                    "text-sm font-medium"
+                ).style(f"color: {theme_text_secondary()};")
+                ui.label(
+                    f"{exp.get('strategy_name', '-')} | {exp.get('start_date', '-')} to {exp.get('end_date', '-')}"
+                ).classes("text-xs").style(f"color: {theme_text_muted()};")
+
+                params = get_experiment_param_items(exp)
+                if not params:
+                    ui.label("No stored parameters found.").classes("text-sm").style(
+                        f"color: {theme_text_muted()};"
+                    )
+                    return
+
+                with ui.column().classes("w-full gap-1 mt-2"):
+                    for key, value in params:
+                        with ui.row().classes("w-full items-start justify-between gap-4"):
+                            ui.label(key).classes("text-xs font-mono").style(
+                                f"color: {color_info()}; min-width: 220px;"
+                            )
+                            ui.label(value).classes("text-xs font-mono text-right break-all").style(
+                                f"color: {theme_text_secondary()};"
+                            )
+
+        @ui.refreshable
+        def render_exp1_params(exp_id: str) -> None:
+            _render_params_panel("Experiment A Parameters", selected.get("exp1"), exp_id)
+
+        @ui.refreshable
+        def render_exp2_params(exp_id: str) -> None:
+            _render_params_panel("Experiment B Parameters", selected.get("exp2"), exp_id)
+
         page_header(
             "Compare Experiments",
             "Select two experiments to compare side-by-side",
@@ -117,6 +169,7 @@ async def compare_page() -> None:
                     has_selected["value"] = True
                     exp_id = exp_options.get(e.value, "")
                     ui.run_javascript(f"sessionStorage.setItem('nseml_compare_exp1', '{exp_id}');")
+                    render_exp1_params.refresh(exp_id)
                     render_comparison.refresh()
 
                 ui.select(
@@ -126,6 +179,7 @@ async def compare_page() -> None:
                 ).classes("w-full").props(
                     f'aria-labelledby="{exp1_label_id}" aria-label="Select first experiment to compare"'
                 )
+                render_exp1_params(exp_options.get(initial_exp1, ""))
 
             with ui.column().classes("flex-1"):
                 exp2_label_id = "exp2-label"
@@ -138,6 +192,7 @@ async def compare_page() -> None:
                     has_selected["value"] = True
                     exp_id = exp_options.get(e.value, "")
                     ui.run_javascript(f"sessionStorage.setItem('nseml_compare_exp2', '{exp_id}');")
+                    render_exp2_params.refresh(exp_id)
                     render_comparison.refresh()
 
                 ui.select(
@@ -147,6 +202,7 @@ async def compare_page() -> None:
                 ).classes("w-full").props(
                     f'aria-labelledby="{exp2_label_id}" aria-label="Select second experiment to compare"'
                 )
+                render_exp2_params(exp_options.get(initial_exp2, ""))
 
         # Accessibility: Live region for dynamic comparison updates
         with ui.row().props('aria-live="polite" aria-atomic="true"').classes("sr-only"):

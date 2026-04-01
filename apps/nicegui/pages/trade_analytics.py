@@ -20,9 +20,11 @@ from nicegui import ui
 
 from apps.nicegui.state import (
     get_experiments,
+    get_experiment,
     get_experiment_trades,
     prepare_trades_df,
     build_experiment_options,
+    get_experiment_param_items,
 )
 from apps.nicegui.components import (
     page_layout,
@@ -69,6 +71,7 @@ async def trade_analytics_page() -> None:
         exp_options = build_experiment_options(experiments_df)
         labels = list(exp_options.keys())
         first_label = labels[0]
+        first_exp_id = exp_options[first_label]
 
         # ── refreshable content ───────────────────────────────────
         @ui.refreshable
@@ -127,6 +130,35 @@ async def trade_analytics_page() -> None:
                 )
 
             kpi_grid(cards, columns=len(cards))
+
+            exp = get_experiment(exp_id)
+            if exp:
+                with ui.expansion("Run Parameters", icon="tune", value=False).classes(
+                    f"w-full {SPACE_SECTION}"
+                ):
+                    ui.label(
+                        f"{exp.get('strategy_name', '-')}"
+                        f" | ID {exp_id}"
+                        f" | {exp.get('start_date', '-')}"
+                        f" to {exp.get('end_date', '-')}"
+                    ).classes("text-sm font-medium").style(
+                        f"color: {theme_text_secondary()};"
+                    )
+                    params = get_experiment_param_items(exp)
+                    if not params:
+                        ui.label("No stored parameters found.").classes("text-sm").style(
+                            f"color: {theme_text_secondary()};"
+                        )
+                    else:
+                        with ui.column().classes("w-full gap-1 mt-2"):
+                            for key, value in params:
+                                with ui.row().classes("w-full items-start justify-between gap-4"):
+                                    ui.label(key).classes("text-xs font-mono").style(
+                                        f"color: {color_info()}; min-width: 220px;"
+                                    )
+                                    ui.label(value).classes(
+                                        "text-xs font-mono text-right break-all"
+                                    ).style(f"color: {theme_text_secondary()};")
 
             # Tabs
             tabs = ui.tabs().classes("w-full")
@@ -323,10 +355,10 @@ async def trade_analytics_page() -> None:
                 if selected_id:
                     render_analytics.refresh(selected_id)
 
-            ui.select(
-                labels,
-                value=first_label,
-                on_change=on_select,
-            ).classes("flex-grow")
+        ui.select(
+            labels,
+            value=first_label,
+            on_change=on_select,
+        ).classes("flex-grow")
 
-        render_analytics(exp_options[first_label])
+        render_analytics(first_exp_id)
