@@ -126,4 +126,30 @@ Use the same information at the same decision point in backtest, paper simulatio
 
 ---
 
+## Frozen Comparison Baselines
+
+Use this one fixed setup for future apples-to-apples comparisons. Only `breakout_threshold` changes between `0.02` and `0.04`.
+
+| Param | Value |
+|---|---|
+| `universe_size` | `100000` |
+| `min_price` | `10` |
+| `min_filters` | `5` |
+| `start_date` | `2025-01-01` |
+| `end_date` | `2026-03-30` |
+| `entry_timeframe` | `5min` |
+| `breakout_use_current_day_c_quality` | `false` |
+| `abnormal_gap_mode` | `trail_after_gap` |
+| `trail_activation_pct` | `0.08` |
+| `trail_stop_pct` | `0.02` |
+| `breakout_daily_candidate_budget` | `0` for breakout, `30` for breakdown |
+| `breakdown_daily_candidate_budget` | `5` |
+| `breakdown_rs_min` | `0.0` |
+| `breakdown_strict_filter_l` | `false` |
+| `breakdown_filter_n_narrow_only` | `false` |
+| `breakdown_skip_gap_down` | `false` |
+| `breakdown_ti65_mode` | `off` |
+| `breakdown_breadth_threshold` | `None` |
+| `breakdown_require_atr_expansion` | `false` |
+
 *Production baseline (exp 429c79ac45b65086): 2015–2025, ~1,776 stocks, 60-min FEE, 5/6 filters required*

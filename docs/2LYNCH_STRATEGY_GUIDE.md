@@ -234,6 +234,61 @@ Entry mechanics (from 5-min bars):
 
 ---
 
+## Frozen Comparison Baselines
+
+Use one fixed parameter set and only vary `breakout_threshold` between `0.02` and `0.04`.
+These are the causal, live-tradable comparison settings to keep stable across reruns.
+
+### Shared Settings
+
+| Param | Value |
+|---|---|
+| `universe_size` | `100000` |
+| `min_price` | `10` |
+| `min_filters` | `5` |
+| `start_year` | `2025` |
+| `end_year` | `2026` |
+| `start_date` | `2025-01-01` |
+| `end_date` | `2026-03-30` |
+| `entry_timeframe` | `5min` |
+| `breakout_use_current_day_c_quality` | `false` |
+| `abnormal_gap_mode` | `trail_after_gap` |
+| `abnormal_profit_pct` | `0.1` |
+| `time_stop_days` | `5` |
+| `trail_activation_pct` | `0.08` |
+| `trail_stop_pct` | `0.02` |
+
+### Breakout Runs
+
+| Param | Value |
+|---|---|
+| `strategy` | `2LYNCHBreakout` |
+| `breakout_threshold` | `0.02` or `0.04` |
+| `breakout_daily_candidate_budget` | `0` |
+| `breakout_legacy_h_carry_rule` | `false` |
+
+### Breakdown Runs
+
+| Param | Value |
+|---|---|
+| `strategy` | `2LYNCHBreakdown` |
+| `breakout_threshold` | `0.02` or `0.04` |
+| `breakout_daily_candidate_budget` | `30` |
+| `breakdown_daily_candidate_budget` | `5` |
+| `breakdown_rs_min` | `0.0` |
+| `breakdown_strict_filter_l` | `false` |
+| `breakdown_filter_n_narrow_only` | `false` |
+| `breakdown_skip_gap_down` | `false` |
+| `breakdown_breadth_threshold` | `None` |
+| `breakdown_require_atr_expansion` | `false` |
+| `breakdown_ti65_mode` | `off` |
+| `short_trail_activation_pct` | `0.04` |
+| `short_time_stop_days` | `3` |
+| `short_max_stop_dist_pct` | `0.05` |
+| `short_abnormal_profit_pct` | `0.05` |
+
+---
+
 ## Stop / Exit Logic
 
 Layered exit system (Stockbee-derived):
