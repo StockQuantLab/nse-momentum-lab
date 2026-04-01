@@ -55,7 +55,19 @@ Each filter is mirrored for the SHORT direction:
 
 ## Note on TI65
 
-The original Stockbee filter uses `TI65 = MA7 / MA65 >= 1.05` (7-day MA 5% above 65-day MA). This implementation uses the equivalent 2-of-3 check (filter_L). TI65 is available as a pre-computed column (`ma_7 / ma_65_sma`) for universe screening but is NOT used as a same-day entry filter — breakouts often fire when the trend is just starting, before TI65 is established.
+The original Stockbee filter uses `TI65 = MA7 / MA65 >= 1.05` (7-day MA 5% above 65-day MA). This implementation uses the equivalent 2-of-3 check (filter_L) for breakout trend quality instead of a hard TI65 admission gate. TI65 is available as a pre-computed column (`ma_7 / ma_65_sma`) for research and screening, but it is **not** used as a backtest admission gate for either breakout or breakdown.
+
+---
+
+## Decision-Time Rule
+
+Use the same information at the same decision point in backtest, paper simulation, and paper/live.
+
+- Pre-open admission should use prior-day features only.
+- Intraday trigger logic may use live bars as they arrive.
+- End-of-day hold management may use same-day close-based signals.
+- Same-day or hindsight-only values must not leak into pre-open entry filters.
+- For 2LYNCH, `filter_h_prev` is the pre-open admission H signal and `filter_h` is the same-day hold-management H signal.
 
 ---
 

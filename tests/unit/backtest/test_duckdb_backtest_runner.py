@@ -327,9 +327,11 @@ def test_threshold_breakout_candidate_query_uses_prior_day_watchlist_features() 
 
         row = result.filter(pl.col("trading_date") == date(2026, 3, 25))
         assert row.height == 1
+        assert bool(row["filter_h_prev"][0]) is False
+        assert bool(row["filter_h"][0]) is True
         filter_cols = ["filter_h", "filter_n", "filter_y", "filter_c", "filter_l", "filter_2"]
         filters_passed = sum(int(row[col][0]) for col in filter_cols)
-        assert filters_passed == 3
+        assert filters_passed == 4
         assert row["watch_date"][0] == date(2026, 3, 24)
     finally:
         db.con.close()

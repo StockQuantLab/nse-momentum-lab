@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import tempfile
 import shlex
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
+
+PYTEST_BASETEMP = Path(
+    tempfile.mkdtemp(prefix="pytest-tmp-", dir=str(Path.home() / ".codex" / "memories"))
+)
 
 
 @dataclass(frozen=True)
@@ -67,13 +73,23 @@ def build_steps(
 
     if with_full:
         # Full suite already includes unit + integration tests.
-        steps.append(GateStep("Full Test Suite", ["uv", "run", "pytest", "-q"]))
+        steps.append(
+            GateStep("Full Test Suite", ["uv", "run", "pytest", f"--basetemp={PYTEST_BASETEMP}", "-q"])
+        )
         return steps
 
-    steps.append(GateStep("Unit Tests", ["uv", "run", "pytest", "tests/unit", "-v"]))
+    steps.append(
+        GateStep(
+            "Unit Tests",
+            ["uv", "run", "pytest", f"--basetemp={PYTEST_BASETEMP}", "tests/unit", "-v"],
+        )
+    )
     if with_integration:
         steps.append(
-            GateStep("Integration Tests", ["uv", "run", "pytest", "tests/integration", "-v"])
+            GateStep(
+                "Integration Tests",
+                ["uv", "run", "pytest", f"--basetemp={PYTEST_BASETEMP}", "tests/integration", "-v"],
+            )
         )
     return steps
 

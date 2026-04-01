@@ -106,9 +106,11 @@ def _build_threshold_breakout_candidate_query(
                 f.prior_breakouts_30d,
                 f.r2_65,
                 f.ma_7,
-                f.ma_65_sma
+                f.ma_65_sma,
+                f_trade.close_pos_in_range AS signal_close_pos_in_range
             FROM breakout_days g
             LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.watch_date = f.date
+            LEFT JOIN feat_daily f_trade ON g.symbol = f_trade.symbol AND g.trading_date = f_trade.date
         )
         SELECT
             symbol,
@@ -125,7 +127,8 @@ def _build_threshold_breakout_candidate_query(
             gap_pct,
             watch_value_traded_inr AS value_traded_inr,
             close_pos_in_range,
-            (close_pos_in_range >= 0.70) AS filter_h,
+            (close_pos_in_range >= 0.70) AS filter_h_prev,
+            (signal_close_pos_in_range >= 0.70) AS filter_h,
             ((prev_high - prev_low) < (atr_20 * 0.5) OR prev_close < prev_open) AS filter_n,
             (COALESCE(prior_breakouts_30d, 0) <= 2) AS filter_y,
             (vol_dryup_ratio < 1.3) AS filter_c,
@@ -186,29 +189,17 @@ def _build_threshold_breakdown_candidate_query(
     skip_gap_down = getattr(params, "breakdown_skip_gap_down", False)
     max_prior_breakdowns = getattr(params, "breakdown_max_prior_breakdowns", -1)
     breadth_threshold = getattr(params, "breakdown_breadth_threshold", None)
-    ti65_mode = str(getattr(params, "breakdown_ti65_mode", "off")).strip().lower()
-    if ti65_mode not in {"off", "bearish"}:
-        raise ValueError(f"breakdown_ti65_mode must be one of: off, bearish (got {ti65_mode!r})")
-
-    ti65_gate_sql = ""
-    if ti65_mode == "bearish":
-        ti65_gate_sql = (
-            " AND (CASE "
-            "WHEN ma_7 IS NOT NULL AND ma_65_sma IS NOT NULL AND ma_65_sma > 0 "
-            "THEN (ma_7 / ma_65_sma) <= 0.95 "
-            "ELSE close < ma_20 END)"
-        )
 
     if strict_filter_l:
         filter_l_sql = (
             "(CAST(close < ma_20 AS INTEGER) + CAST(ret_5d < 0 AS INTEGER)"
             " + CAST(COALESCE(NULLIF(r2_65, 0), 0) >= 0.70 AS INTEGER)"
-            f" + CAST(close < ma_65_sma AS INTEGER) >= 3){ti65_gate_sql} AS filter_l"
+            " + CAST(close < ma_65_sma AS INTEGER) >= 3) AS filter_l"
         )
     else:
         filter_l_sql = (
             "(CAST(close < ma_20 AS INTEGER) + CAST(ret_5d < 0 AS INTEGER)"
-            f" + CAST(COALESCE(NULLIF(r2_65, 0), 0) >= 0.70 AS INTEGER) >= 2){ti65_gate_sql} AS filter_l"
+            " + CAST(COALESCE(NULLIF(r2_65, 0), 0) >= 0.70 AS INTEGER) >= 2) AS filter_l"
         )
 
     filter_n_sql = (
@@ -347,10 +338,12 @@ def _build_threshold_breakdown_candidate_query(
                 f.prior_breakdowns_90d{atr_expansion_select},
                 f.ma_7,
                 f.ma_65_sma,
-                f.rs_252
+                f.rs_252,
+                f_trade.close_pos_in_range AS signal_close_pos_in_range
                 {breadth_select}
             FROM breakdown_days g
             LEFT JOIN feat_daily f ON g.symbol = f.symbol AND g.watch_date = f.date
+            LEFT JOIN feat_daily f_trade ON g.symbol = f_trade.symbol AND g.trading_date = f_trade.date
         )
         SELECT
             symbol,
@@ -375,7 +368,8 @@ def _build_threshold_breakdown_candidate_query(
             prior_breakdowns_90d,
             r2_65,
             rs_252,
-            (close_pos_in_range <= 0.30) AS filter_h,
+            (close_pos_in_range <= 0.30) AS filter_h_prev,
+            (signal_close_pos_in_range <= 0.30) AS filter_h,
             {filter_n_sql.replace("atr_20", "atr_20")},
             (COALESCE(prior_breakouts_30d, 0) <= 2 AND COALESCE(rs_252, 1.0) < ?{breakdown_counter_clause}) AS filter_y,
             (vol_dryup_ratio < 1.3) AS filter_c,

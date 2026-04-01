@@ -89,7 +89,7 @@ def test_build_features_status_bypasses_force_guard(monkeypatch) -> None:
         lambda db: calls.append(db),
     )
 
-    assert build_features.main() is None
+    assert build_features.main() == 0
     assert len(calls) == 1
 
 

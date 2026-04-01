@@ -103,21 +103,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--breakout-c-quality-source",
         type=str,
-        default="current",
+        default="prev",
         choices=["current", "prev"],
-        help="Breakout ranking C-quality source: current breakout-day feat values or prior-day feat values",
+        help=(
+            "Breakout ranking C-quality source: current breakout-day feat values "
+            "(hindsight) or prior-day feat values (causal default)"
+        ),
     )
     parser.add_argument(
         "--breakout-legacy-h-carry-rule",
         action="store_true",
         help="Enable legacy thresholdbreakout H hold-quality carry behavior for parity testing.",
-    )
-    parser.add_argument(
-        "--breakdown-ti65-mode",
-        type=str,
-        default="off",
-        choices=["off", "bearish"],
-        help="Optional short-side TI65 gate for thresholdbreakdown: off (default) or bearish (ma_7/ma_65_sma <= 0.95)",
     )
     parser.add_argument(
         "--breakdown-require-atr-expansion",
@@ -226,7 +222,6 @@ def main() -> None:
         abnormal_gap_exit_pct=args.abnormal_gap_exit_pct,
         breakout_use_current_day_c_quality=(args.breakout_c_quality_source == "current"),
         breakout_legacy_h_carry_rule=args.breakout_legacy_h_carry_rule,
-        breakdown_ti65_mode=args.breakdown_ti65_mode,
         breakdown_require_atr_expansion=args.breakdown_require_atr_expansion,
         short_initial_stop_atr_cap_mult=args.short_initial_stop_atr_cap_mult,
         short_same_day_r_ladder_start_r=args.short_same_day_r_ladder_start_r,

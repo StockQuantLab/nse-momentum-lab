@@ -73,13 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
         "E.g. -0.10 requires >= 10%% YTD underperformance.",
     )
     parser.add_argument(
-        "--breakdown-ti65-mode",
-        type=str,
-        default="off",
-        choices=["off", "bearish"],
-        help="Optional TI65 gate for 2%% BD trend filter_l: off (default) or bearish (ma_7/ma_65_sma <= 0.95).",
-    )
-    parser.add_argument(
         "--short-initial-stop-atr-cap-mult",
         type=float,
         default=None,
@@ -198,7 +191,6 @@ def main() -> None:
         "breakdown_filter_n_narrow_only": True,
         "breakdown_skip_gap_down": True,
         "breakdown_max_prior_breakdowns": -1,
-        "breakdown_ti65_mode": args.breakdown_ti65_mode,
         "breakdown_breadth_threshold": args.breakdown_breadth_threshold,
         "breakdown_require_atr_expansion": args.breakdown_require_atr_expansion,
     }

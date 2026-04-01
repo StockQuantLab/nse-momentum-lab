@@ -103,6 +103,7 @@ def _build_2lynch_candidate_query(
                 f.vol_dryup_ratio, f.atr_compress_ratio, f.range_percentile,
                 f.prior_breakouts_30d, f.prior_breakouts_90d, f.r2_65,
                 f.ma_7, f.ma_65_sma,
+                f_prev.close_pos_in_range AS prev_close_pos_in_range,
                 f_prev.vol_dryup_ratio AS prev_vol_dryup_ratio,
                 f_prev.atr_compress_ratio AS prev_atr_compress_ratio,
                 f_prev.range_percentile AS prev_range_percentile
@@ -117,9 +118,10 @@ def _build_2lynch_candidate_query(
             (close > ma_20) AS above_ma20,
             (ret_5d > 0) AS positive_momentum,
             atr_20, vol_dryup_ratio, atr_compress_ratio, range_percentile, r2_65,
+            (prev_close_pos_in_range >= 0.70) AS filter_h_prev,
+            (close_pos_in_range >= 0.70) AS filter_h,
             prev_vol_dryup_ratio, prev_atr_compress_ratio, prev_range_percentile,
             prior_breakouts_30d, prior_breakouts_90d,
-            (close_pos_in_range >= 0.70) AS filter_h,
             ((prev_high - prev_low) < (atr_20 * 0.5) OR prev_close < prev_open) AS filter_n,
             (COALESCE(prior_breakouts_30d, 0) <= 2) AS filter_y,
             (vol_dryup_ratio < 1.3) AS filter_c,
@@ -147,16 +149,26 @@ def _build_2lynch_candidate_query(
 _STRATEGY_REGISTRY: dict[str, StrategyDefinition] = {
     "2lynchbreakout": StrategyDefinition(
         name="2LYNCHBreakout",
-        version="1.1.0",
+        version="1.2.0",
         description=(
             "2LYNCH breakout with configurable threshold (long). "
             "Identical filter stack to the legacy 4% breakout baseline (H, N, 2, Y, C, L — 5/6 required); "
+            "pre-open admission uses T-1 H_prev, while same-day H is reserved for hold management; "
             "threshold is the only variable."
         ),
         family="threshold_breakout",
         direction=PositionSide.LONG,
         strategy_label=lambda year: f"2LYNCHBreakout_{year}",
         build_candidate_query=_build_threshold_breakout_candidate_query,
+        entry_filter_columns=[
+            "filter_h_prev",
+            "filter_n",
+            "filter_2",
+            "filter_y",
+            "filter_c",
+            "filter_l",
+        ],
+        hold_quality_filter_columns=["filter_h"],
         default_params={
             "breakout_threshold": 0.04,
             "breakout_reference": "prior_close",
@@ -168,12 +180,21 @@ _STRATEGY_REGISTRY: dict[str, StrategyDefinition] = {
     # Backward-compat alias
     "thresholdbreakout": StrategyDefinition(
         name="2LYNCHBreakout",
-        version="1.1.0",
+        version="1.2.0",
         description="Alias for 2LYNCHBreakout.",
         family="threshold_breakout",
         direction=PositionSide.LONG,
         strategy_label=lambda year: f"2LYNCHBreakout_{year}",
         build_candidate_query=_build_threshold_breakout_candidate_query,
+        entry_filter_columns=[
+            "filter_h_prev",
+            "filter_n",
+            "filter_2",
+            "filter_y",
+            "filter_c",
+            "filter_l",
+        ],
+        hold_quality_filter_columns=["filter_h"],
         default_params={
             "breakout_threshold": 0.04,
             "breakout_reference": "prior_close",
@@ -184,18 +205,28 @@ _STRATEGY_REGISTRY: dict[str, StrategyDefinition] = {
     ),
     "2lynchbreakdown": StrategyDefinition(
         name="2LYNCHBreakdown",
-        version="1.2.0",
+        version="1.4.0",
         description=(
             "2LYNCH breakdown with configurable threshold (short). "
             "SHORT mirror of the 2LYNCH filter stack: close near low, T-1 narrow/bullish, "
             "downtrend quality, not-down-2-days (avoids shorting cascading stocks). "
-            "v1.2.0: filter_y now requires rs_252 < 0 (genuine annual underperformer) "
-            "in addition to <=2 prior 30d breakouts, acting as a per-stock regime gate."
+            "pre-open admission uses T-1 H_prev, while same-day H is reserved for hold management; "
+            "filter_y also requires rs_252 < 0 (genuine annual underperformer) in addition to "
+            "<=2 prior 30d breakouts, acting as a per-stock regime gate."
         ),
         family="threshold_breakdown",
         direction=PositionSide.SHORT,
         strategy_label=lambda year: f"2LYNCHBreakdown_{year}",
         build_candidate_query=_build_threshold_breakdown_candidate_query,
+        entry_filter_columns=[
+            "filter_h_prev",
+            "filter_n",
+            "filter_2",
+            "filter_y",
+            "filter_c",
+            "filter_l",
+        ],
+        hold_quality_filter_columns=["filter_h"],
         default_params={
             "breakout_threshold": 0.04,
             "breakout_reference": "prior_close",
@@ -207,12 +238,21 @@ _STRATEGY_REGISTRY: dict[str, StrategyDefinition] = {
     # Backward-compat alias
     "thresholdbreakdown": StrategyDefinition(
         name="2LYNCHBreakdown",
-        version="1.2.0",
+        version="1.4.0",
         description="Alias for 2LYNCHBreakdown.",
         family="threshold_breakdown",
         direction=PositionSide.SHORT,
         strategy_label=lambda year: f"2LYNCHBreakdown_{year}",
         build_candidate_query=_build_threshold_breakdown_candidate_query,
+        entry_filter_columns=[
+            "filter_h_prev",
+            "filter_n",
+            "filter_2",
+            "filter_y",
+            "filter_c",
+            "filter_l",
+        ],
+        hold_quality_filter_columns=["filter_h"],
         default_params={
             "breakout_threshold": 0.04,
             "breakout_reference": "prior_close",

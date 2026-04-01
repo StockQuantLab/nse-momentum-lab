@@ -175,9 +175,9 @@ class BacktestParams:
     max_stop_dist_pct: float = 0.08
     breakout_daily_candidate_budget: int = 30
     # Breakout ranking C-quality source:
-    # True  -> use breakout-day feat values (current behavior)
-    # False -> prefer T-1 feat values when available (fallbacks to current-day values)
-    breakout_use_current_day_c_quality: bool = True
+    # True  -> use breakout-day feat values (hindsight / analysis only)
+    # False -> prefer T-1 feat values when available (causal default)
+    breakout_use_current_day_c_quality: bool = False
     # Parity toggle for threshold_breakout long-side carry semantics.
     # When enabled, apply filter_h as a hold-quality check after entry admission
     # (restores weak-close/breakeven-carry behavior used in earlier canonical runs).
@@ -207,10 +207,6 @@ class BacktestParams:
     # When set (0.0 to 1.0), require pct(close < ma_20) across the market to be above threshold.
     # Keep unset (None) to preserve existing behavior.
     breakdown_breadth_threshold: float | None = None
-    # Optional TI65 gate for short-side trend quality.
-    # "off"     = keep current behavior (no direct TI65 check)
-    # "bearish" = require MA7/MA65_SMA <= 0.95 (with close<MA20 fallback if MA65 unavailable)
-    breakdown_ti65_mode: str = "off"
     # Phase 3e: require ATR expansion for breakdowns.
     # If true, require atr_20 > SMA20(atr_20) on the breakdown day.
     # This filters stale breakdowns where the move has already cooled down.

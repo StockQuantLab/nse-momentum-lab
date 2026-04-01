@@ -18,35 +18,24 @@ STEP_PRESETS: dict[str, dict[str, object]] = {
     "baseline": {
         "description": "phase-1 canonical (budget=5, rs_min=-0.10)",
         "breakdown_daily_candidate_budget": 5,
-        "breakdown_ti65_mode": "off",
-        "breakdown_breadth_threshold": None,
-        "breakdown_require_atr_expansion": False,
-    },
-    "ti65": {
-        "description": "TI65 bearish gate",
-        "breakdown_daily_candidate_budget": 5,
-        "breakdown_ti65_mode": "bearish",
         "breakdown_breadth_threshold": None,
         "breakdown_require_atr_expansion": False,
     },
     "breadth": {
         "description": "market breadth gate",
         "breakdown_daily_candidate_budget": 5,
-        "breakdown_ti65_mode": "off",
         "breakdown_breadth_threshold": None,
         "breakdown_require_atr_expansion": False,
     },
     "atr-expansion": {
         "description": "volatility expansion hard gate",
         "breakdown_daily_candidate_budget": 5,
-        "breakdown_ti65_mode": "off",
         "breakdown_breadth_threshold": None,
         "breakdown_require_atr_expansion": True,
     },
     "atr-cap": {
         "description": "ATR-capped short initial stop (1.5x ATR_20)",
         "breakdown_daily_candidate_budget": 5,
-        "breakdown_ti65_mode": "off",
         "breakdown_breadth_threshold": None,
         "breakdown_require_atr_expansion": False,
         "short_initial_stop_atr_cap_mult": 1.5,
@@ -54,7 +43,6 @@ STEP_PRESETS: dict[str, dict[str, object]] = {
     "day0-profit": {
         "description": "same-day short profit taking at +2%",
         "breakdown_daily_candidate_budget": 5,
-        "breakdown_ti65_mode": "off",
         "breakdown_breadth_threshold": None,
         "breakdown_require_atr_expansion": False,
         "short_same_day_take_profit_pct": 0.02,
@@ -62,14 +50,12 @@ STEP_PRESETS: dict[str, dict[str, object]] = {
     "budget8": {
         "description": "budget stress test at 8 candidates/day",
         "breakdown_daily_candidate_budget": 8,
-        "breakdown_ti65_mode": "off",
         "breakdown_breadth_threshold": None,
         "breakdown_require_atr_expansion": True,
     },
     "budget10": {
         "description": "budget stress test at 10 candidates/day",
         "breakdown_daily_candidate_budget": 10,
-        "breakdown_ti65_mode": "off",
         "breakdown_breadth_threshold": None,
         "breakdown_require_atr_expansion": True,
     },
@@ -83,7 +69,7 @@ BASE_FILTERS = {
 
 PLAN_ALIASES = {
     "phase3a": ["baseline"],
-    "phase3b": ["ti65", "breadth"],
+    "phase3b": ["breadth"],
     "phase3c": ["atr-expansion"],
     "phase3d": ["budget8"],
     "phase3f": ["budget10"],
@@ -116,7 +102,6 @@ def build_parser():
         help=(
             "Preset to run:\n"
             "  baseline       = phase-1 canonical (budget=5, rs_min=-0.10)\n"
-            "  ti65           = phase-3d TI65 bearish gate\n"
             "  breadth        = phase-3d breadth gate\n"
             "  atr-expansion  = phase-3e ATR expansion hard gate\n"
             "  atr-cap        = phase-3b ATR-capped short initial stop\n"

@@ -152,7 +152,7 @@ Requires 2 of 3 sub-conditions:
 2. `ret_5d > 0` — positive 5-day momentum
 3. `r2_65 >= 0.70` — R² of 65-day linear regression ≥ 0.70 (orderly trend)
 
-**Note on TI65**: The original Stockbee filter uses `TI65 = MA7/MA65 >= 1.05`. This implementation uses the 2-of-3 check as an equivalent. TI65 is available as `ma_7/ma_65_sma` in features but is NOT used as a same-day entry filter — breakouts often fire before TI65 is established.
+**Note on TI65**: The original Stockbee filter uses `TI65 = MA7/MA65 >= 1.05`. This implementation uses the 2-of-3 check as the breakout trend filter (`filter_L`) instead of a hard TI65 gate. TI65 is still available as `ma_7/ma_65_sma` in features for research and screening, but it is **not** used as a backtest admission gate for either breakout or breakdown.
 
 For SHORT: `close < ma_20`, `ret_5d < 0`, R² still ≥ 0.70 (orderly downtrend).
 
@@ -168,6 +168,36 @@ For SHORT: `close < ma_20`, `ret_5d < 0`, R² still ≥ 0.70 (orderly downtrend)
 | **Y** | Young Breakout | `prior_breakouts_30d <= 2` | `prior_breakouts_30d <= 2` | `feat_daily` |
 | **C** | Consolidation | `vol_dryup_ratio < 1.3` | `vol_dryup_ratio < 1.3` | `feat_daily` |
 | **L** | Trend Quality | 2 of 3: above MA20, pos 5d, R²≥0.70 | 2 of 3: below MA20, neg 5d, R²≥0.70 | `feat_daily` |
+
+---
+
+## Decision-Time Rules
+
+Backtest, paper simulation, and paper/live must use the same information at the same decision point.
+If a feature is not available yet in paper/live, it does not belong in backtest admission either.
+
+Use these buckets consistently:
+
+1. **Pre-open admissible**
+   - Known before the session opens.
+   - Safe for backtest admission, paper simulation, and live pre-open watchlists.
+   - Examples: prior-day watchlist features, T-1 `H_prev`, T-1 `N`, `Y`, `C`, `L`.
+
+2. **Intraday admissible**
+   - Known only after live bars arrive.
+   - Safe only for the intraday trigger and same-session execution logic.
+   - Examples: breakout trigger from live 5-minute bars, intraday stop checks.
+
+3. **End-of-day hold management**
+   - Known only after the session closes.
+   - Safe only for carry-vs-exit decisions after close.
+   - Example: same-day `H` if it is defined from the session close-in-range.
+
+Hard rule:
+- No same-day or hindsight-only values in pre-open admission or ranking.
+- If a value is only available after the decision point, it must not influence earlier entry filters.
+
+For 2LYNCH, treat `filter_h_prev` as the pre-open admission signal and `filter_h` as the same-day hold-management signal.
 
 ---
 
