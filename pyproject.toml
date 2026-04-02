@@ -31,6 +31,7 @@ dependencies = [
   "click>=8.1.0",
   "apscheduler>=3.10.0",
   "nicegui>=3.8.0",
+  "pyyaml>=6.0.0",
 ]
 
 [project.scripts]
@@ -54,6 +55,9 @@ nseml-kite-paper = "nse_momentum_lab.cli.paper:main"
 nseml-kite-token = "nse_momentum_lab.cli.kite_token:main"
 nseml-kite-ingest = "nse_momentum_lab.cli.kite_ingest:main"
 nseml-hygiene = "nse_momentum_lab.cli.data_hygiene:main"
+nseml-sweep = "nse_momentum_lab.cli.sweep:main"
+nseml-eod = "nse_momentum_lab.cli.eod:main"
+nseml-paper-plan = "nse_momentum_lab.cli.paper_plan:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,19 @@
+name: threshold-breakout-sweep
+strategy: thresholdbreakout
+base_params:
+  universe_size: 2000
+  min_price: 10
+  min_filters: 5
+  entry_timeframe: "5min"
+  start_year: 2015
+  end_year: 2025
+sweep:
+  - param: breakout_threshold
+    values: [0.02, 0.03, 0.04, 0.05]
+  - param: trail_activation_pct
+    values: [0.06, 0.08, 0.10]
+compare:
+  metric: calmar_ratio
+  sort: desc
+  top_n: 5
+tags: [threshold, breakout, research]

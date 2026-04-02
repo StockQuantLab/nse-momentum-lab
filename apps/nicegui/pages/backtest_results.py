@@ -190,9 +190,9 @@ async def backtest_page() -> None:
                                 ui.label(key).classes("text-xs font-mono").style(
                                     f"color: {color_info()}; min-width: 220px;"
                                 )
-                                ui.label(value).classes("text-xs font-mono text-right break-all").style(
-                                    f"color: {theme_text_secondary()};"
-                                )
+                                ui.label(value).classes(
+                                    "text-xs font-mono text-right break-all"
+                                ).style(f"color: {theme_text_secondary()};")
 
             divider()
 

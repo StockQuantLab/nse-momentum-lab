@@ -105,7 +105,9 @@ async def compare_page() -> None:
         selected = {"exp1": initial_exp1, "exp2": initial_exp2}
         has_selected = {"value": bool(initial_exp1 or initial_exp2)}
 
-        def _render_params_panel(slot_title: str, slot_label: str | None, exp_id: str | None) -> None:
+        def _render_params_panel(
+            slot_title: str, slot_label: str | None, exp_id: str | None
+        ) -> None:
             with ui.expansion(slot_title, icon="tune", value=False).classes("w-full mt-2"):
                 if not exp_id:
                     ui.label("Select an experiment to view stored parameters.").classes(

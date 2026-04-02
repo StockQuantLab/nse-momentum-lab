@@ -141,9 +141,7 @@ async def trade_analytics_page() -> None:
                         f" | ID {exp_id}"
                         f" | {exp.get('start_date', '-')}"
                         f" to {exp.get('end_date', '-')}"
-                    ).classes("text-sm font-medium").style(
-                        f"color: {theme_text_secondary()};"
-                    )
+                    ).classes("text-sm font-medium").style(f"color: {theme_text_secondary()};")
                     params = get_experiment_param_items(exp)
                     if not params:
                         ui.label("No stored parameters found.").classes("text-sm").style(

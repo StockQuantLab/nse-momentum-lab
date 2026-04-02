@@ -1,0 +1,21 @@
+name: breakdown-profile-sweep
+strategy: thresholdbreakdown
+base_params:
+  universe_size: 2000
+  min_price: 10
+  min_filters: 5
+  entry_timeframe: "5min"
+  start_year: 2020
+  end_year: 2025
+sweep:
+  - param: breakout_threshold
+    values: [0.02, 0.04]
+  - param: short_trail_activation_pct
+    values: [0.02, 0.03, 0.04]
+  - param: short_time_stop_days
+    values: [2, 3]
+compare:
+  metric: calmar_ratio
+  sort: desc
+  top_n: 10
+tags: [breakdown, short, research]

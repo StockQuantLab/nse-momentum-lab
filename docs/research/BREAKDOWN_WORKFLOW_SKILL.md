@@ -15,8 +15,15 @@ That defaults to `--step baseline`.
 - `tmp_deltas.py` was removed (one-off analysis snippet).
 
 ## Step presets
-- `baseline`, `ti65`, `breadth`, `atr-expansion`, `atr-cap`, `day0-profit`, `budget8`, `budget10`
+- `baseline`, `breadth`, `atr-expansion`, `atr-cap`, `day0-profit`, `budget8`, `budget10`
 - Plan aliases: `phase3a`, `phase3b`, `phase3c`, `phase3d`, `phase3f`
+
+## Alias mapping
+- `phase3a` = `baseline`
+- `phase3b` = `breadth`
+- `phase3c` = `atr-expansion`
+- `phase3d` = `budget8`
+- `phase3f` = `budget10`
 
 ## Comparison workflow
 ```bash

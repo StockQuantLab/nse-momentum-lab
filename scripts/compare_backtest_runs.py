@@ -16,7 +16,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import polars as pl
 
-from nse_momentum_lab.db.market_db import get_market_db
+from nse_momentum_lab.db.market_db import get_backtest_db
+from nse_momentum_lab.services.backtest.comparison import (
+    fetch_experiment_summary as _fetch_experiment_summary,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -42,51 +45,22 @@ def _int(v: int | None) -> str:
 
 
 def fetch_summary(db, exp_id: str, label: str) -> dict:
+    """Backward-compatible wrapper around fetch_experiment_summary."""
+    try:
+        summary = _fetch_experiment_summary(db, exp_id, label)
+    except ValueError:
+        raise SystemExit(f"Experiment {exp_id} not found in database.") from None
+
+    # Fetch trades and yearly for extended fields used by print_multi_comparison
     trades = db.con.execute("SELECT * FROM bt_trade WHERE exp_id = ?", [exp_id]).pl()
     yearly = db.con.execute(
         "SELECT * FROM bt_yearly_metric WHERE exp_id = ? ORDER BY year", [exp_id]
     ).pl()
-    exp_row = db.con.execute("SELECT * FROM bt_experiment WHERE exp_id = ?", [exp_id]).fetchdf()
-    if exp_row.empty:
-        raise SystemExit(f"Experiment {exp_id} not found in database.")
-    exp = exp_row.iloc[0]
 
-    total_trades = len(trades)
-    if total_trades == 0:
-        return {
-            "label": label,
-            "exp_id": exp_id,
-            "total_trades": 0,
-            "win_rate": 0.0,
-            "annualised": 0.0,
-            "total_ret": 0.0,
-            "max_dd": 0.0,
-            "profit_factor": 0.0,
-            "avg_r": 0.0,
-            "median_r": 0.0,
-            "avg_hold": 0.0,
-            "yearly": yearly,
-            "worst": pl.DataFrame(),
-            "exit_counts": pl.DataFrame(),
-        }
-
-    wins = trades.filter(pl.col("pnl_pct") > 0)
-    losses = trades.filter(pl.col("pnl_pct") < 0)
-    win_rate = len(wins) / total_trades * 100
-
-    gain = wins["pnl_pct"].sum() if len(wins) else 0.0
-    loss = abs(losses["pnl_pct"].sum()) if len(losses) else 0.0
-    profit_factor = gain / loss if loss else 0.0
-
-    years_active = yearly.filter(pl.col("trades") > 0)
-    total_ret = years_active["return_pct"].sum() if len(years_active) else 0.0
-    n_years = len(years_active)
-    annualised = total_ret / n_years if n_years else 0.0
-    max_dd = yearly["max_dd_pct"].max() if len(yearly) else 0.0
-
-    avg_r = trades["pnl_r"].mean() or 0.0
-    median_r = trades["pnl_r"].median() or 0.0
-    avg_hold = trades["holding_days"].mean() or 0.0
+    exp_df = db.con.execute(
+        "SELECT * FROM bt_experiment WHERE exp_id = ?", [exp_id]
+    ).fetchdf()
+    exp = exp_df.iloc[0]
 
     worst = (
         trades.sort("pnl_pct")
@@ -115,19 +89,19 @@ def fetch_summary(db, exp_id: str, label: str) -> dict:
     )
 
     return {
-        "label": label,
-        "exp_id": exp_id,
+        "label": summary.label,
+        "exp_id": summary.exp_id,
         "start_year": int(exp.get("start_year", 0)),
         "end_year": int(exp.get("end_year", 0)),
-        "total_trades": total_trades,
-        "win_rate": win_rate,
-        "annualised": annualised,
-        "total_ret": total_ret,
-        "max_dd": max_dd,
-        "profit_factor": profit_factor,
-        "avg_r": avg_r,
-        "median_r": median_r,
-        "avg_hold": avg_hold,
+        "total_trades": summary.total_trades,
+        "win_rate": summary.win_rate,
+        "annualised": summary.annualised_return,
+        "total_ret": summary.total_return,
+        "max_dd": summary.max_drawdown,
+        "profit_factor": summary.profit_factor,
+        "avg_r": summary.avg_r,
+        "median_r": summary.median_r,
+        "avg_hold": summary.avg_hold,
         "yearly": yearly,
         "worst": worst,
         "exit_counts": exit_counts,
@@ -287,7 +261,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    db = get_market_db()
+    db = get_backtest_db(read_only=True)
 
     summaries = []
 

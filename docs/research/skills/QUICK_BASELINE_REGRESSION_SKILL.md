@@ -34,6 +34,10 @@ Use these for immediate regression safety after step changes:
 - 4%: `4pct-<step>` label
 - 2%: `2pct-<step>-<profile>` label
 
+## Baseline rule
+- Compare against the current frozen baseline pair from the dropdown, not the historical hindsight rows.
+- Keep the run envelope fixed across the 2% and 4% pair; only the threshold or intended strategy change should vary.
+
 ## Suggested sequence (workflow-driven)
 ```bash
 doppler run -- uv run python scripts/run_breakdown_workflow.py --force --plan phase3a --plan phase3b --compare-baseline --baseline-4pct-exp <BASE_4PCT_EXP> --baseline-2pct-exp <BASE_2PCT_EXP>

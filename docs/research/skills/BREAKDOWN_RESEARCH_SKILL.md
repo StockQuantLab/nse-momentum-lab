@@ -12,15 +12,16 @@ Use this skill as the default operator playbook for breakdown optimization exper
 
 ## Preset Steps
 - `baseline` — phase-1 canonical (budget=5, rs_min=-0.10, strict L, narrow-only N, skip gap-down)
-- `ti65` — TI65 bearish trend gate
 - `breadth` — market breadth gate (requires `--breakdown-breadth-threshold`)
 - `atr-expansion` — ATR expansion hard gate
+- `atr-cap` — ATR-capped short initial stop at `1.5x ATR_20`
+- `day0-profit` — same-day short profit taking at `+2%`
 - `budget8` — candidate budget 8 with phase-1 + phase-3e
 - `budget10` — candidate budget 10 with phase-1 + phase-3e
 
 ## Plan Aliases
 - `phase3a` = `baseline`
-- `phase3b` = `ti65`,`breadth`
+- `phase3b` = `breadth`
 - `phase3c` = `atr-expansion`
 - `phase3d` = `budget8`
 - `phase3f` = `budget10`
@@ -30,13 +31,19 @@ Use this skill as the default operator playbook for breakdown optimization exper
 doppler run -- uv run python scripts/run_breakdown_workflow.py --force --step baseline
 
 # Repeated step-by-step
-# Example: TI65 then breadth
-doppler run -- uv run python scripts/run_breakdown_workflow.py --force --step ti65 --step breadth --compare-baseline --baseline-4pct-exp 909f04c033332b22 --baseline-2pct-exp a6e32e24a9c256f7
+# Example: breadth then atr-expansion
+doppler run -- uv run python scripts/run_breakdown_workflow.py --force --step breadth --step atr-expansion --compare-baseline --baseline-4pct-exp <BASE_4PCT_EXP> --baseline-2pct-exp <BASE_2PCT_EXP>
 
 # Short profile variants (2% only)
 doppler run -- uv run python scripts/run_breakdown_workflow.py --force --step baseline --short-profile option-b
 doppler run -- uv run python scripts/run_breakdown_workflow.py --force --step baseline --short-profile aggressive
 doppler run -- uv run python scripts/run_breakdown_workflow.py --force --step baseline --short-profile quick-scalp
+
+# ATR-capped short stop test
+doppler run -- uv run python scripts/run_breakdown_workflow.py --force --step atr-cap
+
+# Day-0 profit-taking test
+doppler run -- uv run python scripts/run_breakdown_workflow.py --force --step day0-profit
 
 # Run full pending sequence by phase alias
 doppler run -- uv run python scripts/run_breakdown_workflow.py --force --plan phase3a --plan phase3b --plan phase3c --plan phase3d --plan phase3f
