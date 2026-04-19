@@ -33,6 +33,18 @@ Token exchange:
 doppler run -- uv run nseml-kite-token
 ```
 
+To exchange the token and write `KITE_ACCESS_TOKEN` back to Doppler in one step:
+
+```powershell
+doppler run -- uv run nseml-kite-token --apply-doppler
+```
+
+If you already have the redirected callback URL, you can avoid the prompt:
+
+```powershell
+doppler run -- uv run nseml-kite-token --request-token "<full callback url>" --apply-doppler
+```
+
 Equivalent wrapper scripts are also present:
 
 ```powershell
@@ -102,36 +114,78 @@ doppler run -- uv run nseml-backtest-status --watch --interval 15
 
 ## Paper Trading Workflow
 
-Walk-forward is the promotion gate for replay and live paper sessions.
+The v2 paper engine uses DuckDB-backed state and auto-resumes existing sessions (no duplicate sessions on restart).
+
+### Session lifecycle
 
 ```powershell
-doppler run -- uv run nseml-paper walk-forward-cleanup --wf-run-id <SESSION_ID>
-doppler run -- uv run nseml-paper walk-forward-cleanup --wf-run-id <SESSION_ID> --apply
-doppler run -- uv run nseml-paper walk-forward --strategy thresholdbreakout --start-date 2025-04-01 --end-date 2026-03-09
-doppler run -- uv run nseml-paper replay-day --session-id <SESSION_ID> --trade-date 2026-03-09 --skip-gate
-doppler run -- uv run nseml-paper live --session-id <SESSION_ID> --trade-date 2026-03-22 --execute --run
-doppler run -- uv run nseml-paper qualify --session-id <SESSION_ID> --max-rank 10
-doppler run -- uv run nseml-paper alert --session-id <SESSION_ID> --signal-ids <ID1,ID2>
+# 1. Create or resume a session (idempotent — returns existing if one exists for the same strategy/date/mode)
+doppler run -- uv run nseml-paper prepare --strategy thresholdbreakout --mode replay --trade-date 2026-03-25
+
+# 2a. Replay historical candles (--session-id optional; auto-discovers by --strategy + --trade-date)
+doppler run -- uv run nseml-paper replay --strategy thresholdbreakout --trade-date 2026-03-25
+
+# 2b. Run a live session
+doppler run -- uv run nseml-paper live --strategy thresholdbreakout --trade-date 2026-03-25
+
+# 3. Session management
+doppler run -- uv run nseml-paper status                         # list all sessions
+doppler run -- uv run nseml-paper status --session-id <ID>       # full session JSON
+doppler run -- uv run nseml-paper status --status ACTIVE         # filter by status
+doppler run -- uv run nseml-paper pause  --session-id <ID>
+doppler run -- uv run nseml-paper resume --session-id <ID>
+doppler run -- uv run nseml-paper stop   --session-id <ID>
+doppler run -- uv run nseml-paper flatten --session-id <ID>      # close all open positions
+doppler run -- uv run nseml-paper archive --session-id <ID>
 ```
 
-Cleanup is dry-run by default. Use `--apply` only when you intend to delete the parent walk-forward session, its folds, and the linked DuckDB backtest rows.
-`nseml-paper walk-forward` uses the loaded local runtime coverage for the requested window and fails fast if `market_day_state`, `strategy_day_state`, or `intraday_day_pack` are stale. After a short Kite catch-up window, rerun `nseml-kite-ingest`, `nseml-build-features --since <YYYY-MM-DD>`, and `nseml-market-monitor --incremental --since <YYYY-MM-DD>` before retrying walk-forward.
+### Daily shortcuts (today's date pre-filled)
 
-The `/paper_ledger` page now emphasizes:
+```powershell
+doppler run -- uv run nseml-paper daily-prepare --strategy thresholdbreakout --mode live
+doppler run -- uv run nseml-paper daily-live    --strategy thresholdbreakout
+doppler run -- uv run nseml-paper daily-replay  --strategy thresholdbreakout
+doppler run -- uv run nseml-paper daily-sim     --session-id <ID> --trade-date 2026-03-25
+```
 
-- walk-forward decision and fold history
-- a session summary that explains whether you are looking at a walk-forward, replay, or live session
-- a trade watchlist instead of a generic queue label
-- recent activity and feed details for live sessions
+### Multi-variant sessions
+
+```powershell
+# Plan (dry-run preview) or create N variant sessions at once
+doppler run -- uv run nseml-paper plan --strategy thresholdbreakout --trade-date 2026-03-25 --symbols RELIANCE,TCS,INFY --variants 3 --dry-run
+doppler run -- uv run nseml-paper plan --strategy thresholdbreakout --trade-date 2026-03-25 --symbols RELIANCE,TCS,INFY --variants 3
+```
+
+### Strategy params override
+
+Pass `--metadata '{"breakout_threshold":0.02}'` to `prepare` to override strategy defaults. The engine reads those params back automatically when `replay` or `live` resumes the session.
+
+```powershell
+doppler run -- uv run nseml-paper prepare --strategy thresholdbreakout --mode live --trade-date 2026-03-25 --metadata '{"breakout_threshold":0.02}'
+doppler run -- uv run nseml-paper live --strategy thresholdbreakout --trade-date 2026-03-25
+```
+
+See [`docs/operations/pre-open-live-paper.md`](docs/operations/pre-open-live-paper.md) for the full pre-open checklist.
+
+The dashboard `/paper_ledger` page shows session state, open positions, fills, and alerts driven by the DuckDB paper store.
 
 ## Dashboard UX Model
 
-- Stable pages are shown by default:
-  - Home
-  - Backtest Results
-  - Paper Ledger
-  - Run Pipeline
-- API-dependent legacy pages are hidden under "Legacy Pages".
+Dashboard at `http://localhost:8501` — pages available:
+
+| URL | Description |
+|-----|-------------|
+| `/` | Home — daily summary tiles |
+| `/backtest` | Backtest results, equity curves, execution audit |
+| `/trade_analytics` | Trade analytics per experiment |
+| `/compare` | Experiment comparison |
+| `/strategy` | Strategy analysis and sensitivity |
+| `/scans` | Latest scan results |
+| `/data_quality` | Data quality report and DQ runner |
+| `/pipeline` | Pipeline status |
+| `/paper_ledger` | Paper trading — sessions, positions, fills, alerts |
+| `/daily_summary` | Daily P&L summary |
+| `/market_monitor` | Market regime monitor |
 
 ## Local Development Workflow
 

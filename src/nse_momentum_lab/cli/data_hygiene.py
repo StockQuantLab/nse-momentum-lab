@@ -1,4 +1,4 @@
-"""Data Hygiene CLI -- detect and purge dead (delisted) symbols.
+"""Data Hygiene CLI -- detect, scan, and purge dead symbols + DQ issues.
 
 Entry point: ``nseml-hygiene``
 
@@ -12,6 +12,24 @@ Usage::
 
     # Execute purge (requires --confirm)
     doppler run -- uv run nseml-hygiene --purge --confirm
+
+    # Quick data quality report (coverage, gaps, anomalies)
+    doppler run -- uv run nseml-hygiene --report
+
+    # Fast DQ refresh (coverage scan only, persist to DQ table)
+    doppler run -- uv run nseml-hygiene --refresh
+
+    # Full DQ refresh (all 11 scans, persist to DQ table)
+    doppler run -- uv run nseml-hygiene --refresh --full
+
+    # Trade-date readiness gate (exit 0 if clean, 1 if issues)
+    doppler run -- uv run nseml-hygiene --date 2026-04-10
+
+    # Bounded scan for a date window
+    doppler run -- uv run nseml-hygiene --refresh --window-start 2025-01-01 --window-end 2025-03-31
+
+    # Query stored active issues
+    doppler run -- uv run nseml-hygiene
 """
 
 from __future__ import annotations
@@ -21,11 +39,14 @@ import json
 import logging
 import shutil
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from nse_momentum_lab.db.market_db import DUCKDB_FILE, PARQUET_DIR
+import polars as pl
+
+from nse_momentum_lab.db.market_db import DUCKDB_FILE, PARQUET_DIR, get_market_db
+from nse_momentum_lab.services.dq_scanner import run_fast_scan, run_full_scan
 from nse_momentum_lab.services.kite.tradeable import (
     get_dead_symbol_stats,
     get_dead_symbols,
@@ -462,9 +483,167 @@ def run_report() -> int:
     return 0
 
 
+def run_dq_refresh(
+    *,
+    full: bool = False,
+    window_start: date | None = None,
+    window_end: date | None = None,
+) -> int:
+    """Run DQ scans and persist results to the DQ issue table."""
+    db = get_market_db()
+    scan_fn = run_full_scan if full else run_fast_scan
+    mode_label = "full" if full else "fast"
+
+    print(f"Running {mode_label} DQ scan...")
+    results = scan_fn(db.con, window_start=window_start, window_end=window_end)
+
+    total_flagged = 0
+    critical_count = 0
+    for result in results:
+        if result.symbols:
+            db.upsert_data_quality_issues(
+                symbols=result.symbols,
+                issue_code=result.issue_code,
+                details=result.details,
+                severity=result.severity,
+            )
+            total_flagged += len(result.symbols)
+            if result.severity == "CRITICAL":
+                critical_count += len(result.symbols)
+            print(
+                f"  {result.issue_code:30s} {result.severity:10s} {len(result.symbols):>6,} symbols"
+            )
+        # Deactivate issues no longer detected by this scan
+        deactivated = db.deactivate_data_quality_issue(
+            issue_code=result.issue_code,
+            keep_symbols=result.symbols if result.symbols else None,
+        )
+        if deactivated > 0:
+            logger.info("Deactivated %d stale %s issues", deactivated, result.issue_code)
+
+    print(f"\nDQ {mode_label} scan complete: {len(results)} checks, {total_flagged} issues flagged")
+    if critical_count:
+        print(f"  WARNING: {critical_count} CRITICAL issues found")
+    return 0
+
+
+def run_dq_date_gate(target_date: date) -> int:
+    """Trade-date readiness gate: full scan for a specific date, exit 0/1."""
+    db = get_market_db()
+    results = run_full_scan(
+        db.con,
+        window_start=target_date,
+        window_end=target_date,
+    )
+
+    print(f"\nTrade-date readiness gate: {target_date}")
+    print(f"{'=' * 50}")
+
+    has_critical = False
+    total_issues = 0
+    for result in results:
+        if not result.symbols:
+            continue
+        total_issues += len(result.symbols)
+        marker = "[CRITICAL]" if result.severity == "CRITICAL" else "[WARN]"
+        if result.severity == "CRITICAL":
+            has_critical = True
+        print(f"  {marker} {result.issue_code}: {len(result.symbols)} symbols")
+        for sym in result.symbols[:10]:
+            print(f"    {sym}")
+        if len(result.symbols) > 10:
+            print(f"    ... and {len(result.symbols) - 10} more")
+
+        db.upsert_data_quality_issues(
+            symbols=result.symbols,
+            issue_code=result.issue_code,
+            details=result.details,
+            severity=result.severity,
+        )
+        db.deactivate_data_quality_issue(
+            issue_code=result.issue_code,
+            keep_symbols=result.symbols,
+        )
+
+    if has_critical:
+        print(f"\n[FAIL] {target_date} has critical DQ issues ({total_issues} total)")
+        return 1
+    if total_issues > 0:
+        print(f"\n[WARN] {target_date} has warnings but no critical issues")
+        return 0
+    print(f"\n[OK] {target_date} passed all DQ checks")
+    return 0
+
+
+def run_query_issues(
+    *,
+    issue_code: str | None = None,
+    severity: str | None = None,
+) -> int:
+    """Query and display stored active DQ issues."""
+    db = get_market_db()
+    issues = db.query_active_dq_issues(issue_code=issue_code, severity=severity)
+
+    if issues.is_empty():
+        print("No active DQ issues found.")
+        return 0
+
+    print(f"\n{'=' * 70}")
+    print("ACTIVE DATA QUALITY ISSUES")
+    print(f"{'=' * 70}")
+    print(f"  Total: {len(issues)} issues\n")
+
+    # Group by issue_code for summary
+    summary = (
+        issues.group_by("issue_code")
+        .agg(
+            [
+                pl.len().alias("count"),
+                pl.col("severity").first().alias("severity"),
+            ]
+        )
+        .sort("severity", "count", descending=[False, True])
+    )
+
+    print(f"  {'Issue Code':35s} {'Severity':10s} {'Count':>8s}")
+    print(f"  {'-' * 55}")
+    for row in summary.iter_rows(named=True):
+        print(f"  {row['issue_code']:35s} {row['severity']:10s} {row['count']:>8,}")
+
+    # Show per-symbol details if not too many
+    if len(issues) <= 50:
+        print(f"\n  {'Symbol':15s} {'Issue':30s} {'Severity':10s} Details")
+        print(f"  {'-' * 80}")
+        for row in issues.sort("severity", "symbol").iter_rows(named=True):
+            details = row["details"][:40] if row["details"] else ""
+            print(f"  {row['symbol']:15s} {row['issue_code']:30s} {row['severity']:10s} {details}")
+
+    return 0
+
+
+def run_acknowledge(
+    issue_code: str | None = None,
+    symbols: list[str] | None = None,
+) -> int:
+    """Mark active DQ issues as acknowledged (operator-reviewed)."""
+    db = get_market_db()
+    count = db.acknowledge_data_quality_issues(issue_code=issue_code, symbols=symbols)
+    if count == 0:
+        print("No unacknowledged issues matched the filter.")
+        return 0
+    filter_desc = []
+    if issue_code:
+        filter_desc.append(f"issue_code={issue_code}")
+    if symbols:
+        filter_desc.append(f"symbols={','.join(symbols[:5])}{'...' if len(symbols) > 5 else ''}")
+    filter_str = f" ({', '.join(filter_desc)})" if filter_desc else ""
+    print(f"Acknowledged {count} DQ issue(s){filter_str}.")
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Data Hygiene -- detect dead symbols, purge, or run DQ report",
+        description="Data Hygiene -- detect dead symbols, purge, DQ scans, or run DQ report",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--dry-run", action="store_true", help="Preview dead symbols (default)")
@@ -479,10 +658,49 @@ def main() -> None:
         action="store_true",
         help="Quick data quality report (coverage, gaps, anomalies)",
     )
+    group.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Run DQ scans and persist results to issue table",
+    )
+    group.add_argument(
+        "--date",
+        type=str,
+        help="Trade-date readiness gate (YYYY-MM-DD). Full scan, exit 0/1.",
+    )
+    group.add_argument(
+        "--acknowledge",
+        action="store_true",
+        help="Mark active DQ issues as acknowledged (operator-reviewed)",
+    )
     parser.add_argument(
         "--confirm", action="store_true", help="Required with --purge (safety gate)"
     )
-
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="With --refresh: run all 11 scans (default: fast/coverage only)",
+    )
+    parser.add_argument(
+        "--issue-code",
+        type=str,
+        help="Filter by issue code (used with --acknowledge or default query)",
+    )
+    parser.add_argument(
+        "--symbols",
+        type=str,
+        help="Comma-separated symbols to acknowledge (used with --acknowledge)",
+    )
+    parser.add_argument(
+        "--window-start",
+        type=str,
+        help="Scan window start date (YYYY-MM-DD, used with --refresh)",
+    )
+    parser.add_argument(
+        "--window-end",
+        type=str,
+        help="Scan window end date (YYYY-MM-DD, used with --refresh)",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging")
 
     args = parser.parse_args()
@@ -490,14 +708,29 @@ def main() -> None:
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=log_level, format="%(levelname)s %(name)s: %(message)s")
 
-    if args.report:
+    if args.date:
+        target_date = date.fromisoformat(args.date)
+        sys.exit(run_dq_date_gate(target_date))
+    elif args.refresh:
+        window_start = date.fromisoformat(args.window_start) if args.window_start else None
+        window_end = date.fromisoformat(args.window_end) if args.window_end else None
+        sys.exit(run_dq_refresh(full=args.full, window_start=window_start, window_end=window_end))
+    elif args.report:
         sys.exit(run_report())
+    elif args.acknowledge:
+        symbols = (
+            [s.strip().upper() for s in args.symbols.split(",") if s.strip()]
+            if args.symbols
+            else None
+        )
+        sys.exit(run_acknowledge(issue_code=args.issue_code, symbols=symbols))
     elif args.purge:
         sys.exit(run_purge(confirm=args.confirm))
     elif args.list_dead:
         sys.exit(run_list_dead())
     else:
-        sys.exit(run_dry_run())
+        # Default: query stored active issues
+        sys.exit(run_query_issues())
 
 
 if __name__ == "__main__":

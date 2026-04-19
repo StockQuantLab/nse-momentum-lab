@@ -96,6 +96,18 @@ Current operational state as of `2026-03-27`:
 doppler run -- uv run python scripts/kite_get_token.py
 ```
 
+One-step exchange + Doppler update:
+
+```bash
+doppler run -- uv run nseml-kite-token --apply-doppler
+```
+
+If you already have the redirected callback URL:
+
+```bash
+doppler run -- uv run nseml-kite-token --request-token "<full callback url>" --apply-doppler
+```
+
 ### Instrument master refresh
 
 ```bash
@@ -191,7 +203,11 @@ new Kite data.
    - Daily and 5-min historical coverage is caught up through `2026-03-27`.
 2. Ongoing cadence:
    - Future Kite jobs should be incremental daily/5-minute catch-up only.
-3. Post-ingest validation:
-   - Run `nseml-build-features --since <YYYY-MM-DD>` and `nseml-market-monitor --incremental --since <YYYY-MM-DD>` after each new catch-up window.
+3. Post-ingest validation (mandatory, in this exact order):
+   - Run `nseml-build-features --since <YYYY-MM-DD>` **after both daily AND 5-min ingestion complete** — `feat_intraday_core` depends on 5-min data.
+   - Run `nseml-market-monitor --incremental --since <YYYY-MM-DD>`.
+   - Run `nseml-hygiene --refresh --full` for full DQ scan (11 checks).
+   - Run `nseml-hygiene --report` for coverage/freshness/anomaly summary.
+   - Run `nseml-db-verify` to confirm everything passes.
 4. Rate-limit tuning:
    - Keep the shared historical token bucket conservative enough to avoid Kite 429s while staying close to the 3 req/sec cap.

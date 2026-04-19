@@ -85,8 +85,8 @@ def test_fetch_and_write_daily_skips_already_ingested_backfill(monkeypatch) -> N
     )
     monkeypatch.setattr(
         writer,
-        "_get_existing_max_date",
-        lambda **kwargs: date(2026, 3, 25),
+        "_get_existing_date_range",
+        lambda **kwargs: (date(2026, 3, 1), date(2026, 3, 25)),
     )
 
     written = writer.fetch_and_write_daily(
@@ -108,8 +108,8 @@ def test_fetch_and_write_daily_advances_start_date_for_partial_backfill(monkeypa
     )
     monkeypatch.setattr(
         writer,
-        "_get_existing_max_date",
-        lambda **kwargs: date(2026, 3, 25),
+        "_get_existing_date_range",
+        lambda **kwargs: (date(2026, 3, 1), date(2026, 3, 25)),
     )
     monkeypatch.setattr(writer, "write_daily", lambda symbol, df, mode="append": df.height)
 
@@ -132,8 +132,8 @@ def test_fetch_and_write_daily_skips_same_day_rerun_when_already_present(monkeyp
     )
     monkeypatch.setattr(
         writer,
-        "_get_existing_max_date",
-        lambda **kwargs: date(2026, 3, 30),
+        "_get_existing_date_range",
+        lambda **kwargs: (date(2026, 3, 1), date(2026, 3, 30)),
     )
 
     written = writer.fetch_and_write_daily(
@@ -144,3 +144,31 @@ def test_fetch_and_write_daily_skips_same_day_rerun_when_already_present(monkeyp
 
     assert written == 0
     assert fetch_calls == []
+
+
+def test_normalize_5min_frame_filters_out_session_candles() -> None:
+    writer = KiteWriter()
+    sample = pl.DataFrame(
+        {
+            "symbol": ["RELIANCE"] * 4,
+            "date": [date(2026, 3, 23)] * 4,
+            "candle_time": [
+                datetime(2026, 3, 23, 9, 10),   # before session start
+                datetime(2026, 3, 23, 9, 15),   # session start
+                datetime(2026, 3, 23, 15, 25),  # session end
+                datetime(2026, 3, 23, 15, 35),  # after session end
+            ],
+            "open": [1.0, 2.0, 3.0, 4.0],
+            "high": [1.0, 2.0, 3.0, 4.0],
+            "low": [1.0, 2.0, 3.0, 4.0],
+            "close": [1.0, 2.0, 3.0, 4.0],
+            "volume": [1, 1, 1, 1],
+        }
+    )
+
+    frame = writer._normalize_5min_frame(sample)
+
+    assert frame.height == 2
+    times = frame["candle_time"].dt.time().to_list()
+    assert times[0] == datetime(2026, 3, 23, 9, 15).time()
+    assert times[1] == datetime(2026, 3, 23, 15, 25).time()

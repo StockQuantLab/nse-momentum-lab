@@ -1,7 +1,7 @@
 # Command Reference - nse-momentum-lab
 
-**Version**: Multi-Strategy Platform (Phase 1–7 complete)
-**Last Updated**: 2026-03-30
+**Version**: Multi-Strategy Platform (Phase 1–7 complete) + Paper Trading v2 Engine
+**Last Updated**: 2026-04-19
 
 ---
 
@@ -82,6 +82,18 @@ doppler secrets list
 
 ## Application Commands
 
+### Kite Token Refresh
+
+#### Exchange the token and update Doppler
+```bash
+doppler run -- uv run nseml-kite-token --apply-doppler
+```
+
+#### If you already have the redirected callback URL
+```bash
+doppler run -- uv run nseml-kite-token --request-token "<full callback url>" --apply-doppler
+```
+
 ### FastAPI Server
 
 #### Start API server
@@ -128,7 +140,8 @@ http://localhost:8501/strategy      # Strategy Analysis
 http://localhost:8501/scans         # Momentum Scans
 http://localhost:8501/data_quality
 http://localhost:8501/pipeline      # Pipeline Status
-http://localhost:8501/paper_ledger
+http://localhost:8501/paper_ledger   # Paper Trading v2 Ledger
+http://localhost:8501/market_monitor
 http://localhost:8501/daily_summary
 ```
 
@@ -145,6 +158,34 @@ Market data is loaded from Zerodha Parquet files via DuckDB. See `nse_momentum_l
 doppler run -- uv run nseml-kite-ingest --date 2026-03-30
 doppler run -- uv run nseml-kite-ingest --date 2026-03-30 --5min --resume
 ```
+
+#### Full catch-up workflow (after a gap)
+```bash
+# 1. Refresh instrument master
+doppler run -- uv run nseml-kite-ingest --refresh-instruments --exchange NSE
+
+# 2. Daily OHLCV catch-up
+doppler run -- uv run nseml-kite-ingest --from LAST_DATE --to TODAY
+
+# 3. 5-min OHLCV catch-up (WAIT for daily to finish first)
+doppler run -- uv run nseml-kite-ingest --from LAST_DATE --to TODAY --5min --resume
+
+# 4. Incremental feature rebuild (WAIT for 5-min to finish — feat_intraday_core depends on it)
+doppler run -- uv run nseml-build-features --since LAST_DATE
+
+# 5. Market monitor refresh
+doppler run -- uv run nseml-market-monitor --incremental --since LAST_DATE
+
+# 6. DQ scan (MANDATORY — do not skip)
+doppler run -- uv run nseml-hygiene --refresh --full
+doppler run -- uv run nseml-hygiene --report
+
+# 7. Verify coverage
+doppler run -- uv run nseml-db-verify
+```
+
+**Important**: Steps 2-3 are sequential. Step 4 must wait for step 3 to complete.
+Step 6 (DQ scan) is mandatory — never skip it after ingestion.
 
 ### Corporate Action Adjustment
 
@@ -357,46 +398,122 @@ doppler run -- uv run nseml-backtest-batch --params-json '{\"strategies\": [\"th
 
 ### Paper Trading Commands
 
-#### Replay a historical day
+The v2 paper engine (`nseml-paper`) uses DuckDB-backed state and auto-resumes sessions — re-running `prepare` for the same strategy/date/mode returns the existing session rather than creating a duplicate.
+
+Key behaviors:
+- **Idempotent sessions**: `prepare` is safe to re-run after any interruption.
+- **Atomic bar commits**: each 5-minute bar's DB writes are all-or-nothing; crash → rollback → clean resume.
+- **Signal tracking**: each seeded symbol gets a `paper_session_signals` row; entries, exits, and `update_signal_state` are all linked by `signal_id`.
+- **Crash recovery**: open positions are flattened at last-known mark prices; session marked FAILED; `live` resumes from last checkpoint.
+- **Strategy overrides**: `--metadata '{"breakout_threshold":0.02}'` (or `--risk-config`) are persisted in the session and applied automatically on resume.
+
+#### Create or resume a session
+
 ```bash
-doppler run -- uv run nseml-paper replay-day --session-id <SESSION_ID> --trade-date 2026-03-25
+# Create (or resume) a replay session for a specific date
+doppler run -- uv run nseml-paper prepare \
+  --strategy thresholdbreakout \
+  --mode replay \
+  --trade-date 2026-03-25 \
+  --portfolio-value 1000000
+
+# With strategy param overrides (e.g. 2% threshold)
+doppler run -- uv run nseml-paper prepare \
+  --strategy thresholdbreakout \
+  --mode live \
+  --trade-date 2026-03-25 \
+  --metadata '{"breakout_threshold":0.02}'
 ```
 
-#### Daily paper readiness
-```bash
-doppler run -- uv run nseml-paper daily-prepare --trade-date 2026-03-27 --mode live --all-symbols
-```
-See also: [`docs/operations/pre-open-live-paper.md`](../operations/pre-open-live-paper.md)
-`daily-prepare` is the readiness check for live/replay startup; it does not require a
-separate validation session.
+Output: `{"session_id": "...", "strategy": "...", "symbols": N, "resumed": false|true}`
 
-#### Daily fast simulation
-```bash
-doppler run -- uv run nseml-paper daily-sim --trade-date 2026-03-27 --experiment-id <EXP_ID>
-```
-`daily-sim` is the fast historical path for comparing a single trade date against backtest
-logic. It uses the DuckDB backtest engine and does not create a paper session.
+#### Replay historical candles
 
-#### Daily live session
 ```bash
-doppler run -- uv run nseml-paper daily-live --trade-date 2026-03-27 --all-symbols --watchlist --run
+# --session-id is optional; auto-discovers by --strategy + --trade-date
+doppler run -- uv run nseml-paper replay --strategy thresholdbreakout --trade-date 2026-03-25
+doppler run -- uv run nseml-paper replay --session-id <SESSION_ID> --trade-date 2026-03-25
 ```
 
-#### Daily replay session
+#### Run a live session
+
 ```bash
-doppler run -- uv run nseml-paper daily-replay --trade-date 2026-03-25 --all-symbols
+doppler run -- uv run nseml-paper live --strategy thresholdbreakout --trade-date 2026-03-25
+doppler run -- uv run nseml-paper live --session-id <SESSION_ID>
+doppler run -- uv run nseml-paper live --session-id <SESSION_ID> --poll-interval 1.0 --max-cycles 100
 ```
 
 #### Session status
+
 ```bash
+# List all sessions (tabular)
+doppler run -- uv run nseml-paper status
+
+# Filter by status
+doppler run -- uv run nseml-paper status --status ACTIVE
+doppler run -- uv run nseml-paper status --status PLANNED --limit 10
+
+# Full session JSON for a specific session
 doppler run -- uv run nseml-paper status --session-id <SESSION_ID>
-doppler run -- uv run nseml-paper status --session-id <SESSION_ID> --summary
 ```
 
-#### Flatten open positions
+#### Session lifecycle management
+
 ```bash
+# Pause an active session
+doppler run -- uv run nseml-paper pause --session-id <SESSION_ID>
+# or auto-discover
+doppler run -- uv run nseml-paper pause --strategy thresholdbreakout --trade-date 2026-03-25 --mode live
+
+# Resume a paused session
+doppler run -- uv run nseml-paper resume --session-id <SESSION_ID>
+
+# Stop (mark COMPLETED)
+doppler run -- uv run nseml-paper stop --session-id <SESSION_ID>
+
+# Flatten open positions and pause session
 doppler run -- uv run nseml-paper flatten --session-id <SESSION_ID>
+
+# Archive a completed session
+doppler run -- uv run nseml-paper archive --session-id <SESSION_ID>
 ```
+
+#### Multi-variant sessions
+
+```bash
+# Plan (dry-run preview only)
+doppler run -- uv run nseml-paper plan \
+  --strategy thresholdbreakout \
+  --trade-date 2026-03-25 \
+  --symbols RELIANCE,TCS,INFY \
+  --variants 3 \
+  --dry-run
+
+# Create N variant sessions
+doppler run -- uv run nseml-paper plan \
+  --strategy thresholdbreakout \
+  --trade-date 2026-03-25 \
+  --symbols RELIANCE,TCS,INFY \
+  --variants 3
+```
+
+#### Daily shortcuts (pre-fill today's date)
+
+```bash
+# Prepare today's session
+doppler run -- uv run nseml-paper daily-prepare --strategy thresholdbreakout --mode replay
+
+# Replay today's candles
+doppler run -- uv run nseml-paper daily-replay --strategy thresholdbreakout
+
+# Run live session for today
+doppler run -- uv run nseml-paper daily-live --strategy thresholdbreakout
+
+# Fast daily simulation (single-day replay, prints summary)
+doppler run -- uv run nseml-paper daily-sim --session-id <SESSION_ID> --trade-date 2026-03-25
+```
+
+See also: [`docs/operations/pre-open-live-paper.md`](../operations/pre-open-live-paper.md)
 
 ---
 

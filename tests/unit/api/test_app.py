@@ -187,40 +187,32 @@ class TestAPIApp:
         assert len(data["artifacts"]) == 1
         assert data["artifacts"][0]["artifact_name"] == "summary.json"
 
-    @patch("nse_momentum_lab.api.app.get_sessionmaker")
-    def test_paper_positions(self, mock_sm: MagicMock) -> None:
-        mock_session = AsyncMock()
-        mock_result = MagicMock()
-        mock_pos = MagicMock()
-        mock_pos.position_id = 1
-        mock_pos.symbol_id = 100
-        mock_pos.opened_at = None
-        mock_pos.avg_entry = 100.0
-        mock_pos.qty = 100
-        mock_pos.pnl = 500.0
-        mock_pos.state = "ENTERED"
-        mock_result.scalars.return_value.all.return_value = [mock_pos]
-        mock_session.execute = AsyncMock(return_value=mock_result)
-
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_sm.return_value.return_value = mock_context
+    @patch("nse_momentum_lab.api.app.PaperDB")
+    def test_paper_positions(self, mock_paper_db_cls: MagicMock) -> None:
+        mock_db = MagicMock()
+        mock_db.execute.return_value = [
+            {
+                "position_id": "pos-1",
+                "session_id": "paper-1",
+                "symbol": "RELIANCE",
+                "state": "OPEN",
+                "avg_entry": 100.0,
+                "qty": 100,
+                "pnl": 500.0,
+            }
+        ]
+        mock_db.list_open_positions.return_value = mock_db.execute.return_value
+        mock_paper_db_cls.return_value = mock_db
 
         response = self.client.get("/api/paper/positions")
         assert response.status_code == 200
         data = response.json()
         assert "positions" in data
 
-    @patch("nse_momentum_lab.api.app.list_paper_sessions", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.api.app.get_sessionmaker")
-    def test_paper_sessions(self, mock_sm: MagicMock, mock_list: AsyncMock) -> None:
-        mock_session = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_sm.return_value.return_value = mock_context
-        mock_list.return_value = [
+    @patch("nse_momentum_lab.api.app.PaperDB")
+    def test_paper_sessions(self, mock_paper_db_cls: MagicMock) -> None:
+        mock_db = MagicMock()
+        mock_db.list_sessions.return_value = [
             {
                 "session_id": "paper-1",
                 "strategy_name": "thresholdbreakout",
@@ -228,6 +220,7 @@ class TestAPIApp:
                 "status": "PLANNING",
             }
         ]
+        mock_paper_db_cls.return_value = mock_db
 
         response = self.client.get("/api/paper/sessions")
         assert response.status_code == 200
@@ -235,53 +228,54 @@ class TestAPIApp:
         assert len(data["sessions"]) == 1
         assert data["sessions"][0]["session_id"] == "paper-1"
 
-    @patch("nse_momentum_lab.api.app.get_paper_session_summary", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.api.app.get_sessionmaker")
-    def test_paper_session_detail(self, mock_sm: MagicMock, mock_summary: AsyncMock) -> None:
-        mock_session = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_sm.return_value.return_value = mock_context
-        mock_summary.return_value = {
-            "session": {"session_id": "paper-1", "status": "ACTIVE"},
-            "counts": {
-                "signals": 3,
-                "open_signals": 1,
-                "open_positions": 1,
-                "orders": 2,
-                "fills": 2,
-            },
+    @patch("nse_momentum_lab.api.app.PaperDB")
+    def test_paper_session_detail(self, mock_paper_db_cls: MagicMock) -> None:
+        mock_db = MagicMock()
+        mock_db.get_session.return_value = {
+            "session_id": "paper-1",
+            "status": "ACTIVE",
+            "strategy_name": "thresholdbreakout",
+            "mode": "replay",
+            "trade_date": "2026-04-19",
+            "symbols": [],
+            "strategy_params": {},
+            "risk_config": {},
+            "notes": None,
+            "created_at": None,
+            "updated_at": None,
+            "started_at": None,
+            "finished_at": None,
+            "archived_at": None,
+            "experiment_id": None,
         }
+        mock_db.list_open_positions.return_value = []
+        mock_paper_db_cls.return_value = mock_db
 
         response = self.client.get("/api/paper/sessions/paper-1")
         assert response.status_code == 200
         data = response.json()
-        assert data["session"]["session_id"] == "paper-1"
-        assert data["counts"]["signals"] == 3
+        assert data["session_id"] == "paper-1"
 
-    @patch("nse_momentum_lab.api.app.get_paper_feed_state", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.api.app.get_sessionmaker")
-    def test_paper_feed_state(self, mock_sm: MagicMock, mock_feed: AsyncMock) -> None:
-        mock_session = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_sm.return_value.return_value = mock_context
-        mock_feed.return_value = MagicMock(
-            session_id="paper-1",
-            source="kite",
-            mode="full",
-            status="READY",
-            is_stale=False,
-            subscription_count=3,
-            heartbeat_at=None,
-            last_quote_at=None,
-            last_tick_at=None,
-            last_bar_at=None,
-            metadata_json={"feed_mode": "full"},
-            updated_at=None,
-        )
+    @patch("nse_momentum_lab.api.app.PaperDB")
+    def test_paper_feed_state(self, mock_paper_db_cls: MagicMock) -> None:
+        mock_db = MagicMock()
+        mock_db.execute.return_value = [
+            {
+                "session_id": "paper-1",
+                "source": "kite",
+                "mode": "full",
+                "status": "READY",
+                "is_stale": False,
+                "subscription_count": 3,
+                "heartbeat_at": None,
+                "last_quote_at": None,
+                "last_tick_at": None,
+                "last_bar_at": None,
+                "raw_state": {"feed_mode": "full"},
+                "updated_at": None,
+            }
+        ]
+        mock_paper_db_cls.return_value = mock_db
 
         response = self.client.get("/api/paper/feed-state/paper-1")
         assert response.status_code == 200
@@ -289,59 +283,52 @@ class TestAPIApp:
         assert data["feed_state"]["session_id"] == "paper-1"
         assert data["feed_state"]["source"] == "kite"
 
-    @patch("nse_momentum_lab.api.app.list_paper_orders", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.api.app.get_sessionmaker")
-    def test_paper_session_orders(self, mock_sm: MagicMock, mock_orders: AsyncMock) -> None:
-        mock_session = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_sm.return_value.return_value = mock_context
-        mock_orders.return_value = [
+    @patch("nse_momentum_lab.api.app.PaperDB")
+    def test_paper_session_orders(self, mock_paper_db_cls: MagicMock) -> None:
+        mock_db = MagicMock()
+        mock_db.execute.return_value = [
             {
-                "order_id": 11,
+                "order_id": "order-11",
                 "session_id": "paper-1",
-                "signal_id": 101,
+                "signal_id": "sig-101",
                 "side": "BUY",
                 "qty": 100,
                 "order_type": "MARKET",
                 "status": "COMPLETE",
             }
         ]
+        mock_paper_db_cls.return_value = mock_db
 
         response = self.client.get("/api/paper/sessions/paper-1/orders")
         assert response.status_code == 200
         data = response.json()
         assert len(data["orders"]) == 1
-        assert data["orders"][0]["order_id"] == 11
+        assert data["orders"][0]["order_id"] == "order-11"
 
-    @patch("nse_momentum_lab.api.app.list_paper_fills", new_callable=AsyncMock)
-    @patch("nse_momentum_lab.api.app.get_sessionmaker")
-    def test_paper_session_fills(self, mock_sm: MagicMock, mock_fills: AsyncMock) -> None:
-        mock_session = AsyncMock()
-        mock_context = MagicMock()
-        mock_context.__aenter__ = AsyncMock(return_value=mock_session)
-        mock_context.__aexit__ = AsyncMock()
-        mock_sm.return_value.return_value = mock_context
-        mock_fills.return_value = [
+    @patch("nse_momentum_lab.api.app.PaperDB")
+    def test_paper_session_fills(self, mock_paper_db_cls: MagicMock) -> None:
+        mock_db = MagicMock()
+        mock_db.execute.return_value = [
             {
-                "fill_id": 21,
+                "fill_id": "fill-21",
                 "session_id": "paper-1",
-                "order_id": 11,
+                "order_id": "order-11",
                 "fill_time": "2026-03-21T09:20:00+00:00",
                 "fill_price": 101.5,
                 "qty": 100,
             }
         ]
+        mock_paper_db_cls.return_value = mock_db
 
         response = self.client.get("/api/paper/sessions/paper-1/fills")
         assert response.status_code == 200
         data = response.json()
         assert len(data["fills"]) == 1
-        assert data["fills"][0]["fill_id"] == 21
+        assert data["fills"][0]["fill_id"] == "fill-21"
 
+    @patch("nse_momentum_lab.api.app.PaperDB")
     @patch("nse_momentum_lab.api.app.get_sessionmaker")
-    def test_dashboard_summary(self, mock_sm: MagicMock) -> None:
+    def test_dashboard_summary(self, mock_sm: MagicMock, mock_paper_db_cls: MagicMock) -> None:
         mock_session = AsyncMock()
         mock_result = MagicMock()
         mock_result.scalar.return_value = 10
@@ -355,6 +342,10 @@ class TestAPIApp:
         mock_context.__aenter__ = AsyncMock(return_value=mock_session)
         mock_context.__aexit__ = AsyncMock()
         mock_sm.return_value.return_value = mock_context
+
+        mock_db = MagicMock()
+        mock_db.execute.return_value = [{"cnt": 5}]
+        mock_paper_db_cls.return_value = mock_db
 
         response = self.client.get("/api/dashboard/summary")
         assert response.status_code == 200

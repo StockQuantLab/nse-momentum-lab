@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from nse_momentum_lab.services.backtest.comparison import (
     ExperimentSummary,
-    rank_experiments,
     format_comparison_table,
+    rank_experiments,
 )
 
 

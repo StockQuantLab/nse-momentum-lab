@@ -129,6 +129,7 @@ class MarketDataDB:
         self._setup()
         if not self._read_only:
             self._ensure_backtest_tables()
+            self._ensure_dq_tables()
 
     @staticmethod
     def _sql_literal(value: str) -> str:
@@ -433,6 +434,153 @@ class MarketDataDB:
             CREATE INDEX IF NOT EXISTS idx_bt_experiment_wf_run_id
             ON bt_experiment(wf_run_id)
         """)
+
+    # ------------------------------------------------------------------
+    # Data quality issue registry
+    # ------------------------------------------------------------------
+
+    def _ensure_dq_tables(self) -> None:
+        """Create the data_quality_issues table if it does not exist."""
+        self.con.execute("""
+            CREATE TABLE IF NOT EXISTS data_quality_issues (
+                symbol       VARCHAR NOT NULL,
+                issue_code   VARCHAR NOT NULL,
+                severity     VARCHAR DEFAULT 'WARNING',
+                details      VARCHAR DEFAULT '',
+                is_active    BOOLEAN DEFAULT TRUE,
+                acknowledged BOOLEAN DEFAULT FALSE,
+                first_seen   TIMESTAMP DEFAULT current_timestamp,
+                last_seen    TIMESTAMP DEFAULT current_timestamp,
+                PRIMARY KEY (symbol, issue_code)
+            )
+        """)
+        # Migration: add acknowledged column to existing installs
+        try:
+            self.con.execute(
+                "ALTER TABLE data_quality_issues ADD COLUMN acknowledged BOOLEAN DEFAULT FALSE"
+            )
+        except Exception:
+            pass  # column already exists
+
+    def upsert_data_quality_issues(
+        self,
+        symbols: list[str],
+        issue_code: str,
+        details: str = "",
+        severity: str = "WARNING",
+    ) -> int:
+        """Insert or reactivate data quality issues for a list of symbols.
+
+        Returns the number of rows upserted.
+        """
+        if not symbols:
+            return 0
+        rows = [(symbol, issue_code, severity, details) for symbol in symbols]
+        self.con.executemany(
+            """INSERT INTO data_quality_issues (symbol, issue_code, severity, details, is_active, last_seen)
+               VALUES (?, ?, ?, ?, TRUE, now())
+               ON CONFLICT (symbol, issue_code) DO UPDATE SET
+                   severity = EXCLUDED.severity,
+                   details  = EXCLUDED.details,
+                   is_active = TRUE,
+                   last_seen = now()""",
+            rows,
+        )
+        return len(rows)
+
+    def deactivate_data_quality_issue(
+        self,
+        issue_code: str,
+        keep_symbols: list[str] | None = None,
+    ) -> int:
+        """Mark issues as inactive. Optionally keep specific symbols active.
+
+        Returns the number of rows deactivated.
+        """
+        # Count rows that will be deactivated before the UPDATE.
+        if keep_symbols:
+            placeholders = ",".join("?" for _ in keep_symbols)
+            count_row = self.con.execute(
+                f"""SELECT COUNT(*) FROM data_quality_issues
+                    WHERE issue_code = ? AND is_active = TRUE
+                      AND symbol NOT IN ({placeholders})""",
+                [issue_code, *keep_symbols],
+            ).fetchone()
+            self.con.execute(
+                f"""UPDATE data_quality_issues
+                    SET is_active = FALSE
+                    WHERE issue_code = ? AND is_active = TRUE
+                      AND symbol NOT IN ({placeholders})""",
+                [issue_code, *keep_symbols],
+            )
+        else:
+            count_row = self.con.execute(
+                """SELECT COUNT(*) FROM data_quality_issues
+                   WHERE issue_code = ? AND is_active = TRUE""",
+                [issue_code],
+            ).fetchone()
+            self.con.execute(
+                """UPDATE data_quality_issues
+                   SET is_active = FALSE
+                   WHERE issue_code = ? AND is_active = TRUE""",
+                [issue_code],
+            )
+        return int(count_row[0]) if count_row else 0
+
+    def acknowledge_data_quality_issues(
+        self,
+        *,
+        issue_code: str | None = None,
+        symbols: list[str] | None = None,
+    ) -> int:
+        """Mark DQ issues as acknowledged (operator-reviewed, known/expected).
+
+        Filters by issue_code and/or symbols. Returns the number of rows updated.
+        """
+        conditions = ["is_active = TRUE", "acknowledged = FALSE"]
+        params: list[str] = []
+        if issue_code:
+            conditions.append("issue_code = ?")
+            params.append(issue_code)
+        if symbols:
+            placeholders = ",".join("?" for _ in symbols)
+            conditions.append(f"symbol IN ({placeholders})")
+            params.extend(symbols)
+        where = " AND ".join(conditions)
+        count_row = self.con.execute(
+            f"SELECT COUNT(*) FROM data_quality_issues WHERE {where}", params
+        ).fetchone()
+        self.con.execute(
+            f"UPDATE data_quality_issues SET acknowledged = TRUE WHERE {where}", params
+        )
+        return int(count_row[0]) if count_row else 0
+
+    def query_active_dq_issues(
+        self,
+        issue_code: str | None = None,
+        severity: str | None = None,
+        include_acknowledged: bool = False,
+    ) -> pl.DataFrame:
+        """Return active data quality issues, optionally filtered."""
+        conditions = ["is_active = TRUE"]
+        params: list[str] = []
+        if not include_acknowledged:
+            conditions.append("acknowledged = FALSE")
+        if issue_code:
+            conditions.append("issue_code = ?")
+            params.append(issue_code)
+        if severity:
+            conditions.append("severity = ?")
+            params.append(severity)
+        where = " AND ".join(conditions)
+        return self.con.execute(
+            f"""SELECT symbol, issue_code, severity, details, acknowledged,
+                       first_seen, last_seen
+                FROM data_quality_issues
+                WHERE {where}
+                ORDER BY severity, symbol""",
+            params,
+        ).pl()
 
     def refresh_backtest_read_snapshot(self) -> None:
         """Refresh read-only dashboard copy of backtest tables."""
@@ -2140,6 +2288,7 @@ class MarketDataDB:
             "bt_yearly_metric",
             "bt_dataset_snapshot",
             "bt_materialization_state",
+            "data_quality_issues",
         ]:
             try:
                 row = self.con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()

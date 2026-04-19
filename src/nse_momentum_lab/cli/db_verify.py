@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from nse_momentum_lab.db.market_db import get_market_db
+from nse_momentum_lab.services.dq_scanner import scan_missing_5min_coverage
 from nse_momentum_lab.services.kite.parquet_repair import scan_5min_timestamp_alignment
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -85,14 +86,29 @@ def verify_postgres() -> bool:
         import selectors
 
         loop = asyncio.SelectorEventLoop(selectors.SelectSelector())
-        result = loop.run_until_complete(check())
+        result = loop.run_until_complete(asyncio.wait_for(check(), timeout=15))
         loop.close()
         if result:
             print("\n[OK] PostgreSQL verification passed")
         return result
+    except TimeoutError:
+        print("\n[FAIL] PostgreSQL connection timed out after 15 seconds")
+        print("  Is Docker running? Try: doppler run -- docker compose up -d")
+        return False
     except Exception as e:
         print(f"\n[FAIL] PostgreSQL verification failed: {e}")
         return False
+
+
+def _check_daily_5min_coverage(db) -> str:
+    """Check that symbols with recent daily data also have 5-min data."""
+    try:
+        result = scan_missing_5min_coverage(db.con)
+        if result.symbols:
+            return f"{result.count} symbols have daily data but no 5-min data"
+        return ""
+    except Exception:
+        return ""
 
 
 def verify_duckdb() -> bool:
@@ -141,6 +157,14 @@ def verify_duckdb() -> bool:
                 print(f"    ... and {len(issues) - 10} more")
             return False
         print("  [OK] no 5-min parquet files start before 09:15 IST")
+
+        print("\nDaily vs 5-min coverage gap:")
+        gap_check = _check_daily_5min_coverage(db)
+        if gap_check:
+            print(f"  [WARN] {gap_check}")
+            print("    Run: doppler run -- uv run nseml-kite-ingest --from <DATE> --5min --resume")
+        else:
+            print("  [OK] all symbols with daily data also have 5-min data (last 30 days)")
 
         print("\nDataset summary:")
         if "symbols" in status:

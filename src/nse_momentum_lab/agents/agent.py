@@ -188,21 +188,26 @@ async def get_daily_summary(asof_date: date | None = None) -> dict[str, Any]:
     from sqlalchemy import func, select
 
     from nse_momentum_lab.db import get_sessionmaker
-    from nse_momentum_lab.db.models import JobRun, PaperPosition, RptScanDaily
+    from nse_momentum_lab.db.models import JobRun, RptScanDaily
+    from nse_momentum_lab.services.paper.db.paper_db import PaperDB
 
     asof_date = asof_date or date.today()
     sessionmaker = get_sessionmaker()
+
+    # Count open positions from DuckDB paper store.
+    paper_db = PaperDB("data/paper.duckdb")
+    try:
+        open_positions = len(
+            paper_db.execute("SELECT * FROM paper_positions WHERE state = 'OPEN'") or []
+        )
+    finally:
+        paper_db.close()
 
     async with sessionmaker() as session:
         scan_result = await session.execute(
             select(func.count(RptScanDaily.scan_def_id)).where(RptScanDaily.asof_date == asof_date)
         )
         scan_count = scan_result.scalar() or 0
-
-        pos_result = await session.execute(
-            select(func.count(PaperPosition.position_id)).where(PaperPosition.closed_at.is_(None))
-        )
-        open_positions = pos_result.scalar() or 0
 
         job_result = await session.execute(
             select(JobRun).where(JobRun.asof_date == asof_date).order_by(JobRun.started_at.desc())

@@ -26,22 +26,13 @@ from nse_momentum_lab.db.models import (
     ExpMetric,
     ExpRun,
     JobRun,
-    PaperPosition,
     RefSymbol,
     RptBtDaily,
     RptScanDaily,
     ScanResult,
     ScanRun,
 )
-from nse_momentum_lab.db.paper import (
-    get_paper_feed_state,
-    get_paper_session_summary,
-    list_paper_fills,
-    list_paper_order_events,
-    list_paper_orders,
-    list_paper_session_signals,
-    list_paper_sessions,
-)
+from nse_momentum_lab.services.paper.db.paper_db import PaperDB
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +54,11 @@ def create_app() -> FastAPI:
         stop_scheduler()
 
     app = FastAPI(title="nse-momentum-lab API", lifespan=lifespan)
+
+    _paper_db_path = os.getenv("PAPER_DB_PATH", "data/paper.duckdb")
+
+    def _get_paper_db() -> PaperDB:
+        return PaperDB(_paper_db_path)
 
     # CORS middleware - protect state-changing endpoints from CSRF
     allowed_origins = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:8501").split(",")
@@ -886,104 +882,101 @@ def create_app() -> FastAPI:
     async def paper_positions(
         open_only: bool = True, session_id: str | None = None
     ) -> dict[str, Any]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            query = select(PaperPosition)
-            if open_only:
-                query = query.where(PaperPosition.closed_at.is_(None))
+        db = _get_paper_db()
+        try:
             if session_id:
-                query = query.where(PaperPosition.session_id == session_id)
-            result = await session.execute(query)
-            positions = result.scalars().all()
-            return {
-                "positions": [
-                    {
-                        "position_id": p.position_id,
-                        "session_id": p.session_id,
-                        "symbol_id": p.symbol_id,
-                        "opened_at": p.opened_at.isoformat() if p.opened_at else None,
-                        "closed_at": p.closed_at.isoformat() if p.closed_at else None,
-                        "avg_entry": p.avg_entry,
-                        "avg_exit": p.avg_exit,
-                        "qty": p.qty,
-                        "pnl": p.pnl,
-                        "state": p.state,
-                    }
-                    for p in positions
-                ]
-            }
+                positions = (
+                    db.list_open_positions(session_id)
+                    if open_only
+                    else db.list_positions_by_session(session_id)
+                )
+            else:
+                positions = db.list_all_open_positions() if open_only else db.list_all_positions()
+            return {"positions": positions}
+        finally:
+            db.close()
 
     @app.get("/api/paper/sessions")
     async def paper_sessions(
         status: str | None = None, limit: int = Query(20, ge=1, le=200)
     ) -> dict[str, Any]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            rows = await list_paper_sessions(session, status=status, limit=limit)
+        db = _get_paper_db()
+        try:
+            rows = db.list_sessions(status=status, limit=limit)
             return {"sessions": rows}
+        finally:
+            db.close()
 
     @app.get("/api/paper/sessions/{session_id}")
     async def paper_session(session_id: str) -> dict[str, Any]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            summary = await get_paper_session_summary(session, session_id)
-            if summary is None:
+        db = _get_paper_db()
+        try:
+            session = db.get_session(session_id)
+            if session is None:
                 raise HTTPException(status_code=404, detail="Paper session not found")
-            return summary
+            open_positions = db.list_open_positions(session_id)
+            realized_pnl = db.get_session_realized_pnl(session_id)
+            return {**session, "realized_pnl": realized_pnl, "open_count": len(open_positions)}
+        finally:
+            db.close()
 
     @app.get("/api/paper/feed-state/{session_id}")
     async def paper_feed_state(session_id: str) -> dict[str, Any]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            row = await get_paper_feed_state(session, session_id)
-            if row is None:
+        db = _get_paper_db()
+        try:
+            rows = db.execute("SELECT * FROM paper_feed_state WHERE session_id = ?", [session_id])
+            if not rows:
                 raise HTTPException(status_code=404, detail="Paper feed state not found")
-            return {
-                "feed_state": {
-                    "session_id": row.session_id,
-                    "source": row.source,
-                    "mode": row.mode,
-                    "status": row.status,
-                    "is_stale": row.is_stale,
-                    "subscription_count": row.subscription_count,
-                    "heartbeat_at": row.heartbeat_at.isoformat() if row.heartbeat_at else None,
-                    "last_quote_at": row.last_quote_at.isoformat() if row.last_quote_at else None,
-                    "last_tick_at": row.last_tick_at.isoformat() if row.last_tick_at else None,
-                    "last_bar_at": row.last_bar_at.isoformat() if row.last_bar_at else None,
-                    "metadata_json": row.metadata_json or {},
-                    "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-                }
-            }
+            return {"feed_state": rows[0]}
+        finally:
+            db.close()
 
     @app.get("/api/paper/sessions/{session_id}/signals")
     async def paper_session_signals(session_id: str) -> dict[str, Any]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            rows = await list_paper_session_signals(session, session_id)
+        db = _get_paper_db()
+        try:
+            rows = (
+                db.execute("SELECT * FROM paper_session_signals WHERE session_id = ?", [session_id])
+                or []
+            )
             return {"signals": rows}
+        finally:
+            db.close()
 
     @app.get("/api/paper/sessions/{session_id}/orders")
     async def paper_session_orders(session_id: str) -> dict[str, Any]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            rows = await list_paper_orders(session, session_id)
+        db = _get_paper_db()
+        try:
+            rows = db.execute("SELECT * FROM paper_orders WHERE session_id = ?", [session_id]) or []
             return {"orders": rows}
+        finally:
+            db.close()
 
     @app.get("/api/paper/sessions/{session_id}/fills")
     async def paper_session_fills(session_id: str) -> dict[str, Any]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            rows = await list_paper_fills(session, session_id)
+        db = _get_paper_db()
+        try:
+            rows = db.execute("SELECT * FROM paper_fills WHERE session_id = ?", [session_id]) or []
             return {"fills": rows}
+        finally:
+            db.close()
 
     @app.get("/api/paper/sessions/{session_id}/order-events")
     async def paper_order_events(
         session_id: str, limit: int = Query(100, ge=1, le=500)
     ) -> dict[str, Any]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            rows = await list_paper_order_events(session, session_id, limit=limit)
+        db = _get_paper_db()
+        try:
+            rows = (
+                db.execute(
+                    "SELECT * FROM paper_order_events WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+                    [session_id, limit],
+                )
+                or []
+            )
             return {"events": rows}
+        finally:
+            db.close()
 
     @app.get("/api/alerts/recent")
     async def recent_alerts(limit: int = Query(20, ge=1, le=500)) -> dict[str, Any]:
@@ -1023,16 +1016,20 @@ def create_app() -> FastAPI:
             bt_result = await session.execute(bt_query)
             bt_count = bt_result.scalar() or 0
 
-            pos_query = select(func.count(PaperPosition.position_id)).where(
-                PaperPosition.closed_at.is_(None)
-            )
+            pos_query = select(func.count(RptScanDaily.scan_def_id))
             pos_result = await session.execute(pos_query)
             open_positions = pos_result.scalar() or 0
 
-            session_query = select(func.count(PaperPosition.position_id))
-            session_query = session_query.where(PaperPosition.closed_at.is_(None))
-            session_result = await session.execute(session_query)
-            open_paper_positions = session_result.scalar() or 0
+            open_paper_positions = 0
+            db = _get_paper_db()
+            try:
+                rows = db.execute(
+                    "SELECT COUNT(*) AS cnt FROM paper_positions WHERE state = 'OPEN'"
+                )
+                if rows:
+                    open_paper_positions = rows[0].get("cnt", 0) or 0
+            finally:
+                db.close()
 
             return {
                 "date": asof_date.isoformat() if asof_date else None,

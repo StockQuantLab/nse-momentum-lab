@@ -50,14 +50,12 @@ nseml-market-monitor = "nse_momentum_lab.cli.market_monitor:main"
 nseml-backtest = "nse_momentum_lab.cli.backtest:main"
 nseml-backtest-status = "nse_momentum_lab.cli.backtest_status:main"
 nseml-backtest-batch = "nse_momentum_lab.cli.backtest_batch:main"
-nseml-paper = "nse_momentum_lab.cli.paper:main"
-nseml-kite-paper = "nse_momentum_lab.cli.paper:main"
+nseml-paper = "nse_momentum_lab.cli.paper_v2:main"
 nseml-kite-token = "nse_momentum_lab.cli.kite_token:main"
 nseml-kite-ingest = "nse_momentum_lab.cli.kite_ingest:main"
 nseml-hygiene = "nse_momentum_lab.cli.data_hygiene:main"
 nseml-sweep = "nse_momentum_lab.cli.sweep:main"
 nseml-eod = "nse_momentum_lab.cli.eod:main"
-nseml-paper-plan = "nse_momentum_lab.cli.paper_plan:main"
 
 [build-system]
 requires = ["hatchling"]

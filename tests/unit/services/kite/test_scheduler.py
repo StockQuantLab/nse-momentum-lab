@@ -150,25 +150,35 @@ def test_resolve_symbols_uses_local_kite_intersection_for_daily(monkeypatch) -> 
     assert resolved == ["BBB", "CCC"]
 
 
-def test_resolve_symbols_uses_daily_window_intersection_for_5min(monkeypatch) -> None:
+def test_resolve_symbols_uses_same_universe_for_daily_and_5min(monkeypatch) -> None:
+    """Both daily and 5-min should resolve from the same local parquet universe."""
     scheduler_obj = KiteScheduler(auth=SimpleNamespace(), writer=SimpleNamespace())
     monkeypatch.setattr(
         scheduler_obj,
-        "get_symbols_from_daily_range",
-        lambda **kwargs: ["AAA", "BBB", "CCC"],
+        "get_symbols_from_local_parquet",
+        lambda: ["AAA", "BBB", "CCC"],
     )
     monkeypatch.setattr(
         scheduler_obj, "get_symbols_from_kite", lambda **kwargs: ["BBB", "CCC", "DDD"]
     )
 
-    resolved = scheduler_obj._resolve_symbols(
+    daily_resolved = scheduler_obj._resolve_symbols(
         symbols=None,
-        dataset=IngestionDataset.FIVE_MIN,
-        start_date=date(2026, 3, 23),
-        end_date=date(2026, 3, 23),
+        dataset=IngestionDataset.DAILY,
+        start_date=date(2026, 4, 10),
+        end_date=date(2026, 4, 10),
     )
 
-    assert resolved == ["BBB", "CCC"]
+    fivemin_resolved = scheduler_obj._resolve_symbols(
+        symbols=None,
+        dataset=IngestionDataset.FIVE_MIN,
+        start_date=date(2026, 4, 10),
+        end_date=date(2026, 4, 10),
+    )
+
+    assert daily_resolved == ["BBB", "CCC"]
+    assert fivemin_resolved == ["BBB", "CCC"]
+    assert daily_resolved == fivemin_resolved
 
 
 def test_resolve_symbols_uses_current_master_when_requested(monkeypatch) -> None:

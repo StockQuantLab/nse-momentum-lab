@@ -24,22 +24,11 @@ if str(_project_root / "src") not in sys.path:
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 import polars as pl
-from sqlalchemy import and_, func, select
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
 
-from nse_momentum_lab.db import get_sessionmaker
-from nse_momentum_lab.db.models import MdOhlcvAdj, PaperPosition, RefSymbol
-from nse_momentum_lab.db.paper import (
-    get_paper_session_summary,
-    list_paper_fills,
-    list_paper_order_events,
-    list_paper_orders,
-    list_paper_session_signals,
-    list_paper_sessions,
-)
 from nse_momentum_lab.db.market_db import (
     MarketDataDB,
     close_backtest_db,
@@ -585,155 +574,6 @@ def prepare_trades_df(df: pl.DataFrame) -> pl.DataFrame:
         df = df.with_columns(numeric_casts)
 
     return df
-
-
-async def aget_paper_sessions(status: str | None = None, limit: int = 50) -> list[dict]:
-    async def _load() -> list[dict]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            return await list_paper_sessions(session, status=status, limit=limit)
-
-    return await _run_pg_coro(_load)
-
-
-async def aget_paper_session_summary(session_id: str) -> dict | None:
-    async def _load() -> dict | None:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            return await get_paper_session_summary(session, session_id)
-
-    return await _run_pg_coro(_load)
-
-
-async def aget_paper_session_signals(session_id: str) -> list[dict]:
-    async def _load() -> list[dict]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            return await list_paper_session_signals(session, session_id)
-
-    return await _run_pg_coro(_load)
-
-
-async def aget_paper_session_orders(session_id: str, limit: int = 100) -> list[dict]:
-    async def _load() -> list[dict]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            return await list_paper_orders(session, session_id, limit=limit)
-
-    return await _run_pg_coro(_load)
-
-
-async def aget_paper_session_fills(session_id: str, limit: int = 100) -> list[dict]:
-    async def _load() -> list[dict]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            return await list_paper_fills(session, session_id, limit=limit)
-
-    return await _run_pg_coro(_load)
-
-
-async def aget_paper_session_events(session_id: str, limit: int = 100) -> list[dict]:
-    async def _load() -> list[dict]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            return await list_paper_order_events(session, session_id, limit=limit)
-
-    return await _run_pg_coro(_load)
-
-
-async def aget_paper_positions(
-    session_id: str | None = None,
-    *,
-    open_only: bool = True,
-) -> list[dict]:
-    async def _load() -> list[dict]:
-        sessionmaker = get_sessionmaker()
-        async with sessionmaker() as session:
-            query = select(PaperPosition)
-            if open_only:
-                query = query.where(PaperPosition.closed_at.is_(None))
-            if session_id:
-                query = query.where(PaperPosition.session_id == session_id)
-            query = query.order_by(PaperPosition.opened_at.desc())
-            result = await session.execute(query)
-            rows = result.scalars().all()
-
-            symbol_ids = sorted({row.symbol_id for row in rows})
-            symbol_map: dict[int, str] = {}
-            if symbol_ids:
-                symbol_result = await session.execute(
-                    select(RefSymbol.symbol_id, RefSymbol.symbol).where(
-                        RefSymbol.symbol_id.in_(symbol_ids)
-                    )
-                )
-                symbol_map = {
-                    symbol_id: str(symbol).strip()
-                    for symbol_id, symbol in symbol_result.all()
-                    if symbol is not None and str(symbol).strip()
-                }
-
-            open_symbol_ids = sorted(
-                {
-                    row.symbol_id
-                    for row in rows
-                    if row.closed_at is None and row.symbol_id is not None
-                }
-            )
-            latest_close_map: dict[int, float] = {}
-            if open_symbol_ids:
-                latest_dates = (
-                    select(
-                        MdOhlcvAdj.symbol_id.label("symbol_id"),
-                        func.max(MdOhlcvAdj.trading_date).label("max_date"),
-                    )
-                    .where(MdOhlcvAdj.symbol_id.in_(open_symbol_ids))
-                    .group_by(MdOhlcvAdj.symbol_id)
-                    .subquery()
-                )
-                close_result = await session.execute(
-                    select(MdOhlcvAdj.symbol_id, MdOhlcvAdj.close_adj).join(
-                        latest_dates,
-                        and_(
-                            MdOhlcvAdj.symbol_id == latest_dates.c.symbol_id,
-                            MdOhlcvAdj.trading_date == latest_dates.c.max_date,
-                        ),
-                    )
-                )
-                latest_close_map = {
-                    symbol_id: float(close_adj)
-                    for symbol_id, close_adj in close_result.all()
-                    if close_adj is not None
-                }
-
-            return [
-                {
-                    "position_id": row.position_id,
-                    "session_id": row.session_id,
-                    "symbol_id": row.symbol_id,
-                    "symbol": symbol_map.get(row.symbol_id),
-                    "opened_at": row.opened_at.isoformat() if row.opened_at else None,
-                    "closed_at": row.closed_at.isoformat() if row.closed_at else None,
-                    "avg_entry": float(row.avg_entry) if row.avg_entry is not None else None,
-                    "avg_exit": float(row.avg_exit) if row.avg_exit is not None else None,
-                    "qty": float(row.qty) if row.qty is not None else None,
-                    "pnl": float(row.pnl) if row.pnl is not None else None,
-                    "market_price": latest_close_map.get(row.symbol_id),
-                    "unrealized_pnl": (
-                        (float(latest_close_map[row.symbol_id]) - float(row.avg_entry))
-                        * float(row.qty)
-                        if row.closed_at is None
-                        and row.symbol_id in latest_close_map
-                        and row.avg_entry is not None
-                        and row.qty is not None
-                        else None
-                    ),
-                    "state": row.state,
-                    "metadata_json": row.metadata_json or {},
-                }
-                for row in rows
-            ]
-
-    return await _run_pg_coro(_load)
 
 
 _experiment_callbacks: list = []

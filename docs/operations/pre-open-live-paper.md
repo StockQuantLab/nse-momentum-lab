@@ -1,7 +1,13 @@
 # Pre-Open Live Paper Checklist
 
 Use this checklist before starting a live paper session. It is the operational version of the
-paper-trading readiness workflow.
+paper-trading readiness workflow for the v2 engine (`nseml-paper`).
+
+> **v2 engine key behaviors**
+> - Sessions are **idempotent**: `prepare` returns the existing session if one already exists for the same strategy/date/mode — safe to re-run after any interruption.
+> - Each 5-minute bar's DB writes are **atomic**: a mid-bar crash rolls back the partial bar; on resume the bar is replayed cleanly.
+> - Crash recovery **flattens open positions** at last-known mark prices before marking the session FAILED. The dashboard shows correct P&L after recovery.
+> - Signal rows are written to `paper_session_signals` at seeding time, so the full signal identity is preserved through entry → hold → exit and is queryable for audit.
 
 ## Previous Day
 
@@ -15,56 +21,134 @@ paper-trading readiness workflow.
 
 ## Pre-Open
 
-1. Run the readiness check for the intended trade date:
-   ```bash
-   doppler run -- uv run nseml-paper daily-prepare --trade-date YYYY-MM-DD --mode live --all-symbols
-   ```
-2. Read the verdict:
-   - `READY` means the selected universe has prior-day daily and 5-minute coverage.
-   - `OBSERVE_ONLY` means partial coverage exists and the session can still start in
-     observe-only mode.
-   - `BLOCKED` means the universe is missing required prior-day coverage.
-3. If `READY`, start the live paper session:
-   ```bash
-   doppler run -- uv run nseml-paper daily-live --trade-date YYYY-MM-DD --all-symbols --watchlist --run
-   ```
-   For the four threshold variants, use explicit versioned session ids so each stream is isolated:
-   ```bash
-   doppler run -- uv run nseml-paper daily-live --session-id paper-thresholdbreakout-thr-0p04-watchlist-YYYY-MM-DD-live-vN --trade-date YYYY-MM-DD --strategy thresholdbreakout --strategy-params '{"breakout_threshold":0.04}' --all-symbols --watchlist --run
-   doppler run -- uv run nseml-paper daily-live --session-id paper-thresholdbreakout-thr-0p02-watchlist-YYYY-MM-DD-live-vN --trade-date YYYY-MM-DD --strategy thresholdbreakout --strategy-params '{"breakout_threshold":0.02}' --all-symbols --watchlist --run
-   doppler run -- uv run nseml-paper daily-live --session-id paper-thresholdbreakdown-thr-0p04-watchlist-YYYY-MM-DD-live-vN --trade-date YYYY-MM-DD --strategy thresholdbreakdown --strategy-params '{"breakout_threshold":0.04}' --all-symbols --watchlist --run
-   doppler run -- uv run nseml-paper daily-live --session-id paper-thresholdbreakdown-thr-0p02-watchlist-YYYY-MM-DD-live-vN --trade-date YYYY-MM-DD --strategy thresholdbreakdown --strategy-params '{"breakout_threshold":0.02}' --all-symbols --watchlist --run
-   ```
-4. If `OBSERVE_ONLY`, decide whether to narrow the symbol list or run the session in
-   observe-only mode.
+### Step 1: Ensure data freshness
+
+```bash
+doppler run -- uv run nseml-kite-ingest --today
+doppler run -- uv run nseml-build-features --since YYYY-MM-DD
+doppler run -- uv run nseml-market-monitor --incremental --since YYYY-MM-DD
+doppler run -- uv run nseml-db-verify
+```
+
+### Step 2: Prepare paper sessions
+
+`prepare` is idempotent — if a session already exists for the same strategy/date/mode, it returns that session. Safe to re-run on interruption.
+
+```bash
+# Single session (e.g. breakout 4%)
+doppler run -- uv run nseml-paper prepare \
+  --strategy thresholdbreakout \
+  --mode live \
+  --trade-date YYYY-MM-DD \
+  --portfolio-value 1000000
+
+# With threshold override (2%)
+doppler run -- uv run nseml-paper prepare \
+  --strategy thresholdbreakout \
+  --mode live \
+  --trade-date YYYY-MM-DD \
+  --metadata '{"breakout_threshold":0.02}'
+```
+
+Daily shortcut (auto-fills today's date):
+
+```bash
+doppler run -- uv run nseml-paper daily-prepare --strategy thresholdbreakout --mode live
+```
+
+For four threshold variants, use `plan`:
+
+```bash
+doppler run -- uv run nseml-paper plan \
+  --strategy thresholdbreakout \
+  --trade-date YYYY-MM-DD \
+  --symbols RELIANCE,TCS,INFY \
+  --variants 4
+```
+
+### Step 3: Start live sessions
+
+```bash
+# Auto-discovers session by strategy + date
+doppler run -- uv run nseml-paper live --strategy thresholdbreakout --trade-date YYYY-MM-DD
+
+# Or with explicit session id
+doppler run -- uv run nseml-paper live --session-id <SESSION_ID>
+```
+
+Daily shortcut:
+
+```bash
+doppler run -- uv run nseml-paper daily-live --strategy thresholdbreakout
+```
 
 ## Live Checks
 
-Use compact status for operator checks instead of the full session payload:
+Use status for operator checks:
 
 ```bash
-doppler run -- uv run nseml-paper status --summary --status ACTIVE
-doppler run -- uv run nseml-paper status --session-id <SESSION_ID> --summary
+# List all active sessions
+doppler run -- uv run nseml-paper status --status ACTIVE
+
+# Full JSON for a specific session
+doppler run -- uv run nseml-paper status --session-id <SESSION_ID>
 ```
 
-Healthy signals for a running session:
+Fields to monitor in session JSON:
 
 - `status = ACTIVE`
-- `feed_state.status = CONNECTED`
-- non-zero `symbol_count`
-- non-zero `queue_signals`
-- non-zero `token_count`
+- `open_positions > 0` (after market open once positions are taken)
+- `closed_positions` growing after exits
+
+## Emergency Commands
+
+```bash
+# Pause an active session (stops entry but holds positions)
+doppler run -- uv run nseml-paper pause --strategy thresholdbreakout --mode live --trade-date YYYY-MM-DD
+
+# Resume a paused session
+doppler run -- uv run nseml-paper resume --session-id <SESSION_ID>
+
+# Flatten all open positions immediately
+doppler run -- uv run nseml-paper flatten --session-id <SESSION_ID>
+
+# Stop session (mark COMPLETED)
+doppler run -- uv run nseml-paper stop --session-id <SESSION_ID>
+```
 
 ## Required Readiness Signals
 
-- Valid Kite credentials are present.
+- Valid Kite credentials are present in Doppler (`KITE_ACCESS_TOKEN` fresh).
 - `nseml-db-verify` passes.
 - The selected universe has prior-day `v_daily` and `v_5min` coverage.
-- The watchlist query returns a non-zero candidate set when `--watchlist` is used.
-- The live session can resolve a non-zero instrument token count.
-- Walk-forward is not required for live paper or replay startup.
 
 ## What This Does Not Do
 
 - It does not run a backtest.
 - It does not guarantee that every intraday live feed will be non-empty after open.
+- It does not check walk-forward gate (v2 engine does not require walk-forward validation).
+
+## Crash Recovery
+
+If a live session crashes mid-day:
+
+1. Open positions are automatically flattened at last-known mark prices in the DB.
+2. The session is marked `FAILED`.
+3. Inspect the session:
+   ```bash
+   doppler run -- uv run nseml-paper status --session-id <SESSION_ID>
+   ```
+4. To resume, re-run `prepare` (returns the same session) then `live`:
+   ```bash
+   doppler run -- uv run nseml-paper prepare --strategy thresholdbreakout --mode live --trade-date YYYY-MM-DD
+   doppler run -- uv run nseml-paper live --strategy thresholdbreakout --trade-date YYYY-MM-DD
+   ```
+   The engine resumes from the last committed bar checkpoint — no bars are double-processed.
+
+## Dashboard
+
+The `/paper_ledger` page shows:
+- Session summary (status, open/closed position counts, realized P&L)
+- Signal ledger (`paper_session_signals`) with entry mode, selection rank/score
+- Open and closed positions with full order/fill history
+- Alert log (Telegram delivery status, errors redacted)

@@ -86,15 +86,7 @@ class KiteWriter:
         mode: str = "append",
         save_raw: bool = False,
     ) -> int:
-        effective_start, skip_fetch = self._effective_fetch_window(
-            dataset="5min",
-            symbol=symbol,
-            start_date=start_date,
-            end_date=end_date,
-        )
-        if skip_fetch:
-            return 0
-        frame = self.fetcher.fetch_5min_ohlcv(symbol, effective_start, end_date)
+        frame = self.fetcher.fetch_5min_ohlcv(symbol, start_date, end_date)
         if frame.is_empty():
             return 0
         if save_raw:
@@ -152,6 +144,7 @@ class KiteWriter:
         if frame.is_empty():
             return pl.DataFrame(schema=PARQUET_5MIN_DTYPE)
         frame = self._normalize_ist_candle_time(frame)
+        frame = self._filter_session_candles(frame)
         frame = frame.cast(PARQUET_5MIN_DTYPE, strict=False)
         return frame.sort(["symbol", "candle_time"])
 
@@ -178,19 +171,41 @@ class KiteWriter:
     ) -> tuple[date, bool]:
         if start_date > end_date:
             return start_date, True
-        existing_max = self._get_existing_max_date(dataset=dataset, symbol=symbol)
-        if existing_max is None or existing_max < start_date:
+        existing_range = self._get_existing_date_range(dataset=dataset, symbol=symbol)
+        if existing_range is None:
             return start_date, False
-        if existing_max >= end_date:
-            return end_date, True
-        return date.fromordinal(existing_max.toordinal() + 1), False
+        existing_min, existing_max = existing_range
+        # Full coverage: existing data spans the entire requested range
+        if existing_min is not None and existing_max is not None:
+            if existing_min <= start_date and existing_max >= end_date:
+                return end_date, True
+        # No overlap: requested range is entirely before existing data
+        if existing_min is not None and end_date < existing_min:
+            return start_date, False
+        # No overlap: requested range is entirely after existing data
+        if existing_max is not None and start_date > existing_max:
+            return start_date, False
+        # Trailing append: start is within existing, end extends beyond
+        if existing_max is not None and start_date <= existing_max < end_date:
+            return date.fromordinal(existing_max.toordinal() + 1), False
+        # Default: fetch full range (gap-fill or partial overlap)
+        return start_date, False
 
-    def _get_existing_max_date(self, *, dataset: str, symbol: str) -> date | None:
+    def _get_existing_date_range(
+        self, *, dataset: str, symbol: str
+    ) -> tuple[date | None, date | None] | None:
         if dataset == "daily":
             path = PARQUET_DIR / "daily" / symbol / KITE_DAILY_FILENAME
             if not path.exists():
                 return None
-            frame = pl.scan_parquet(path).select(pl.max("date").alias("max_date")).collect()
+            frame = (
+                pl.scan_parquet(path, extra_columns="ignore")
+                .select(
+                    pl.min("date").alias("min_date"),
+                    pl.max("date").alias("max_date"),
+                )
+                .collect()
+            )
         else:
             symbol_dir = PARQUET_DIR / "5min" / symbol
             if not symbol_dir.exists():
@@ -199,13 +214,16 @@ class KiteWriter:
             if not files:
                 return None
             frame = (
-                pl.scan_parquet([str(file) for file in files])
-                .select(pl.max("date").alias("max_date"))
+                pl.scan_parquet([str(file) for file in files], extra_columns="ignore")
+                .select(
+                    pl.min("date").alias("min_date"),
+                    pl.max("date").alias("max_date"),
+                )
                 .collect()
             )
         if frame.is_empty():
             return None
-        return frame.get_column("max_date")[0]
+        return (frame["min_date"][0], frame["max_date"][0])
 
     def _merge_existing(
         self,
@@ -219,7 +237,7 @@ class KiteWriter:
         if mode == "overwrite" or not path.exists():
             return new_rows.unique(subset=subset, keep="last").sort(sort_columns)
 
-        existing = pl.read_parquet(path)
+        existing = pl.read_parquet(path, columns=list(new_rows.columns))
         existing = self._normalize_ist_candle_time(existing)
         append_key = sort_columns[-1]
         if not existing.is_empty() and not new_rows.is_empty():
@@ -240,6 +258,21 @@ class KiteWriter:
                 None
             )
         return frame.with_columns(candle_expr.cast(PARQUET_5MIN_DTYPE["candle_time"], strict=False))
+
+    def _filter_session_candles(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """Drop 5-min candles outside the NSE regular session (09:15-15:30 IST).
+
+        Some Kite API responses include pre-open or post-close candles, and
+        certain symbols return UTC-shifted timestamps.  Filtering at ingestion
+        prevents both cases from contaminating the data lake.
+        """
+        if "candle_time" not in frame.columns or frame.is_empty():
+            return frame
+        candle_time = pl.col("candle_time")
+        return frame.filter(
+            candle_time.dt.time() >= pl.time(9, 15),
+            candle_time.dt.time() <= pl.time(15, 30),
+        )
 
     def _write_parquet(self, path: Path, frame: pl.DataFrame) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)

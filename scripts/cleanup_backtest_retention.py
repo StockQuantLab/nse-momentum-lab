@@ -27,10 +27,9 @@ from typing import Any
 import psycopg
 
 from nse_momentum_lab.config import get_settings
-from nse_momentum_lab.db.core import get_sessionmaker
 from nse_momentum_lab.db.market_db import DUCKDB_FILE, MarketDataDB
-from nse_momentum_lab.db.paper import list_paper_sessions
 from nse_momentum_lab.services.ingest.minio import MinioArtifactStore
+from nse_momentum_lab.services.paper.db.paper_db import PaperDB
 
 
 @dataclass(frozen=True)
@@ -190,9 +189,11 @@ def _collect_preserved_walk_forward_exp_ids(
 
 
 async def _load_walk_forward_sessions() -> list[dict[str, Any]]:
-    sessionmaker = get_sessionmaker()
-    async with sessionmaker() as db_session:
-        sessions = await list_paper_sessions(db_session, limit=1000)
+    db = PaperDB("data/paper.duckdb")
+    try:
+        sessions = db.list_sessions(limit=1000)
+    finally:
+        db.close()
     return sessions
 
 

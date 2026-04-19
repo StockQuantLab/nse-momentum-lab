@@ -31,7 +31,7 @@ from apps.nicegui.pages.strategy_analysis import strategy_page
 from apps.nicegui.pages.scans import scans_page
 from apps.nicegui.pages.data_quality import data_quality_page
 from apps.nicegui.pages.pipeline import pipeline_page
-from apps.nicegui.pages.paper_ledger import paper_ledger_page
+from apps.nicegui.pages.paper_ledger_v2 import paper_ledger_v2_page
 from apps.nicegui.pages.daily_summary import daily_summary_page
 from apps.nicegui.pages.market_monitor import market_monitor_page
 from apps.nicegui.state import shutdown_dashboard_resources
@@ -46,7 +46,7 @@ ui.page("/strategy")(strategy_page)
 ui.page("/scans")(scans_page)
 ui.page("/data_quality")(data_quality_page)
 ui.page("/pipeline")(pipeline_page)
-ui.page("/paper_ledger")(paper_ledger_page)
+ui.page("/paper_ledger")(paper_ledger_v2_page)
 ui.page("/daily_summary")(daily_summary_page)
 ui.page("/market_monitor")(market_monitor_page)
 

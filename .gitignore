@@ -71,3 +71,4 @@ package-lock.json
 
 # Doppler / coverage
 .coverage
+.precommit-home/

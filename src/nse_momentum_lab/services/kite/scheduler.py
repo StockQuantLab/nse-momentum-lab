@@ -9,6 +9,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from nse_momentum_lab.db.market_db import get_market_db
 from nse_momentum_lab.services.kite.auth import KiteAuth, get_kite_auth
 from nse_momentum_lab.services.kite.writer import KiteWriter, get_kite_writer
@@ -22,6 +24,19 @@ PARQUET_DAILY_DIR = PROJECT_ROOT / "data" / "parquet" / "daily"
 CHECKPOINT_FLUSH_EVERY = 25
 PROGRESS_LOG_EVERY = 10
 BACKFILL_START_DATE = date(2025, 4, 1)
+MAX_FETCH_RETRIES = 3
+RETRY_BACKOFF_BASE = 2.0  # seconds; doubles each attempt (2s, 4s, ...)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True for API errors worth retrying (rate limits, server errors, timeouts)."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 429 or status >= 500
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.ConnectError)):
+        return True
+    return False
+
 
 LOCK_FILE_PATH = PROJECT_ROOT / "data" / "raw" / "kite" / "checkpoints" / ".ingestion.lock"
 
@@ -332,22 +347,14 @@ class KiteScheduler:
                     self._log_progress(dataset, summary, len(pending_symbols), started_at)
                     continue
 
-                if dataset is IngestionDataset.DAILY:
-                    records = self.writer.fetch_and_write_daily(
-                        symbol=symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        mode=mode,
-                        save_raw=save_raw,
-                    )
-                else:
-                    records = self.writer.fetch_and_write_5min(
-                        symbol=symbol,
-                        start_date=start_date,
-                        end_date=end_date,
-                        mode=mode,
-                        save_raw=save_raw,
-                    )
+                records = self._fetch_with_retry(
+                    dataset=dataset,
+                    symbol=symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    mode=mode,
+                    save_raw=save_raw,
+                )
 
                 if records > 0:
                     summary["succeeded"] += 1
@@ -396,6 +403,54 @@ class KiteScheduler:
         )
         return summary
 
+    def _fetch_with_retry(
+        self,
+        *,
+        dataset: IngestionDataset,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+        mode: str,
+        save_raw: bool,
+    ) -> int:
+        """Fetch and write data with exponential-backoff retry for transient errors."""
+        last_exc: Exception | None = None
+        for attempt in range(1, MAX_FETCH_RETRIES + 1):
+            try:
+                if dataset is IngestionDataset.DAILY:
+                    return self.writer.fetch_and_write_daily(
+                        symbol=symbol,
+                        start_date=start_date,
+                        end_date=end_date,
+                        mode=mode,
+                        save_raw=save_raw,
+                    )
+                return self.writer.fetch_and_write_5min(
+                    symbol=symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    mode=mode,
+                    save_raw=save_raw,
+                )
+            except Exception as exc:
+                last_exc = exc
+                if attempt < MAX_FETCH_RETRIES and _is_transient_error(exc):
+                    backoff = RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
+                    logger.warning(
+                        "Kite %s transient error for %s (attempt %d/%d), retrying in %.1fs: %s",
+                        dataset.value,
+                        symbol,
+                        attempt,
+                        MAX_FETCH_RETRIES,
+                        backoff,
+                        exc,
+                    )
+                    time.sleep(backoff)
+                else:
+                    raise
+        assert last_exc is not None
+        raise last_exc  # pragma: no cover — safeguard
+
     def _resolve_symbols(
         self,
         *,
@@ -416,31 +471,6 @@ class KiteScheduler:
                 len(kite_symbols),
             )
             return kite_symbols
-
-        if dataset is IngestionDataset.FIVE_MIN:
-            daily_window_symbols = self.get_symbols_from_daily_range(
-                start_date=start_date, end_date=end_date
-            )
-            kite_symbols = self.get_symbols_from_kite(exchange="NSE", segment="NSE")
-            if daily_window_symbols and kite_symbols:
-                kite_symbol_set = set(kite_symbols)
-                intersected = [
-                    symbol for symbol in daily_window_symbols if symbol in kite_symbol_set
-                ]
-                if intersected:
-                    logger.info(
-                        "Resolved Kite 5min ingestion universe via daily-window/current intersection: daily_window=%d current=%d selected=%d",
-                        len(daily_window_symbols),
-                        len(kite_symbols),
-                        len(intersected),
-                    )
-                    return intersected
-            if daily_window_symbols:
-                logger.info(
-                    "Resolved Kite 5min ingestion universe from daily-window symbols: %d",
-                    len(daily_window_symbols),
-                )
-                return daily_window_symbols
 
         local_symbols = self.get_symbols_from_local_parquet()
         kite_symbols = self.get_symbols_from_kite(exchange="NSE", segment="NSE")
@@ -465,21 +495,6 @@ class KiteScheduler:
             "Resolved Kite ingestion universe from current Kite instruments: %d", len(kite_symbols)
         )
         return kite_symbols
-
-    def get_symbols_from_daily_range(self, *, start_date: date, end_date: date) -> list[str]:
-        market_db = get_market_db(read_only=True)
-        if not getattr(market_db, "_has_daily", False):
-            return []
-        rows = market_db.con.execute(
-            """
-            SELECT DISTINCT symbol
-            FROM v_daily
-            WHERE date >= ? AND date <= ?
-            ORDER BY symbol
-            """,
-            [start_date, end_date],
-        ).fetchall()
-        return [str(row[0]).strip().upper() for row in rows if row and str(row[0]).strip()]
 
     def _checkpoint_path(
         self,
