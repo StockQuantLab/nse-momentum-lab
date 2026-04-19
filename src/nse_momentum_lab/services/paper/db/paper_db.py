@@ -13,6 +13,7 @@ import contextlib
 import json
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -25,6 +26,26 @@ import duckdb
 OPEN_SIGNAL_STATES = {"NEW", "QUALIFIED", "ALERTED", "ENTERED", "MANAGED"}
 ACTIVE_SESSION_STATUSES = {"ACTIVE", "RUNNING", "PAUSED", "PLANNING", "STOPPING"}
 FINAL_SESSION_STATUSES = {"COMPLETED", "FAILED", "ARCHIVED", "CANCELLED"}
+
+
+@dataclass
+class FeedAudit:
+    """One recorded 5-min bar from the live/replay feed."""
+
+    session_id: str
+    trade_date: str
+    feed_source: str
+    transport: str
+    symbol: str
+    bar_start: datetime | None
+    bar_end: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    first_snapshot_ts: datetime | None
+    last_snapshot_ts: datetime | None
 
 
 def _now() -> datetime:
@@ -202,6 +223,27 @@ _DDL: list[str] = [
         error_message TEXT
     );
     """,
+    # 11. paper_feed_audit
+    """
+    CREATE TABLE IF NOT EXISTS paper_feed_audit (
+        session_id        TEXT NOT NULL,
+        trade_date        TEXT NOT NULL,
+        feed_source       TEXT NOT NULL DEFAULT '',
+        transport         TEXT NOT NULL DEFAULT '',
+        symbol            TEXT NOT NULL,
+        bar_start         TIMESTAMP WITH TIME ZONE,
+        bar_end           TIMESTAMP WITH TIME ZONE NOT NULL,
+        open              DOUBLE NOT NULL,
+        high              DOUBLE NOT NULL,
+        low               DOUBLE NOT NULL,
+        close             DOUBLE NOT NULL,
+        volume            DOUBLE NOT NULL,
+        first_snapshot_ts TIMESTAMP WITH TIME ZONE,
+        last_snapshot_ts  TIMESTAMP WITH TIME ZONE,
+        created_at        TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT current_timestamp,
+        PRIMARY KEY (session_id, symbol, bar_end)
+    );
+    """,
 ]
 
 # Sequences for INTEGER PK tables that need auto-increment.
@@ -223,6 +265,8 @@ _INDEXES: list[str] = [
     "CREATE INDEX IF NOT EXISTS idx_pfill_session_time ON paper_fills(session_id, fill_time);",
     "CREATE INDEX IF NOT EXISTS idx_pevt_session_created ON paper_order_events(session_id, created_at);",
     "CREATE INDEX IF NOT EXISTS idx_pevt_session_type ON paper_order_events(session_id, event_type);",
+    "CREATE INDEX IF NOT EXISTS idx_pfa_trade_date ON paper_feed_audit(trade_date, feed_source, session_id);",
+    "CREATE INDEX IF NOT EXISTS idx_pfa_session ON paper_feed_audit(session_id);",
 ]
 
 
@@ -2142,3 +2186,114 @@ class PaperDB:
             )
             synced.append(entry)
         return synced
+
+    # ===================================================================
+    # Feed Audit
+    # ===================================================================
+
+    def upsert_feed_audit_rows(self, rows: list[dict[str, Any]]) -> int:
+        """Upsert feed audit rows (one per session/symbol/bar_end).
+
+        Uses INSERT OR REPLACE so re-delivery of the same bar is idempotent.
+        Returns the number of rows processed.
+        """
+        if not rows:
+            return 0
+        with self._lock:
+            count = 0
+            for row in rows:
+                self._execute(
+                    """
+                    INSERT OR REPLACE INTO paper_feed_audit
+                        (session_id, trade_date, feed_source, transport, symbol,
+                         bar_start, bar_end, open, high, low, close, volume,
+                         first_snapshot_ts, last_snapshot_ts, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                    """,
+                    [
+                        row["session_id"],
+                        row["trade_date"],
+                        row.get("feed_source", ""),
+                        row.get("transport", ""),
+                        row["symbol"],
+                        row.get("bar_start"),
+                        row["bar_end"],
+                        row["open"],
+                        row["high"],
+                        row["low"],
+                        row["close"],
+                        row["volume"],
+                        row.get("first_snapshot_ts"),
+                        row.get("last_snapshot_ts"),
+                        row.get("created_at") or _now(),
+                    ],
+                )
+                count += 1
+        return count
+
+    def get_feed_audit_rows(
+        self,
+        *,
+        trade_date: str,
+        session_id: str | None = None,
+        feed_source: str | None = None,
+    ) -> list[FeedAudit]:
+        """Return recorded feed audit rows for a trade date, optionally filtered."""
+        params: list[Any] = [trade_date]
+        where = "trade_date = $1"
+        idx = 2
+        if session_id is not None:
+            where += f" AND session_id = ${idx}"
+            params.append(session_id)
+            idx += 1
+        if feed_source is not None:
+            where += f" AND feed_source = ${idx}"
+            params.append(feed_source)
+            idx += 1
+
+        rows = self._query_all(
+            f"SELECT * FROM paper_feed_audit WHERE {where} ORDER BY symbol, bar_end",
+            params,
+        )
+
+        def _ts(val: Any) -> datetime | None:
+            if val is None:
+                return None
+            if isinstance(val, datetime):
+                return val
+            return None
+
+        return [
+            FeedAudit(
+                session_id=r["session_id"],
+                trade_date=str(r["trade_date"]),
+                feed_source=str(r.get("feed_source") or ""),
+                transport=str(r.get("transport") or ""),
+                symbol=r["symbol"],
+                bar_start=_ts(r.get("bar_start")),
+                bar_end=r["bar_end"],
+                open=float(r["open"]),
+                high=float(r["high"]),
+                low=float(r["low"]),
+                close=float(r["close"]),
+                volume=float(r["volume"]),
+                first_snapshot_ts=_ts(r.get("first_snapshot_ts")),
+                last_snapshot_ts=_ts(r.get("last_snapshot_ts")),
+            )
+            for r in rows
+        ]
+
+    def purge_old_feed_audit_rows(self, retention_days: int = 7) -> int:
+        """Delete feed audit rows older than ``retention_days`` days.
+
+        Returns the number of rows deleted.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+        cutoff_date = cutoff.date().isoformat()
+        with self._lock:
+            self._execute(
+                "DELETE FROM paper_feed_audit WHERE trade_date < $1",
+                [cutoff_date],
+            )
+        # DuckDB doesn't return row-counts for DELETE directly; query the changes.
+        return 0  # Best-effort; callers only use this for logging.

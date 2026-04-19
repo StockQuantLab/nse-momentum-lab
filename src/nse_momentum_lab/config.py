@@ -73,6 +73,9 @@ class Settings(BaseSettings):
     # Broker order execution guard (disabled by default)
     broker_order_execution_enabled: bool = False
 
+    # Feed audit retention (days). Matches FEED_AUDIT_RETENTION_DAYS / PAPER_FEED_AUDIT_RETENTION_DAYS.
+    feed_audit_retention_days: int = 7
+
     # Data lake contract (DuckDB + Parquet)
     data_lake_mode: str = "local"  # local|minio
     data_lake_local_dir: str = "data/parquet"

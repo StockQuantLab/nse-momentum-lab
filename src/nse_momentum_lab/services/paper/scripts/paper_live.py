@@ -39,6 +39,7 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertType,
     get_alert_config,
 )
+from nse_momentum_lab.services.paper.scripts.paper_feed_audit import record_closed_candles
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,17 @@ async def run_live_session(
 
                 for bar_end in sorted(bars_by_end):
                     bar_candles = bars_by_end[bar_end]
+
+                    # Record feed audit (before engine conversion so ClosedCandle fields are intact).
+                    record_closed_candles(
+                        bar_candles=bar_candles,
+                        session_id=session_id,
+                        trade_date=str(session.get("trade_date", trade_date)),
+                        feed_source="replay" if local_feed else "kite",
+                        paper_db=paper_db,
+                        transport="local" if local_feed else "websocket",
+                    )
+
                     candle_dicts = [
                         {
                             "symbol": c.symbol,
@@ -354,6 +366,14 @@ async def run_live_session(
             if created_adapter:
                 ticker_adapter.close()
         await alert_dispatcher.shutdown()
+        # Purge old feed audit rows (retention housekeeping).
+        try:
+            from nse_momentum_lab.config import get_settings
+
+            retention = get_settings().feed_audit_retention_days
+            paper_db.purge_old_feed_audit_rows(retention)
+        except Exception:
+            logger.exception("feed_audit: purge failed session=%s", session_id)
         paper_db.close()
         market_db.close()
 

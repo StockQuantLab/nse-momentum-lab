@@ -32,6 +32,7 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertDispatcher,
     get_alert_config,
 )
+from nse_momentum_lab.services.paper.scripts.paper_feed_audit import record_closed_candles
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,16 @@ async def run_replay(
 
                 bar_candles = bars_by_end[bar_end]
 
+                # Record feed audit before engine conversion.
+                record_closed_candles(
+                    bar_candles=bar_candles,
+                    session_id=session_id,
+                    trade_date=trade_date,
+                    feed_source="replay",
+                    paper_db=paper_db,
+                    transport="local",
+                )
+
                 # Convert ClosedCandle to dict for engine.
                 candle_dicts = [
                     {
@@ -204,6 +215,15 @@ async def run_replay(
 
         # Finalize.
         await complete_session(session_id=session_id, paper_db=paper_db, status=final_status)
+
+        # Purge old feed audit rows (retention housekeeping).
+        try:
+            from nse_momentum_lab.config import get_settings
+
+            retention = get_settings().feed_audit_retention_days
+            paper_db.purge_old_feed_audit_rows(retention)
+        except Exception:
+            logger.exception("feed_audit: purge failed session=%s", session_id)
 
         adapter.close()
 
