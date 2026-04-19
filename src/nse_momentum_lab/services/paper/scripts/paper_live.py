@@ -37,8 +37,8 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertDispatcher,
     AlertEvent,
     AlertType,
+    get_alert_config,
 )
-from nse_momentum_lab.services.paper.notifiers.telegram import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -48,19 +48,10 @@ _STALE_TIMEOUT = 300  # seconds
 _WEBSOCKET_RECOVERY_AFTER_SEC = 20.0
 
 
-def _build_alert_dispatcher(
-    paper_db: PaperDB | None = None,
-    *,
-    bot_token: str | None = None,
-    chat_ids: list[str] | None = None,
-) -> AlertDispatcher:
-    """Build an AlertDispatcher with optional Telegram notifier."""
-    dispatcher = AlertDispatcher(paper_db=paper_db)
-    if bot_token and chat_ids:
-        notifier = TelegramNotifier(bot_token=bot_token, chat_ids=chat_ids)
-        if notifier.enabled:
-            dispatcher.add_notifier(notifier)
-    return dispatcher
+def _build_alert_dispatcher(paper_db: PaperDB | None = None) -> AlertDispatcher:
+    """Build an AlertDispatcher wired from Doppler settings (TELEGRAM_BOT_TOKEN/CHAT_IDS)."""
+    config = get_alert_config()
+    return AlertDispatcher(paper_db=paper_db, config=config)
 
 
 async def run_live_session(
@@ -71,19 +62,13 @@ async def run_live_session(
     ticker_adapter: KiteTickerAdapter | LocalTickerAdapter | None = None,
     api_key: str | None = None,
     access_token: str | None = None,
-    telegram_bot_token: str | None = None,
-    telegram_chat_ids: list[str] | None = None,
     poll_interval: float = _POLL_INTERVAL,
     max_cycles: int | None = None,
 ) -> dict[str, Any]:
     """Run a paper trading session — live or replay."""
     paper_db = PaperDB(paper_db_path)
     market_db = MarketDataDB(Path(market_db_path))
-    alert_dispatcher = _build_alert_dispatcher(
-        paper_db,
-        bot_token=telegram_bot_token,
-        chat_ids=telegram_chat_ids,
-    )
+    alert_dispatcher = _build_alert_dispatcher(paper_db)
 
     # Seed setup rows from market DB into runtime state.
     runtime_state = PaperRuntimeState()

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from nse_momentum_lab.services.kite.auth import KiteAuth
 
 
 def test_get_instrument_token_refreshes_only_once_per_exchange(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "nse_momentum_lab.services.kite.auth.get_settings",
+        lambda: SimpleNamespace(kite_api_key=None, kite_access_token=None),
+    )
     auth = KiteAuth()
     refresh_calls: list[str] = []
 

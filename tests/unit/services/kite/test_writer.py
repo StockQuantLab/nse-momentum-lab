@@ -35,7 +35,7 @@ def _fetch_daily_frame(
 
 
 def test_normalize_5min_frame_uses_naive_ist_timestamp() -> None:
-    writer = KiteWriter()
+    writer = KiteWriter(fetcher=SimpleNamespace())  # normalize tests don't use fetcher
     sample = pl.DataFrame(
         {
             "symbol": ["RELIANCE"],
@@ -56,7 +56,7 @@ def test_normalize_5min_frame_uses_naive_ist_timestamp() -> None:
 
 
 def test_normalize_ist_candle_time_converts_legacy_offset_to_naive_ist() -> None:
-    writer = KiteWriter()
+    writer = KiteWriter(fetcher=SimpleNamespace())  # normalize tests don't use fetcher
     frame = pl.DataFrame(
         {
             "symbol": ["RELIANCE"],
@@ -147,7 +147,7 @@ def test_fetch_and_write_daily_skips_same_day_rerun_when_already_present(monkeyp
 
 
 def test_normalize_5min_frame_filters_out_session_candles() -> None:
-    writer = KiteWriter()
+    writer = KiteWriter(fetcher=SimpleNamespace())  # normalize tests don't use fetcher
     sample = pl.DataFrame(
         {
             "symbol": ["RELIANCE"] * 4,

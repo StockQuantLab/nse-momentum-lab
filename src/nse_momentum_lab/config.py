@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     kite_login_url: str = "https://kite.zerodha.com/connect/login?v=3"
     kite_api_root: str = "https://api.kite.trade"
 
+    # Telegram alerts (optional — Doppler: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_IDS)
+    telegram_bot_token: str | None = None
+    telegram_chat_ids: str | None = None  # comma-separated chat IDs
+
     # Broker order execution guard (disabled by default)
     broker_order_execution_enabled: bool = False
 

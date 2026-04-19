@@ -28,6 +28,10 @@ from nse_momentum_lab.services.paper.engine.shared_engine import (
     seed_candidates_from_market_db,
 )
 from nse_momentum_lab.services.paper.feeds.local_ticker_adapter import LocalTickerAdapter
+from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
+    AlertDispatcher,
+    get_alert_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +47,7 @@ async def run_replay(
     """Run a paper replay session from start to finish."""
     paper_db = PaperDB(paper_db_path)
     market_db = MarketDataDB(Path(market_db_path))
+    alert_dispatcher = AlertDispatcher(paper_db=paper_db, config=get_alert_config())
 
     try:
         # Load session.
@@ -175,6 +180,7 @@ async def run_replay(
                     active_symbols=active_symbols,
                     feed_source="replay",
                     paper_db=paper_db,
+                    alert_dispatcher=alert_dispatcher,
                 )
 
                 active_symbols = result["active_symbols"]
@@ -222,6 +228,7 @@ async def run_replay(
         await complete_session(session_id=session_id, paper_db=paper_db, status="FAILED")
         return {"error": str(e), "session_id": session_id}
     finally:
+        await alert_dispatcher.shutdown()
         paper_db.close()
         market_db.close()
 
