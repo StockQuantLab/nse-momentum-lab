@@ -26,18 +26,29 @@ from apps.nicegui.components import (
     kpi_grid,
     page_layout,
     paginated_table,
+    safe_timer,
     SPACE_MD,
     theme_text_muted,
     theme_text_primary,
 )
-from nse_momentum_lab.services.paper.db.replica_consumer import ReplicaConsumer
+from nse_momentum_lab.db.versioned_replica_consumer import VersionedReplicaConsumer
 
 
-_REPLICA_PATH = str(_project_root / "data" / "paper_dashboard.duckdb")
+def _get_consumer() -> VersionedReplicaConsumer:
+    return VersionedReplicaConsumer(
+        replica_dir=_project_root / "data" / "paper_replica",
+        prefix="paper_replica",
+        fallback_path=_project_root / "data" / "paper_dashboard.duckdb",
+    )
 
 
-def _get_consumer() -> ReplicaConsumer:
-    return ReplicaConsumer(_REPLICA_PATH)
+def _to_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except TypeError, ValueError:
+        return None
 
 
 def _fmt_float(value: Any, digits: int = 2) -> str:
@@ -60,12 +71,12 @@ def _strategy_label(strategy: str | None) -> str:
     return labels.get(raw, str(strategy or "-"))
 
 
-def _load_sessions(consumer: ReplicaConsumer) -> list[dict[str, Any]]:
+def _load_sessions(consumer: VersionedReplicaConsumer) -> list[dict[str, Any]]:
     rows = consumer.execute("SELECT * FROM paper_sessions ORDER BY updated_at DESC")
     return rows if rows is not None else []
 
 
-def _load_positions(consumer: ReplicaConsumer, session_id: str) -> list[dict[str, Any]]:
+def _load_positions(consumer: VersionedReplicaConsumer, session_id: str) -> list[dict[str, Any]]:
     rows = consumer.execute(
         "SELECT * FROM paper_positions WHERE session_id = ? ORDER BY opened_at DESC",
         [session_id],
@@ -73,7 +84,7 @@ def _load_positions(consumer: ReplicaConsumer, session_id: str) -> list[dict[str
     return rows if rows is not None else []
 
 
-def _load_fills(consumer: ReplicaConsumer, session_id: str) -> list[dict[str, Any]]:
+def _load_fills(consumer: VersionedReplicaConsumer, session_id: str) -> list[dict[str, Any]]:
     rows = consumer.execute(
         "SELECT * FROM paper_fills WHERE session_id = ? ORDER BY fill_time DESC",
         [session_id],
@@ -82,7 +93,7 @@ def _load_fills(consumer: ReplicaConsumer, session_id: str) -> list[dict[str, An
 
 
 def _load_alerts(
-    consumer: ReplicaConsumer, session_id: str, limit: int = 50
+    consumer: VersionedReplicaConsumer, session_id: str, limit: int = 50
 ) -> list[dict[str, Any]]:
     rows = consumer.execute(
         "SELECT * FROM alert_log WHERE session_id = ? ORDER BY sent_at DESC LIMIT ?",
@@ -121,9 +132,9 @@ def _position_rows(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "direction": p.get("direction", "-"),
                 "state": p.get("state", "-"),
                 "qty": p.get("qty", 0),
-                "avg_entry": _fmt_float(p.get("avg_entry")),
-                "avg_exit": _fmt_float(p.get("avg_exit")),
-                "pnl": _fmt_float(p.get("pnl")),
+                "avg_entry": _to_float(p.get("avg_entry")),
+                "avg_exit": _to_float(p.get("avg_exit")),
+                "pnl": _to_float(p.get("pnl")),
                 "opened_at": str(p.get("opened_at", "-"))[:19],
             }
         )
@@ -138,8 +149,8 @@ def _fill_rows(fills: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "symbol": f.get("symbol", "-"),
                 "side": f.get("side", "-"),
                 "qty": f.get("qty", 0),
-                "price": _fmt_float(f.get("fill_price")),
-                "pnl": _fmt_float(f.get("pnl")),
+                "price": _to_float(f.get("fill_price")),
+                "pnl": _to_float(f.get("pnl")),
                 "fill_time": str(f.get("fill_time", "-"))[:19],
             }
         )
@@ -268,9 +279,27 @@ async def paper_ledger_v2_page() -> None:
                     },
                     {"name": "state", "label": "State", "field": "state", "sortable": True},
                     {"name": "qty", "label": "Qty", "field": "qty", "sortable": True},
-                    {"name": "avg_entry", "label": "Entry", "field": "avg_entry", "sortable": True},
-                    {"name": "avg_exit", "label": "Exit", "field": "avg_exit", "sortable": True},
-                    {"name": "pnl", "label": "P&L", "field": "pnl", "sortable": True},
+                    {
+                        "name": "avg_entry",
+                        "label": "Entry",
+                        "field": "avg_entry",
+                        "sortable": True,
+                        "format": "val => val == null ? '-' : val.toFixed(2)",
+                    },
+                    {
+                        "name": "avg_exit",
+                        "label": "Exit",
+                        "field": "avg_exit",
+                        "sortable": True,
+                        "format": "val => val == null ? '-' : val.toFixed(2)",
+                    },
+                    {
+                        "name": "pnl",
+                        "label": "P&L",
+                        "field": "pnl",
+                        "sortable": True,
+                        "format": "val => val == null ? '-' : val.toFixed(2)",
+                    },
                     {
                         "name": "opened_at",
                         "label": "Opened",
@@ -287,8 +316,18 @@ async def paper_ledger_v2_page() -> None:
                     {"name": "symbol", "label": "Symbol", "field": "symbol", "sortable": True},
                     {"name": "side", "label": "Side", "field": "side", "sortable": True},
                     {"name": "qty", "label": "Qty", "field": "qty"},
-                    {"name": "price", "label": "Price", "field": "price"},
-                    {"name": "pnl", "label": "P&L", "field": "pnl"},
+                    {
+                        "name": "price",
+                        "label": "Price",
+                        "field": "price",
+                        "format": "val => val == null ? '-' : val.toFixed(2)",
+                    },
+                    {
+                        "name": "pnl",
+                        "label": "P&L",
+                        "field": "pnl",
+                        "format": "val => val == null ? '-' : val.toFixed(2)",
+                    },
                     {"name": "fill_time", "label": "Time", "field": "fill_time", "sortable": True},
                 ]
                 paginated_table(fill_cols, _fill_rows(fills))
@@ -316,4 +355,4 @@ async def paper_ledger_v2_page() -> None:
         render_session()
 
         # Auto-refresh.
-        ui.timer(30, lambda: render_session())
+        safe_timer(30, lambda: render_session(), once=False)

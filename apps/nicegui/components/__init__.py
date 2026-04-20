@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -86,9 +87,33 @@ COLORS_CLEAN = {
     "gray": "#64748b",
 }
 
-# Current active theme (starts with Clean)
-THEME = THEME_CLEAN.copy()
-COLORS = COLORS_CLEAN.copy()
+# ---------------------------------------------------------------------------
+# Live theme proxy — always resolves to current theme without mutable dict state
+# ---------------------------------------------------------------------------
+_theme_mode = {"terminal": False}  # True = terminal, False = clean
+
+
+class _LivePalette(Mapping):
+    """Dynamic mapping proxy that always resolves against current theme mode."""
+
+    def __init__(self, getter: Callable[[], dict[str, str]]):
+        self._getter = getter
+
+    def __getitem__(self, key: str) -> str:
+        return self._getter()[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._getter())
+
+    def __len__(self) -> int:
+        return len(self._getter())
+
+    def as_dict(self) -> dict[str, str]:
+        return dict(self._getter())
+
+
+THEME = _LivePalette(lambda: THEME_TERMINAL if _theme_mode["terminal"] else THEME_CLEAN)
+COLORS = _LivePalette(lambda: COLORS_TERMINAL if _theme_mode["terminal"] else COLORS_CLEAN)
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +191,33 @@ def hex_to_rgba(hex_color: str, alpha: float) -> str:
     g = int(color[2:4], 16)
     b = int(color[4:6], 16)
     return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def safe_timer(delay: float, callback: Callable, once: bool = True) -> ui.timer:
+    """Create a ui.timer whose callback is guarded against deleted-client errors.
+
+    NiceGUI timers that fire after the browser tab closes or the user navigates
+    away raise ``RuntimeError('The client this element belongs to has been deleted.')``.
+    Wrapping the callback here prevents that error from propagating.
+    """
+    if inspect.iscoroutinefunction(callback):
+
+        async def _guarded_async() -> None:
+            try:
+                await callback()
+            except RuntimeError:
+                pass
+
+        return ui.timer(delay, _guarded_async, once=once)
+    else:
+
+        def _guarded() -> None:
+            try:
+                callback()
+            except RuntimeError:
+                pass
+
+        return ui.timer(delay, _guarded, once=once)
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +346,101 @@ TYPE_PRESET = {
     "nav_label": TYPE_PRESET_NAV_LABEL,
     "button": TYPE_PRESET_BUTTON,
 }
+
+# ---------------------------------------------------------------------------
+# Financial glossary — plain-English definitions for KPI tooltips
+# ---------------------------------------------------------------------------
+METRIC_GLOSSARY: dict[str, str] = {
+    "Calmar": "Annual return divided by worst drawdown. Above 2.0 is strong.",
+    "Win Rate": "Percentage of trades that made money. Low win rate can still be profitable if winners are much larger than losers.",
+    "Profit Factor": "Total money won divided by total money lost. Above 1.5 is good, above 2.0 is strong.",
+    "Max Drawdown": "Largest peak-to-trough drop in portfolio value. Shows worst-case scenario.",
+    "CAGR": "Compound Annual Growth Rate — smoothed yearly return as if growth were steady.",
+    "Total P/L": "Net profit or loss in rupees across all trades.",
+    "Total Return": "Percentage gain or loss on the starting capital.",
+    "R-Multiple": "Trade result measured in risk units. 1R = you gained what you risked. -1R = you lost what you risked.",
+    "Portfolio Base": "Starting capital the backtest assumes.",
+    "Trades": "Total number of completed trades (entry + exit).",
+    "Traded Symbols": "Number of different stocks that had at least one trade.",
+    "Sharpe": "Risk-adjusted return metric. Above 1.0 is good, above 2.0 is strong.",
+}
+
+EXIT_GLOSSARY: dict[str, str] = {
+    "TARGET": "Price reached the profit target.",
+    "INITIAL_SL": "Price hit the initial stop loss.",
+    "BREAKEVEN_SL": "Stop moved to entry — exited flat.",
+    "TRAILING_SL": "Trailing stop locked in profit.",
+    "TIME": "Position closed at market close.",
+    "CANDLE_EXIT": "Exited after a fixed number of candles.",
+    "DATA_INVALIDATION": "Price continuity guard triggered.",
+}
+
+# ---------------------------------------------------------------------------
+# Plotly resize guard — prevents errors when charts are in hidden tabs
+# ---------------------------------------------------------------------------
+_PLOTLY_RESIZE_GUARD_HTML = """
+<script>
+(() => {
+    if (window.__nsemlPlotlyResizeGuardInstalled) return;
+    window.__nsemlPlotlyResizeGuardInstalled = true;
+
+    const RESIZE_ERR = 'Resize must be passed a displayed plot div element';
+
+    const isDisplayed = (el) => {
+        if (!el || !el.isConnected) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    };
+
+    const wrapResize = (obj, key) => {
+        if (!obj || typeof obj[key] !== 'function') return;
+        const original = obj[key];
+        if (original.__nsemlWrappedResize) return;
+
+        const wrapped = function(gd, ...args) {
+            if (!isDisplayed(gd)) {
+                return Promise.resolve(gd);
+            }
+            try {
+                const result = original.call(this, gd, ...args);
+                if (result && typeof result.catch === 'function') {
+                    return result.catch((err) => {
+                        const msg = String(err && err.message ? err.message : err || '');
+                        if (msg.includes(RESIZE_ERR)) return gd;
+                        throw err;
+                    });
+                }
+                return result;
+            } catch (err) {
+                const msg = String(err && err.message ? err.message : err || '');
+                if (msg.includes(RESIZE_ERR)) return gd;
+                throw err;
+            }
+        };
+        wrapped.__nsemlWrappedResize = true;
+        obj[key] = wrapped;
+    };
+
+    const patchPlotly = () => {
+        if (window.Plotly) {
+            wrapResize(window.Plotly, 'resize');
+            wrapResize(window.Plotly, 'react');
+            wrapResize(window.Plotly, 'newPlot');
+            wrapResize(window.Plotly, 'restyle');
+        }
+    };
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => setTimeout(patchPlotly, 100));
+    } else {
+        setTimeout(patchPlotly, 100);
+    }
+    setTimeout(patchPlotly, 2000);
+})();
+</script>
+"""
 
 # ---------------------------------------------------------------------------
 # Navigation definition (single source of truth)
@@ -1170,8 +1317,9 @@ def page_layout(title: str, icon: str = "bar_chart"):
     # Inject themed CSS with variables
     ui.add_css(_get_themed_css())
 
-    # Inject keyboard shortcuts
+    # Inject keyboard shortcuts and Plotly resize guard
     ui.add_head_html(_KEYBINDINGS_HTML)
+    ui.add_head_html(_PLOTLY_RESIZE_GUARD_HTML)
 
     # Update page title for accessibility (A11Y-011)
     ui.run_javascript(f'document.title = "NSE Momentum Lab — {title}"')
@@ -1328,17 +1476,29 @@ def kpi_card(
     value: str | float | int,
     subtitle: str | None = None,
     icon: str = "info",
-    color: str = COLORS["primary"],
+    color: str | None = None,
 ) -> None:
-    """Render a single KPI card with a Material Design icon."""
+    """Render a single KPI card with a Material Design icon and optional glossary tooltip."""
+    card_color = color or COLORS["primary"]
+    tooltip_text = METRIC_GLOSSARY.get(title)
     with ui.column().classes("kpi-card gap-1"):
         with ui.row().classes("items-center gap-3"):
-            ui.icon(icon).classes("text-2xl").style(f"color: {color};")
-            ui.label(title).classes(TYPE_PRESET["kpi_label"]).style(
-                f"color: {THEME['text_secondary']};"
+            ui.icon(icon).classes("text-2xl").style(f"color: {card_color};")
+            title_label = (
+                ui.label(title)
+                .classes(TYPE_PRESET["kpi_label"])
+                .style(f"color: {THEME['text_secondary']};")
             )
-        # Use tabular numbers for data alignment
-        ui.label(str(value)).classes(f"{TYPE_PRESET['kpi_value']} mt-1").style(f"color: {color};")
+            if tooltip_text:
+                with title_label:
+                    ui.tooltip(tooltip_text).classes("text-sm").style(
+                        f"background: {THEME['surface']}; color: {THEME['text_primary']}; "
+                        f"border: 1px solid {THEME['surface_border']}; "
+                        "max-width: 300px; padding: 8px 12px;"
+                    )
+        ui.label(str(value)).classes(f"{TYPE_PRESET['kpi_value']} mt-1").style(
+            f"color: {card_color};"
+        )
         if subtitle:
             ui.label(subtitle).classes("text-xs").style(f"color: {THEME['text_muted']};")
 
@@ -1867,6 +2027,26 @@ def empty_state(
             )
 
 
+async def render_section_guarded(title: str, render_fn: Callable) -> None:
+    """Render a section and keep the page alive if the section fails.
+
+    Wraps section rendering in try/except, showing an empty_state instead
+    of crashing the entire page. Essential for multi-section dashboards
+    where each section runs independent queries.
+    """
+    try:
+        await render_fn()
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).exception("Section %s failed: %s", title, exc)
+        empty_state(
+            f"{title} — Error",
+            f"Could not load this section: {exc}",
+            icon="error_outline",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Page header
 # ---------------------------------------------------------------------------
@@ -1972,15 +2152,11 @@ def trade_table_with_filters(
             filtered = [r for r in filtered if r.get("exit_reason") == filters["exit_reason"]]
         if filters["min_pnl"] is not None:
             filtered = [
-                r
-                for r in filtered
-                if float(r.get("pnl_pct", 0).replace("%", "")) >= filters["min_pnl"]
+                r for r in filtered if float(r.get("pnl_pct", 0) or 0) >= filters["min_pnl"]
             ]
         if filters["max_pnl"] is not None:
             filtered = [
-                r
-                for r in filtered
-                if float(r.get("pnl_pct", 0).replace("%", "")) <= filters["max_pnl"]
+                r for r in filtered if float(r.get("pnl_pct", 0) or 0) <= filters["max_pnl"]
             ]
 
         paginated_table(
@@ -2023,19 +2199,103 @@ def trade_table_with_filters(
 
 
 # ---------------------------------------------------------------------------
+# Strategy/exit badges and P&L formatting (ARIA-accessible)
+# ---------------------------------------------------------------------------
+_EXIT_COLORS: dict[str, str] = {
+    "TARGET": "#10b981",
+    "INITIAL_SL": "#ef4444",
+    "BREAKEVEN_SL": "#f59e0b",
+    "TRAILING_SL": "#f97316",
+    "TIME": "#64748b",
+    "DATA_INVALIDATION": "#64748b",
+}
+
+_EXIT_LABELS: dict[str, str] = {
+    "TARGET": "Target",
+    "INITIAL_SL": "Init SL",
+    "BREAKEVEN_SL": "BE SL",
+    "TRAILING_SL": "Trail SL",
+    "TIME": "Time",
+    "DATA_INVALIDATION": "Data Inv",
+}
+
+_STRAT_LABELS: dict[str, str] = {
+    "thresholdbreakout": "Breakout",
+    "2lynchbreakdown": "Breakdown",
+    "epproxysameday": "EP SameDay",
+    "2lynchbreakout": "Breakout",
+}
+
+
+def strat_badge(strategy: str) -> str:
+    """Return an HTML badge for the strategy name with ARIA label."""
+    label = _STRAT_LABELS.get(strategy, strategy)
+    color = COLORS["primary"]
+    return (
+        f'<span aria-label="Strategy: {label}" style="background:{color};color:#fff;padding:2px 10px;'
+        f"border-radius:3px;font-size:0.75rem;font-weight:600;"
+        f'font-family:monospace;letter-spacing:0.05em">{label}</span>'
+    )
+
+
+def exit_badge(reason: str) -> str:
+    """Return an HTML badge for the exit reason with ARIA label."""
+    color = _EXIT_COLORS.get(reason, "#64748b")
+    label = _EXIT_LABELS.get(reason, reason)
+    tooltip = EXIT_GLOSSARY.get(reason, "")
+    title_attr = f' title="{tooltip}"' if tooltip else ""
+    aria_label = f' aria-label="{label}: {tooltip}"' if tooltip else f' aria-label="{label}"'
+    return (
+        f'<span{title_attr}{aria_label} style="background:{color};color:#fff;padding:2px 8px;'
+        f"border-radius:3px;font-size:0.7rem;font-weight:600;cursor:help;"
+        f'font-family:monospace">{label}</span>'
+    )
+
+
+def pnl_cell(value: float | int, prefix: str = "₹", suffix: str = "") -> str:
+    """Format a P/L value as an HTML span with green/red coloring and ARIA label."""
+    color = COLORS["success"] if value >= 0 else COLORS["error"]
+    sign = "+" if value > 0 else ""
+    formatted = (
+        f"{prefix}{sign}{value:,.0f}{suffix}" if prefix == "₹" else f"{sign}{value:.4f}{suffix}"
+    )
+    aria_label = f"{'Gain' if value >= 0 else 'Loss'}: {formatted}"
+    arrow = "↑" if value > 0 else ("↓" if value < 0 else "")
+    return (
+        f'<span aria-label="{aria_label}" '
+        f'style="color:{color};font-weight:600;font-family:var(--font-mono)">'
+        f"{arrow} {formatted}</span>"
+    )
+
+
+def value_label(value: str, is_positive: bool | None = None) -> None:
+    """Display a value with visual indicators and ARIA labels for accessibility."""
+    if is_positive is True:
+        css_class = "value-positive"
+        aria = f"Positive: {value}"
+    elif is_positive is False:
+        css_class = "value-negative"
+        aria = f"Negative: {value}"
+    else:
+        css_class = ""
+        aria = value
+    ui.label(value).classes(css_class).props(f'aria-label="{aria}"')
+
+
+# ---------------------------------------------------------------------------
 # Theme state management
 # ---------------------------------------------------------------------------
-_theme_mode = {"terminal": False}  # True = terminal, False = clean
+# NOTE: _theme_mode is defined earlier (near _LivePalette) to avoid a duplicate.
 
 
 def get_current_theme() -> dict:
     """Return the current active theme dictionary."""
-    return THEME_TERMINAL if _theme_mode["terminal"] else THEME_CLEAN
+    return THEME.as_dict()
 
 
 def get_current_colors() -> dict:
     """Return the current active colors dictionary."""
-    return COLORS_TERMINAL if _theme_mode["terminal"] else COLORS_CLEAN
+    return COLORS.as_dict()
 
 
 def _get_css_variables() -> str:
@@ -2065,18 +2325,10 @@ def _get_css_variables() -> str:
 
 def toggle_theme_mode() -> None:
     """Toggle between Terminal (brutalist) and Clean (SaaS) themes."""
-    global THEME, COLORS
-
     _theme_mode["terminal"] = not _theme_mode["terminal"]
     is_terminal = _theme_mode["terminal"]
 
-    # Update global dictionaries
-    THEME.clear()
-    THEME.update(THEME_TERMINAL if is_terminal else THEME_CLEAN)
-    COLORS.clear()
-    COLORS.update(COLORS_TERMINAL if is_terminal else COLORS_CLEAN)
-
-    # Update Quasar dark mode
+    # _LivePalette proxies auto-resolve; just update CSS/Quasar/JS
     ui.dark_mode(is_terminal)
     ui.colors(primary=THEME["primary"])
 

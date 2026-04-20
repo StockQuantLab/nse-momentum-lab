@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from nse_momentum_lab.db.market_db import MarketDataDB
+from nse_momentum_lab.db.versioned_replica_sync import DEFAULT_PAPER_TABLES, VersionedReplicaSync
 from nse_momentum_lab.services.paper.db.paper_db import PaperDB
 from nse_momentum_lab.services.paper.engine.shared_engine import (
     PaperRuntimeState,
@@ -49,6 +50,14 @@ async def run_replay(
     paper_db = PaperDB(paper_db_path)
     market_db = MarketDataDB(Path(market_db_path))
     alert_dispatcher = AlertDispatcher(paper_db=paper_db, config=get_alert_config())
+    paper_path = Path(paper_db_path)
+    replica = VersionedReplicaSync(
+        source_path=paper_path,
+        replica_dir=paper_path.parent / "paper_replica",
+        prefix="paper_replica",
+        min_interval_sec=5.0,
+        tables=DEFAULT_PAPER_TABLES,
+    )
 
     try:
         # Load session.
@@ -73,6 +82,9 @@ async def run_replay(
 
         # Set session active.
         paper_db.update_session(session_id, status="ACTIVE")
+        # Sync immediately so the session appears in the dashboard before first bar.
+        replica.mark_dirty()
+        replica.force_sync(source_conn=paper_db.con)
 
         # Setup engine state.
         runtime_state = PaperRuntimeState()
@@ -197,6 +209,8 @@ async def run_replay(
                 active_symbols = result["active_symbols"]
                 last_bar_ts = bar_end
                 closed_bars += 1
+                replica.mark_dirty()
+                replica.maybe_sync(source_conn=paper_db.con)
 
                 if result["should_complete"]:
                     logger.info("Session should complete (no positions, window closed)")
@@ -215,6 +229,7 @@ async def run_replay(
 
         # Finalize.
         await complete_session(session_id=session_id, paper_db=paper_db, status=final_status)
+        replica.force_sync(source_conn=paper_db.con)
 
         # Purge old feed audit rows (retention housekeeping).
         try:
@@ -246,8 +261,13 @@ async def run_replay(
     except Exception as e:
         logger.exception("Replay failed for session %s", session_id)
         await complete_session(session_id=session_id, paper_db=paper_db, status="FAILED")
+        replica.force_sync(source_conn=paper_db.con)
         return {"error": str(e), "session_id": session_id}
     finally:
+        try:
+            replica.force_sync(source_conn=paper_db.con)
+        except Exception:
+            logger.debug("Final replica sync failed — ignoring")
         await alert_dispatcher.shutdown()
         paper_db.close()
         market_db.close()

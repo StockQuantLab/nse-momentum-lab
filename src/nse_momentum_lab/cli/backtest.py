@@ -6,8 +6,14 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 from nse_momentum_lab.db.market_db import get_backtest_db
+from nse_momentum_lab.services.backtest.backtest_presets import (
+    build_params_from_preset,
+    describe_preset,
+    list_preset_names,
+)
 from nse_momentum_lab.services.backtest.duckdb_backtest_runner import (
     BacktestParams,
     DuckDBBacktestRunner,
@@ -35,12 +41,38 @@ def _confirm_large_run(years: int, threshold: int = 10) -> bool:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run DuckDB-backed backtest")
+    parser = argparse.ArgumentParser(
+        description="Run DuckDB-backed backtest",
+        epilog=(
+            "Use --preset for canonical operating-point runs. "
+            "Use --list-presets to see available presets. "
+            "Direct strategy flags (--strategy, --breakout-threshold, etc.) "
+            "are ignored when --preset is supplied."
+        ),
+    )
+    # Preset shortcuts
+    parser.add_argument(
+        "--preset",
+        type=lambda s: s.upper(),
+        choices=list_preset_names(),
+        default=None,
+        metavar="PRESET",
+        help=(
+            "Named canonical preset (e.g. BREAKOUT_4PCT, BREAKDOWN_2PCT). "
+            "When supplied, all strategy parameters come from the preset. "
+            "Only infrastructure flags (--universe-size, --start-date, etc.) apply."
+        ),
+    )
+    parser.add_argument(
+        "--list-presets",
+        action="store_true",
+        help="List available presets with descriptions and exit",
+    )
     parser.add_argument(
         "--strategy",
         type=str,
         default="thresholdbreakout",
-        help="Strategy name resolved from registry",
+        help="Strategy name resolved from registry (ignored when --preset is used)",
     )
     parser.add_argument(
         "--list-strategies",
@@ -58,7 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Publish DuckDB snapshot artifact to MinIO after run",
     )
-    parser.add_argument("--universe-size", type=int, default=500)
+    parser.add_argument("--universe-size", type=int, default=2000)
     parser.add_argument("--min-price", type=int, default=10)
     parser.add_argument("--min-filters", type=int, default=5)
     parser.add_argument("--start-year", type=int, default=2015)
@@ -150,6 +182,12 @@ def build_parser() -> argparse.ArgumentParser:
             "(e.g. 0.02 for +2%% favorable move)."
         ),
     )
+    parser.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=1,
+        help="Number of parallel worker threads for year-by-year backtest (default: 1)",
+    )
     return parser
 
 
@@ -201,32 +239,55 @@ def main() -> None:
             print(f"{strategy.name} ({strategy.version}) - {strategy.description}")
         return
 
-    params = BacktestParams(
-        strategy=args.strategy,
-        universe_size=args.universe_size,
-        min_price=args.min_price,
-        min_filters=args.min_filters,
-        breakout_threshold=args.breakout_threshold,
-        min_value_traded_inr=args.min_value_traded,
-        min_volume=args.min_volume,
-        start_year=args.start_year,
-        end_year=args.end_year,
-        start_date=args.start_date,
-        end_date=args.end_date,
-        entry_timeframe=args.entry_timeframe,
-        trail_activation_pct=args.trail_activation,
-        trail_stop_pct=args.trail_stop,
-        min_hold_days=args.min_hold_days,
-        time_stop_days=args.time_stop_days,
-        abnormal_profit_pct=args.abnormal_profit_pct,
-        abnormal_gap_exit_pct=args.abnormal_gap_exit_pct,
-        breakout_use_current_day_c_quality=(args.breakout_c_quality_source == "current"),
-        breakout_legacy_h_carry_rule=args.breakout_legacy_h_carry_rule,
-        breakdown_require_atr_expansion=args.breakdown_require_atr_expansion,
-        short_initial_stop_atr_cap_mult=args.short_initial_stop_atr_cap_mult,
-        short_same_day_r_ladder_start_r=args.short_same_day_r_ladder_start_r,
-        short_same_day_take_profit_pct=args.short_same_day_take_profit_pct,
-    )
+    if args.list_presets:
+        for name in list_preset_names():
+            print(describe_preset(name))
+            print()
+        return
+
+    if args.preset:
+        infra_overrides: dict[str, Any] = {
+            "universe_size": args.universe_size,
+            "min_price": args.min_price,
+            "min_filters": args.min_filters,
+            "min_value_traded_inr": args.min_value_traded,
+            "min_volume": args.min_volume,
+            "start_year": args.start_year,
+            "end_year": args.end_year,
+            "start_date": args.start_date,
+            "end_date": args.end_date,
+            "parallel_workers": args.parallel_workers,
+            "entry_timeframe": args.entry_timeframe,
+        }
+        params = build_params_from_preset(args.preset, infra_overrides=infra_overrides)
+    else:
+        params = BacktestParams(
+            strategy=args.strategy,
+            universe_size=args.universe_size,
+            min_price=args.min_price,
+            min_filters=args.min_filters,
+            breakout_threshold=args.breakout_threshold,
+            min_value_traded_inr=args.min_value_traded,
+            min_volume=args.min_volume,
+            start_year=args.start_year,
+            end_year=args.end_year,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            entry_timeframe=args.entry_timeframe,
+            trail_activation_pct=args.trail_activation,
+            trail_stop_pct=args.trail_stop,
+            min_hold_days=args.min_hold_days,
+            time_stop_days=args.time_stop_days,
+            abnormal_profit_pct=args.abnormal_profit_pct,
+            abnormal_gap_exit_pct=args.abnormal_gap_exit_pct,
+            breakout_use_current_day_c_quality=(args.breakout_c_quality_source == "current"),
+            breakout_legacy_h_carry_rule=args.breakout_legacy_h_carry_rule,
+            breakdown_require_atr_expansion=args.breakdown_require_atr_expansion,
+            short_initial_stop_atr_cap_mult=args.short_initial_stop_atr_cap_mult,
+            short_same_day_r_ladder_start_r=args.short_same_day_r_ladder_start_r,
+            short_same_day_take_profit_pct=args.short_same_day_take_profit_pct,
+            parallel_workers=args.parallel_workers,
+        )
 
     # CLI safeguard: estimate cost and confirm for large runs
     estimated_years = _estimate_cost(params)

@@ -24,15 +24,12 @@ from datetime import UTC, date, datetime, time
 from math import isclose
 from pathlib import Path
 from typing import TypedDict
-from uuid import uuid4
 
 import duckdb
 import numpy as np
 import polars as pl
-import psycopg
 from tqdm.auto import tqdm
 
-from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db.market_db import (
     BACKTEST_DUCKDB_FILE,
     MarketDataDB,
@@ -42,9 +39,7 @@ from nse_momentum_lab.db.market_db import (
 from nse_momentum_lab.services.backtest.cost_model import CostModel, cost_model_from_name
 from nse_momentum_lab.services.backtest.engine import ExitReason, PositionSide
 from nse_momentum_lab.services.backtest.persistence import (
-    BacktestArtifactPublisher,
     build_strategy_hash,
-    upsert_exp_run_with_artifacts_sync,
 )
 from nse_momentum_lab.services.backtest.progress import BufferedProgressWriter
 from nse_momentum_lab.services.backtest.signal_models import BacktestSignal, SignalMetadata
@@ -58,8 +53,6 @@ from nse_momentum_lab.services.backtest.vectorbt_engine import (
 )
 from nse_momentum_lab.services.dataset import (
     build_code_hash,
-    build_manifest_payload_from_snapshot,
-    upsert_dataset_manifest_sync,
 )
 from nse_momentum_lab.utils import (
     ALL_FILTERS,
@@ -596,7 +589,6 @@ class DuckDBBacktestRunner:
         params = params or BacktestParams()
         self._active_strategy = resolve_strategy(params.strategy)
         strategy_name = self._active_strategy.name
-        self._validate_required_lineage_dependencies()
         params_hash = params.to_hash()
         code_hash = build_code_hash(
             "duckdb_backtest_runner",
@@ -653,13 +645,6 @@ class DuckDBBacktestRunner:
             started_at=started_at,
             progress_file=progress_file,
         )
-        manifest_payload = build_manifest_payload_from_snapshot(
-            dataset_kind=self.DATASET_KIND,
-            snapshot=dataset_snapshot,
-            code_hash=code_hash,
-            params_hash=params_hash,
-        )
-        upsert_dataset_manifest_sync(manifest_payload)
         self._emit_progress(
             context=progress_context,
             status="RUNNING",
@@ -781,26 +766,12 @@ class DuckDBBacktestRunner:
             self._emit_progress(
                 context=progress_context,
                 status="RUNNING",
-                stage="publishing_artifacts",
+                stage="finalizing",
                 progress_pct=97.0,
-                message="Publishing run artifacts to MinIO and Postgres",
+                message="Finalizing backtest run",
             )
 
             finished_at = datetime.now(IST)
-            self._persist_postgres_lineage(
-                exp_id=exp_id,
-                params=params,
-                strategy_name=strategy_name,
-                strategy_hash=strategy_hash,
-                params_hash=params_hash,
-                dataset_hash=dataset_hash,
-                code_hash=code_hash,
-                yearly_results=yearly_results,
-                all_trades=all_trades,
-                started_at=started_at,
-                finished_at=finished_at,
-                snapshot=snapshot,
-            )
         except Exception as exc:
             finished_at = datetime.now(IST)
             self._emit_progress(
@@ -876,7 +847,7 @@ class DuckDBBacktestRunner:
                 status=status,
                 finished_at=finished_at,
                 force_write=force_write,
-                postgres_upsert_fn=upsert_exp_run_with_artifacts_sync,
+                postgres_upsert_fn=None,
             )
             return
 
@@ -897,23 +868,7 @@ class DuckDBBacktestRunner:
             with context.progress_file.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, sort_keys=True) + "\n")
 
-        upsert_exp_run_with_artifacts_sync(
-            exp_hash=context.exp_id,
-            strategy_name=context.strategy_name,
-            strategy_hash=context.strategy_hash,
-            dataset_hash=context.dataset_hash,
-            params_json=context.params_json,
-            code_sha=context.code_hash,
-            status=status,
-            started_at=context.started_at,
-            finished_at=finished_at,
-            metrics={},
-            artifacts=[],
-            progress_stage=stage,
-            progress_message=message,
-            progress_pct=progress_pct,
-            heartbeat_at=heartbeat_at,
-        )
+        logger.debug("[PROGRESS] postgres upsert removed")
 
     @staticmethod
     def _build_symbol_id_map(symbols: list[str]) -> dict[str, int]:
@@ -1124,8 +1079,9 @@ class DuckDBBacktestRunner:
     ) -> tuple[dict[int, dict], list[dict], list[dict]]:
         """Run backtest in parallel using ThreadPoolExecutor.
 
-        Each year runs independently. Results are collected and aggregated.
-        DuckDB read-only connections are thread-safe for concurrent reads.
+        Each year runs independently with its own DuckDB read-only connection.
+        DuckDB connections are NOT thread-safe for concurrent operations on the
+        same connection object — each thread must open a separate connection.
         """
         from threading import Lock
 
@@ -1135,7 +1091,7 @@ class DuckDBBacktestRunner:
         results_lock = Lock()
 
         def run_single_year_thread(year: int, idx: int) -> tuple[int, dict, list, list]:
-            """Run a single year in a worker thread."""
+            """Run a single year in a worker thread with its own DB connection."""
             year_window_start = date(year, 1, 1)
             year_window_end = date(year, 12, 31)
             if window_start and window_start > year_window_start:
@@ -1147,15 +1103,22 @@ class DuckDBBacktestRunner:
                 on_year_start(year, idx - 1, years_total)
             logger.info("[YEAR %d] [Thread %d] Running...", year, idx)
 
-            # Note: Disable heartbeat in parallel mode to avoid concurrent callback issues
-            stats, trades, execution_diagnostics = self._run_single_year(
-                params,
-                symbols,
-                year,
-                year_window_start,
-                year_window_end,
-                heartbeat_cb=None,  # No heartbeat in parallel mode
-            )
+            # Each thread opens its own read-only connection to avoid concurrent
+            # use of a shared DuckDB connection (not thread-safe).
+            thread_db = MarketDataDB(db_path=self.db.db_path, read_only=True)
+            try:
+                # Note: Disable heartbeat in parallel mode to avoid concurrent callback issues
+                stats, trades, execution_diagnostics = self._run_single_year(
+                    params,
+                    symbols,
+                    year,
+                    year_window_start,
+                    year_window_end,
+                    heartbeat_cb=None,  # No heartbeat in parallel mode
+                    db=thread_db,
+                )
+            finally:
+                thread_db.con.close()
 
             if stats["trades"] > 0:
                 logger.info(
@@ -1207,8 +1170,16 @@ class DuckDBBacktestRunner:
         year_window_start: date,
         year_window_end: date,
         heartbeat_cb: Callable[[str], None] | None = None,
+        db: MarketDataDB | None = None,
     ) -> tuple[dict, list[dict], list[dict]]:
-        """Run backtest for a single year, return stats, trades, and diagnostics."""
+        """Run backtest for a single year, return stats, trades, and diagnostics.
+
+        ``db`` is an optional per-thread MarketDataDB instance.  Pass a separate
+        connection in parallel mode to avoid sharing the same DuckDB connection
+        across threads (DuckDB connections are not thread-safe for concurrent use).
+        Falls back to ``self.db`` when not provided (sequential mode).
+        """
+        _db = db if db is not None else self.db
         empty_stats = {
             "year": year,
             "signals": 0,
@@ -1245,7 +1216,7 @@ class DuckDBBacktestRunner:
         )
 
         # Execute with parameterized values.
-        query_result = self.db.con.execute(query, params_tuple)
+        query_result = _db.con.execute(query, params_tuple)
         try:
             df_pl = query_result.pl()
         except (
@@ -1349,7 +1320,7 @@ class DuckDBBacktestRunner:
         maybe_heartbeat(f"loading daily price data (0/{len(signal_symbols)} symbols)")
 
         # Bulk load daily OHLCV for all signal symbols once to avoid per-symbol query overhead.
-        daily_df = self.db.query_daily_multi(
+        daily_df = _db.query_daily_multi(
             signal_symbols,
             start_date.isoformat(),
             end_date.isoformat(),
@@ -1409,7 +1380,7 @@ class DuckDBBacktestRunner:
             )
 
         # Bulk load static liquidity feature once, then map symbol -> avg dollar volume.
-        vol_df = self.db.get_avg_dollar_vol_20_by_symbol(
+        vol_df = _db.get_avg_dollar_vol_20_by_symbol(
             signal_symbols, start_date.isoformat(), end_date.isoformat()
         )
         if not vol_df.is_empty():
@@ -1430,9 +1401,15 @@ class DuckDBBacktestRunner:
         # Build VectorBT signals
         vbt_signals = []
         skipped_intraday_entry = 0
+        skipped_duplicate = 0
         execution_diagnostics: list[dict[str, object]] = []
         signal_context: dict[tuple[int, date], dict[str, object]] = {}
         intraday_entry_by_signal: dict[tuple[str, date], IntradayEntry] = {}
+        # Dedup: one entry per (symbol, date) per backtest run.  Duplicate rows can arise
+        # when a corporate action causes the same symbol to appear multiple times in the
+        # candidate query result for the same trading date (e.g. FCL had 3 entries on
+        # 2025-02-06 in earlier runs).
+        seen_signal_keys: set[tuple[int, date]] = set()
         if params.entry_timeframe.lower() == "5min":
             is_ep_proxy = self._active_strategy.family == "ep_proxy"
             orh_window = params.orh_window_minutes if is_ep_proxy else 0
@@ -1455,6 +1432,7 @@ class DuckDBBacktestRunner:
                     params.short_same_day_take_profit_pct if is_short else None
                 ),
                 heartbeat_cb=maybe_heartbeat,
+                db=_db,
             )
 
         for row in ranking_rejected.iter_rows(named=True):
@@ -1484,6 +1462,21 @@ class DuckDBBacktestRunner:
                 if not isinstance(sig_date, date):
                     signal_bar.update(1)
                     continue
+
+                # Dedup: skip if we already accepted this (symbol, date) in this run.
+                # Duplicate rows can appear when a corporate action causes the candidate SQL
+                # to return the same symbol twice for the same trading_date.
+                if (symbol_id, sig_date) in seen_signal_keys:
+                    skipped_duplicate += 1
+                    logger.warning(
+                        "Duplicate signal skipped: %s on %s (symbol_id=%s)",
+                        symbol,
+                        sig_date,
+                        symbol_id,
+                    )
+                    signal_bar.update(1)
+                    continue
+                seen_signal_keys.add((symbol_id, sig_date))
 
                 diag_entry, filter_snapshot, hold_quality_passed = self._build_diag_entry(
                     year=year,
@@ -1703,6 +1696,46 @@ class DuckDBBacktestRunner:
             net_pnl = round(gross_pnl - trade_cost, 2)
             gross_pnl_pct = round((gross_pnl / position_value) * 100, 4) if position_value else 0.0
             net_pnl_pct = round((net_pnl / position_value) * 100, 4) if position_value else 0.0
+
+            # Guard: extreme entry/exit price ratio signals a corporate action data
+            # discontinuity (e.g. re-ingested raw Kite prices without corporate-action
+            # adjustment).  Zero out PnL and mark as DATA_INVALIDATION so the trade
+            # is visible for audit but excluded from strategy metrics.
+            #
+            # Asymmetric bounds:
+            #   Upper: >2.5x gain   (stock tripled overnight — likely bad adjustment)
+            #   Lower: <0.625x drop (drop >37.5% overnight — almost always corporate action)
+            #
+            # NSE circuit breakers cap genuine intraday moves at ~20%.  Overnight gaps
+            # of >37.5% for liquid NSE stocks are practically always corporate actions
+            # (bonus 1:1, demerger, rights issue), NOT genuine price crashes.  The old
+            # threshold of 0.40 (60% drop) was too lenient and missed ~48% bonus drops
+            # (e.g. ECLERX, PIDILITIND, ASHOKLEY) and ~39% demerger gaps (RAYMOND, RMDRIP).
+            _data_invalid = False
+            _corp_action_upper = 2.5  # >150% overnight gain
+            _corp_action_lower = 0.625  # >37.5% overnight drop
+            if entry_price > 0 and exit_price > 0:
+                _price_ratio = exit_price / entry_price
+                if _price_ratio > _corp_action_upper or _price_ratio < _corp_action_lower:
+                    logger.warning(
+                        "Data discontinuity (corporate action?) for %s: "
+                        "entry %s @ %.4f → exit %s @ %.4f (ratio=%.2fx). "
+                        "Zeroing PnL, marking DATA_INVALIDATION.",
+                        real_symbol,
+                        t.entry_date,
+                        entry_price,
+                        t.exit_date,
+                        exit_price,
+                        _price_ratio,
+                    )
+                    gross_pnl = 0.0
+                    net_pnl = 0.0
+                    gross_pnl_pct = 0.0
+                    net_pnl_pct = 0.0
+                    gross_r_multiple = 0.0
+                    net_r_multiple = 0.0
+                    _data_invalid = True
+
             risk_per_share = (
                 abs(entry_price - float(t.initial_stop))
                 if t.initial_stop is not None and entry_price > 0
@@ -1745,7 +1778,11 @@ class DuckDBBacktestRunner:
                     "pnl_pct": net_pnl_pct,
                     "r_multiple": net_r_multiple,
                     "gross_r_multiple": gross_r_multiple,
-                    "exit_reason": t.exit_reason.value if t.exit_reason else "unknown",
+                    "exit_reason": (
+                        ExitReason.DATA_INVALIDATION.value
+                        if _data_invalid
+                        else (t.exit_reason.value if t.exit_reason else "unknown")
+                    ),
                     "holding_days": hd,
                     "gap_pct": gap_pct,
                     "filters_passed": filters_passed,
@@ -1837,6 +1874,7 @@ class DuckDBBacktestRunner:
                     "signals": signals_after_filters,
                     "filtered_signals": signals_after_filters,
                     "skipped_intraday_entry": skipped_intraday_entry,
+                    "skipped_duplicate": skipped_duplicate,
                     "execution_diagnostics": execution_summary,
                 },
                 [],
@@ -1893,6 +1931,7 @@ class DuckDBBacktestRunner:
             "avg_holding_days": float(np.mean(holding_days)) if holding_days else 0.0,
             "exit_reasons": exit_reasons,
             "skipped_intraday_entry": skipped_intraday_entry,
+            "skipped_duplicate": skipped_duplicate,
             "execution_diagnostics": {
                 "signals_total": total_signals,
                 "signals_filtered": len(df_filtered) + len(ranking_rejected),
@@ -2122,19 +2161,24 @@ class DuckDBBacktestRunner:
         short_initial_stop_atr_cap_mult: float | None = None,
         short_same_day_take_profit_pct: float | None = None,
         heartbeat_cb: Callable[[str], None] | None = None,
+        db: MarketDataDB | None = None,
     ) -> dict[tuple[str, date], IntradayEntry]:
         """Resolve intraday entries for all signal days with one 5-min batch query.
 
         Delegates to the shared implementation in ``candidate_builder``.
         The ``heartbeat_cb`` parameter is accepted for backward compatibility
         but not used by the shared implementation.
+
+        ``db`` is an optional per-thread MarketDataDB instance.  Pass a separate
+        connection in parallel mode to avoid sharing ``self.db.con`` across threads.
         """
         from nse_momentum_lab.services.paper.candidate_builder import (
             resolve_intraday_entries_bulk as _shared,
         )
 
+        _db = db if db is not None else self.db
         return _shared(
-            db_con=self.db.con,
+            db_con=_db.con,
             df_filtered=df_filtered,
             breakout_threshold=breakout_threshold,
             entry_cutoff_minutes=entry_cutoff_minutes,
@@ -2320,140 +2364,6 @@ class DuckDBBacktestRunner:
         return equity.select(
             ["entry_date", "symbol", "pnl_pct", "cumulative_return_pct", "drawdown_pct"]
         )
-
-    def _persist_postgres_lineage(
-        self,
-        *,
-        exp_id: str,
-        params: BacktestParams,
-        strategy_name: str,
-        strategy_hash: str,
-        params_hash: str,
-        dataset_hash: str,
-        code_hash: str,
-        yearly_results: dict[int, dict],
-        all_trades: list[dict],
-        started_at: datetime,
-        finished_at: datetime,
-        snapshot: bool,
-    ) -> None:
-        exp = self.results_db.get_experiment(exp_id) or {}
-        metrics = {
-            "total_return_pct": float(exp.get("total_return_pct") or 0.0),
-            "annualized_return_pct": float(exp.get("annualized_return_pct") or 0.0),
-            "total_trades": float(exp.get("total_trades") or 0.0),
-            "win_rate_pct": float(exp.get("win_rate_pct") or 0.0),
-            "max_drawdown_pct": float(exp.get("max_drawdown_pct") or 0.0),
-            "profit_factor": float(exp.get("profit_factor") or 0.0),
-        }
-
-        publisher = BacktestArtifactPublisher()
-        trades_df = self._to_trades_df(all_trades)
-        yearly_df = self._to_yearly_df(yearly_results)
-        equity_df = self._to_equity_df(trades_df, portfolio_value=float(params.portfolio_value))
-        summary = {
-            "exp_id": exp_id,
-            "strategy_name": strategy_name,
-            "params_hash": params_hash,
-            "dataset_hash": dataset_hash,
-            "code_hash": code_hash,
-            "created_at": finished_at.isoformat(),
-            "metrics": metrics,
-        }
-        artifacts = publisher.publish_run_artifacts(
-            exp_id=exp_id,
-            trades_df=trades_df,
-            yearly_df=yearly_df,
-            equity_df=equity_df,
-            summary=summary,
-        )
-        if snapshot:
-            snapshot_path = self._create_snapshot_copy(dataset_hash=dataset_hash, exp_id=exp_id)
-            try:
-                artifacts.append(
-                    publisher.publish_duckdb_snapshot(
-                        exp_id=exp_id,
-                        dataset_hash=dataset_hash,
-                        snapshot_path=snapshot_path,
-                    )
-                )
-            finally:
-                if snapshot_path.exists():
-                    snapshot_path.unlink()
-
-        upsert_exp_run_with_artifacts_sync(
-            exp_hash=exp_id,
-            strategy_name=strategy_name,
-            strategy_hash=strategy_hash,
-            dataset_hash=dataset_hash,
-            params_json=json.dumps(asdict(params), sort_keys=True),
-            code_sha=code_hash,
-            status="SUCCEEDED",
-            started_at=started_at,
-            finished_at=finished_at,
-            metrics=metrics,
-            artifacts=artifacts,
-            progress_stage="completed",
-            progress_message="Backtest run completed",
-            progress_pct=100.0,
-            heartbeat_at=finished_at,
-        )
-
-    @staticmethod
-    def _validate_required_lineage_dependencies() -> None:
-        """Fail fast if Postgres/MinIO persistence dependencies are unavailable."""
-        try:
-            settings = get_settings()
-        except Exception as exc:
-            raise RuntimeError(
-                "Backtest requires Doppler-injected DATABASE_URL and MinIO credentials."
-            ) from exc
-        if settings.database_url is None:
-            raise RuntimeError(
-                "DATABASE_URL is required. Run via Doppler so Postgres lineage can be persisted."
-            )
-        if (
-            settings.minio_endpoint is None
-            or not settings.minio_access_key
-            or not settings.minio_secret_key
-        ):
-            raise RuntimeError(
-                "MinIO settings are required. Ensure MINIO_ENDPOINT/MINIO_ACCESS_KEY/MINIO_SECRET_KEY are set."
-            )
-
-        try:
-            with psycopg.connect(str(settings.database_url)) as conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-                    cur.fetchone()
-        except Exception as exc:
-            raise RuntimeError(
-                "Postgres is unreachable. Start infrastructure and run with Doppler-injected secrets."
-            ) from exc
-
-        try:
-            BacktestArtifactPublisher()
-        except Exception as exc:
-            raise RuntimeError(
-                "MinIO artifacts store is unreachable. Start MinIO and verify credentials."
-            ) from exc
-
-    def _create_snapshot_copy(self, *, dataset_hash: str, exp_id: str) -> Path:
-        snapshot_dir = self.results_db.db_path.parent / "snapshots"
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-        snapshot_path = snapshot_dir / f"{exp_id}_{dataset_hash}_{uuid4().hex[:8]}.duckdb"
-
-        db_list = self.results_db.con.execute("PRAGMA database_list").fetchall()
-        source_catalog = db_list[0][1]
-        escaped_path = str(snapshot_path).replace("\\", "/").replace("'", "''")
-
-        self.results_db.con.execute(f"ATTACH '{escaped_path}' AS snapshot_db")
-        try:
-            self.results_db.con.execute(f"COPY FROM DATABASE {source_catalog} TO snapshot_db")
-        finally:
-            self.results_db.con.execute("DETACH snapshot_db")
-
-        return snapshot_path
 
     def _print_summary(self, exp: dict | None) -> None:
         if not exp:

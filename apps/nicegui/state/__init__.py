@@ -30,34 +30,65 @@ if TYPE_CHECKING:
     pass
 
 from nse_momentum_lab.db.market_db import (
+    BACKTEST_DUCKDB_FILE,
+    DUCKDB_FILE,
+    DATA_DIR,
     MarketDataDB,
     close_backtest_db,
     close_market_db,
-    get_backtest_db,
-    get_market_db,
+    get_backtest_replica_sync,
 )
+from nse_momentum_lab.db.versioned_replica_sync import migrate_legacy_snapshot
+from nse_momentum_lab.db.versioned_replica_consumer import VersionedReplicaConsumer
+from nse_momentum_lab.db.dashboard_db_proxy import _DashboardDBProxy
 
-# Lazy DB connections — created on first use, not at import time.
-# This avoids a ~10s startup penalty from DuckDB view registration
-# over 20K parquet files (daily + 5min + backtest catalogs).
-_db: MarketDataDB | None = None
-_backtest_db: MarketDataDB | None = None
+# Migrate legacy single-file snapshots to versioned replicas on first import.
+for _legacy_path, _replica_dir, _prefix in [
+    (
+        BACKTEST_DUCKDB_FILE.parent / "backtest_dashboard.duckdb",
+        DATA_DIR / "backtest_replica",
+        "backtest_replica",
+    ),
+    (DUCKDB_FILE.parent / "paper_dashboard.duckdb", DATA_DIR / "paper_replica", "paper_replica"),
+]:
+    migrate_legacy_snapshot(_legacy_path, _replica_dir, _prefix)
+
+# Versioned replica proxies — auto-resolve to latest replica on every access.
+_market_consumer = VersionedReplicaConsumer(
+    replica_dir=DATA_DIR / "market_replica",
+    prefix="market_replica",
+    fallback_path=DUCKDB_FILE,
+)
+_market_proxy: _DashboardDBProxy | None = None
+
+_backtest_consumer = VersionedReplicaConsumer(
+    replica_dir=DATA_DIR / "backtest_replica",
+    prefix="backtest_replica",
+    fallback_path=BACKTEST_DUCKDB_FILE,
+)
+_backtest_proxy: _DashboardDBProxy | None = None
 
 
 def get_db() -> MarketDataDB:
-    """Get the singleton market DuckDB connection (lazy-initialized)."""
-    global _db
-    if _db is None:
-        _db = get_market_db(read_only=True)
-    return _db
+    """Get the market DuckDB connection via versioned replica proxy."""
+    global _market_proxy
+    if _market_proxy is None:
+        _market_proxy = _DashboardDBProxy(
+            db_factory=lambda path: MarketDataDB(db_path=path, read_only=True),
+            consumer=_market_consumer,
+        )
+    return _market_proxy  # type: ignore[return-value]
 
 
 def get_backtest_db_ro() -> MarketDataDB:
-    """Get the singleton backtest DuckDB connection (lazy-initialized)."""
-    global _backtest_db
-    if _backtest_db is None:
-        _backtest_db = get_backtest_db(read_only=True)
-    return _backtest_db
+    """Get the backtest DuckDB connection via versioned replica proxy."""
+    global _backtest_proxy
+    if _backtest_proxy is None:
+        _backtest_proxy = _DashboardDBProxy(
+            db_factory=lambda path: MarketDataDB(db_path=path, read_only=True),
+            consumer=_backtest_consumer,
+        )
+    return _backtest_proxy  # type: ignore[return-value]
 
 
 # Thread pool for running blocking DB calls off the async event loop
@@ -307,10 +338,10 @@ async def aget_experiment_yearly_metrics(exp_id: str) -> pl.DataFrame:
 
 
 def delete_experiments_write(exp_ids: list[str]) -> tuple[int, str | None]:
-    """Delete experiments from the write DB and refresh the dashboard snapshot.
+    """Delete experiments from the write DB and refresh the versioned replica.
 
     Opens a temporary write connection to backtest.duckdb, deletes the given
-    experiments, then refreshes backtest_dashboard.duckdb to match.
+    experiments, then creates a new versioned replica.
 
     Returns (count_deleted, error_message_or_None).
     If a backtest is currently running (DB locked), returns (0, error).
@@ -322,10 +353,6 @@ def delete_experiments_write(exp_ids: list[str]) -> tuple[int, str | None]:
 
     try:
         import duckdb as _duckdb
-        from nse_momentum_lab.db.market_db import (
-            BACKTEST_DUCKDB_FILE,
-            BACKTEST_DASHBOARD_DUCKDB_FILE,
-        )
 
         con = _duckdb.connect(str(BACKTEST_DUCKDB_FILE), read_only=False)
         try:
@@ -337,24 +364,10 @@ def delete_experiments_write(exp_ids: list[str]) -> tuple[int, str | None]:
                 con.execute("DELETE FROM bt_experiment WHERE exp_id = ?", [exp_id])
             con.execute("COMMIT")
 
-            # Refresh the read-only dashboard copy when available, but do not fail
-            # the deletion if the legacy snapshot file is locked or unavailable.
-            dash = str(BACKTEST_DASHBOARD_DUCKDB_FILE).replace("\\", "/").replace("'", "''")
-            try:
-                con.execute(f"ATTACH '{dash}' AS bt_read")
-            except Exception:
-                pass
-            else:
-                try:
-                    for tbl in (
-                        "bt_experiment",
-                        "bt_yearly_metric",
-                        "bt_trade",
-                        "bt_execution_diagnostic",
-                    ):
-                        con.execute(f"CREATE OR REPLACE TABLE bt_read.{tbl} AS SELECT * FROM {tbl}")
-                finally:
-                    con.execute("DETACH bt_read")
+            # Sync versioned replica using the same write connection.
+            sync = get_backtest_replica_sync()
+            sync.mark_dirty()
+            sync.force_sync(source_conn=con)
         finally:
             con.close()
 

@@ -583,48 +583,13 @@ class MarketDataDB:
         ).pl()
 
     def refresh_backtest_read_snapshot(self) -> None:
-        """Refresh read-only dashboard copy of backtest tables."""
+        """Refresh versioned replica of backtest tables for dashboard reads."""
         if self._read_only:
             return
 
-        target_path = Path(
-            os.getenv("BACKTEST_DASHBOARD_DUCKDB_PATH", str(BACKTEST_DASHBOARD_DUCKDB_FILE))
-        )
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            if target_path.resolve() == self.db_path.resolve():
-                return
-        except OSError:
-            pass
-
-        escaped_path = str(target_path).replace("\\", "/").replace("'", "''")
-        try:
-            self.con.execute(f"ATTACH '{escaped_path}' AS bt_read")
-        except Exception as exc:
-            logger.warning(
-                "Skipping backtest dashboard snapshot refresh because %s is locked: %s",
-                target_path,
-                exc,
-            )
-            return
-        try:
-            self.con.execute(
-                "CREATE OR REPLACE TABLE bt_read.bt_experiment AS SELECT * FROM bt_experiment"
-            )
-            self.con.execute(
-                "CREATE OR REPLACE TABLE bt_read.bt_yearly_metric AS SELECT * FROM bt_yearly_metric"
-            )
-            self.con.execute("CREATE OR REPLACE TABLE bt_read.bt_trade AS SELECT * FROM bt_trade")
-            self.con.execute(
-                "CREATE OR REPLACE TABLE bt_read.bt_execution_diagnostic "
-                "AS SELECT * FROM bt_execution_diagnostic"
-            )
-        finally:
-            try:
-                self.con.execute("DETACH bt_read")
-            except Exception as exc:
-                logger.warning("Failed to detach bt_read after snapshot refresh: %s", exc)
+        sync = get_backtest_replica_sync()
+        sync.mark_dirty()
+        sync.force_sync(source_conn=self.con)
 
     def _view_snapshot(self, view: str) -> dict[str, int | str | None]:
         if (view == "v_daily" and not self._has_daily) or (view == "v_5min" and not self._has_5min):
@@ -2416,3 +2381,46 @@ def close_backtest_db() -> None:
     if _backtest_db is not None:
         _backtest_db.close()
         _backtest_db = None
+
+
+# ---------------------------------------------------------------------------
+# Versioned replica sync factories
+# ---------------------------------------------------------------------------
+
+_market_replica_sync: Any = None
+_backtest_replica_sync: Any = None
+
+
+def get_market_replica_sync() -> Any:
+    """Get or create the versioned replica sync for market.duckdb."""
+    global _market_replica_sync
+    if _market_replica_sync is None:
+        from nse_momentum_lab.db.versioned_replica_sync import VersionedReplicaSync
+
+        _market_replica_sync = VersionedReplicaSync(
+            source_path=DUCKDB_FILE,
+            replica_dir=DATA_DIR / "market_replica",
+            prefix="market_replica",
+            min_interval_sec=10.0,
+            tables=None,  # COPY FROM DATABASE — copy everything
+        )
+    return _market_replica_sync
+
+
+def get_backtest_replica_sync() -> Any:
+    """Get or create the versioned replica sync for backtest.duckdb."""
+    global _backtest_replica_sync
+    if _backtest_replica_sync is None:
+        from nse_momentum_lab.db.versioned_replica_sync import (
+            DEFAULT_BACKTEST_TABLES,
+            VersionedReplicaSync,
+        )
+
+        _backtest_replica_sync = VersionedReplicaSync(
+            source_path=BACKTEST_DUCKDB_FILE,
+            replica_dir=DATA_DIR / "backtest_replica",
+            prefix="backtest_replica",
+            min_interval_sec=30.0,
+            tables=DEFAULT_BACKTEST_TABLES,
+        )
+    return _backtest_replica_sync

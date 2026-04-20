@@ -64,9 +64,17 @@ class AlertConfig:
     internally — same pattern as cpr-pivot-lab.
     """
 
-    # Connection
+    # Telegram connection
     telegram_bot_token: str | None = None
     telegram_chat_ids: list[str] = field(default_factory=list)
+
+    # Email connection
+    email_smtp_host: str | None = None
+    email_smtp_port: int = 587
+    email_from: str | None = None
+    email_to: str | None = None
+    email_password: str | None = None
+    email_use_tls: bool = True
 
     # Per-category toggles
     trade_open: bool = True
@@ -87,6 +95,12 @@ def get_alert_config() -> AlertConfig:
     return AlertConfig(
         telegram_bot_token=getattr(s, "telegram_bot_token", None),
         telegram_chat_ids=chat_ids,
+        email_smtp_host=getattr(s, "email_smtp_host", None),
+        email_smtp_port=getattr(s, "email_smtp_port", 587),
+        email_from=getattr(s, "email_from", None),
+        email_to=getattr(s, "email_to", None),
+        email_password=getattr(s, "email_password", None),
+        email_use_tls=getattr(s, "email_use_tls", True),
     )
 
 
@@ -290,6 +304,22 @@ class AlertDispatcher:
             )
             if telegram.enabled:
                 self._notifiers.append(telegram)
+
+        # Wire EmailNotifier from config if credentials present.
+        from nse_momentum_lab.services.paper.notifiers.email_notifier import EmailNotifier
+
+        email_to = [e.strip() for e in (self._config.email_to or "").split(",") if e.strip()]
+        if self._config.email_smtp_host and self._config.email_from and email_to:
+            email_notifier = EmailNotifier(
+                self._config.email_smtp_host,
+                self._config.email_smtp_port,
+                self._config.email_from,
+                email_to,
+                password=self._config.email_password,
+                use_tls=self._config.email_use_tls,
+            )
+            if email_notifier.enabled:
+                self._notifiers.append(email_notifier)
 
     def add_notifier(self, notifier: Any) -> None:
         """Register an additional notifier."""

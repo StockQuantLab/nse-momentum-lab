@@ -50,6 +50,7 @@ from apps.nicegui.components import (
     kpi_grid,
     page_layout,
     paginated_table,
+    safe_timer,
     SPACE_LG,
     SPACE_SM,
     SPACE_XS,
@@ -74,7 +75,7 @@ def _debounce(key: str, fn, delay: float = 0.3) -> None:
             _debounce_timers[key].deactivate()
         except Exception:
             pass
-    _debounce_timers[key] = ui.timer(delay, fn, once=True)
+    _debounce_timers[key] = safe_timer(delay, fn, once=True)
 
 
 # ---------------------------------------------------------------------------
@@ -280,7 +281,7 @@ def _render_tables_section(m: dict) -> None:
         f"color: {theme_text_primary()};"
     )
     rows = [
-        {"table": name, "rows": f"{count:,}"}
+        {"table": name, "rows": count}
         for name, count in sorted(tables.items(), key=lambda x: -x[1])
     ]
     columns = [
@@ -297,6 +298,7 @@ def _render_tables_section(m: dict) -> None:
             "field": "rows",
             "align": "right",
             "classes": "font-mono text-sm tabular-nums",
+            "format": "val => val == null ? '-' : val.toLocaleString()",
         },
     ]
     paginated_table(
@@ -408,7 +410,7 @@ def _render_ingestion_section(metrics: dict) -> None:
                         except Exception:
                             pass
                         del _poll_timers["idle"]
-                    _poll_timers["active"] = ui.timer(1.0, _poll_log)
+                    _poll_timers["active"] = safe_timer(1.0, _poll_log, once=False)
             else:
                 # Slow polling when idle
                 if "idle" not in _poll_timers:
@@ -418,9 +420,9 @@ def _render_ingestion_section(metrics: dict) -> None:
                         except Exception:
                             pass
                         del _poll_timers["active"]
-                    _poll_timers["idle"] = ui.timer(3.0, _poll_log)
+                    _poll_timers["idle"] = safe_timer(3.0, _poll_log, once=False)
 
-        _poll_timers["idle"] = ui.timer(3.0, _poll_log)
+        _poll_timers["idle"] = safe_timer(3.0, _poll_log, once=False)
 
         def on_run_ingestion() -> None:
             try:
@@ -755,6 +757,7 @@ async def _render_coverage_tab() -> None:
                 "field": "coverage_pct",
                 "align": "right",
                 "classes": "tabular-nums",
+                "format": "val => val == null ? '-' : val.toFixed(1)",
             },
             {
                 "name": "gap_estimate",
@@ -764,7 +767,7 @@ async def _render_coverage_tab() -> None:
                 "classes": "tabular-nums",
             },
         ]
-        rows = [{**r, "coverage_pct": f"{r['coverage_pct']:.1f}"} for r in filtered]
+        rows = filtered
         paginated_table(
             rows=rows,
             columns=columns,

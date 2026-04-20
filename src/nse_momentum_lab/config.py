@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     telegram_bot_token: str | None = None
     telegram_chat_ids: str | None = None  # comma-separated chat IDs
 
+    # Email alerts (optional — Doppler: EMAIL_SMTP_HOST, EMAIL_FROM, EMAIL_TO, EMAIL_PASSWORD)
+    email_smtp_host: str | None = None
+    email_smtp_port: int = 587
+    email_from: str | None = None
+    email_to: str | None = None  # comma-separated recipients
+    email_password: str | None = None
+    email_use_tls: bool = True
+
     # Broker order execution guard (disabled by default)
     broker_order_execution_enabled: bool = False
 

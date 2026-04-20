@@ -6,6 +6,8 @@ from nse_momentum_lab.db.market_db import MarketDataDB
 
 
 class _LockedConnection:
+    """Simulates a DuckDB connection that raises on ATTACH (locked target file)."""
+
     def __init__(self) -> None:
         self.sql: list[str] = []
 
@@ -16,7 +18,7 @@ class _LockedConnection:
         return self
 
 
-def test_refresh_backtest_read_snapshot_skips_locked_target(monkeypatch, tmp_path: Path) -> None:
+def test_refresh_backtest_read_snapshot_handles_locked_target(monkeypatch, tmp_path: Path) -> None:
     db = MarketDataDB.__new__(MarketDataDB)
     db._read_only = False
     db.db_path = tmp_path / "backtest.duckdb"
@@ -27,7 +29,8 @@ def test_refresh_backtest_read_snapshot_skips_locked_target(monkeypatch, tmp_pat
         str(tmp_path / "backtest_dashboard.duckdb"),
     )
 
+    # Should not raise — locked-file errors are caught internally by VersionedReplicaSync.
     db.refresh_backtest_read_snapshot()
 
-    assert len(db.con.sql) == 1
-    assert db.con.sql[0].startswith("ATTACH")
+    # At minimum, CHECKPOINT is issued; the ATTACH from versioned replica sync fails gracefully.
+    assert any(s.startswith("CHECKPOINT") for s in db.con.sql)

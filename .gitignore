@@ -53,8 +53,10 @@ Thumbs.db
 .codex/
 .claude/
 agents.md
+AGENTS.md
 memory.md
 claude.md
+CLAUDE.md
 
 # Doppler secrets (local only, never commit)
 doppler.json

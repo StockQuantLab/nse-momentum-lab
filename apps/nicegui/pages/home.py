@@ -21,6 +21,7 @@ from apps.nicegui.components import (
     nav_card,
     divider,
     primary_action_card,
+    safe_timer,
     SPACE_SECTION,
     SPACE_GRID_DEFAULT,
     SPACE_MD,
@@ -310,4 +311,4 @@ async def home_page() -> None:
             """Refresh status in background after initial render."""
             _ = await aget_db_status()  # Populates cache for next interaction
 
-        ui.timer(0.5, refresh_status, once=True)
+        safe_timer(0.5, refresh_status, once=True)

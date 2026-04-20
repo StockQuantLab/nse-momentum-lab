@@ -55,7 +55,7 @@ class BufferedProgressWriter:
         status: str,
         finished_at: datetime | None = None,
         force_write: bool = False,
-        postgres_upsert_fn,
+        postgres_upsert_fn=None,
     ) -> None:
         """Emit a progress update.
 
@@ -158,7 +158,7 @@ class BufferedProgressWriter:
         except Exception as e:
             logger.warning("Failed to write progress to PostgreSQL: %s", e)
 
-    def flush(self, postgres_upsert_fn) -> None:
+    def flush(self, postgres_upsert_fn=None) -> None:
         """Force flush any pending update to PostgreSQL.
 
         Call this at the end of the backtest to ensure final status is written.

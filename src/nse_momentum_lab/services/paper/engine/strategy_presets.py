@@ -42,6 +42,10 @@ class PaperStrategyConfig:
     slippage_bps_large: float = 5.0
     slippage_bps_mid: float = 10.0
     slippage_bps_small: float = 20.0
+    # Max allowed stop distance as a fraction of entry price (matches backtest defaults).
+    # For SHORT, short_max_stop_dist_pct overrides max_stop_dist_pct when set.
+    max_stop_dist_pct: float = 0.08
+    short_max_stop_dist_pct: float | None = None
     extra_params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -98,6 +102,8 @@ def get_paper_strategy_config(
         "slippage_bps_large": base.slippage_bps_large,
         "slippage_bps_mid": base.slippage_bps_mid,
         "slippage_bps_small": base.slippage_bps_small,
+        "max_stop_dist_pct": base.max_stop_dist_pct,
+        "short_max_stop_dist_pct": base.short_max_stop_dist_pct,
     }
     for k, v in overrides.items():
         if k in fields:
@@ -117,6 +123,8 @@ def get_paper_strategy_config(
         slippage_bps_large=fields["slippage_bps_large"],
         slippage_bps_mid=fields["slippage_bps_mid"],
         slippage_bps_small=fields["slippage_bps_small"],
+        max_stop_dist_pct=fields["max_stop_dist_pct"],
+        short_max_stop_dist_pct=fields["short_max_stop_dist_pct"],
         extra_params=params,
     )
 

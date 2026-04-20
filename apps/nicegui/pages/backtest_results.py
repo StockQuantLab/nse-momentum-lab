@@ -19,7 +19,6 @@ if str(_apps_root) not in sys.path:
 
 import numpy as np
 import polars as pl
-import plotly.express as px
 import plotly.graph_objects as go
 from nicegui import ui
 
@@ -48,6 +47,7 @@ from apps.nicegui.components import (
     hex_to_rgba,
     page_header,
     paginated_table,
+    strat_badge,
     trade_table_with_filters,
     export_menu,
     loading_spinner,
@@ -59,6 +59,7 @@ from apps.nicegui.components import (
     SPACE_XL,
     theme_primary,
     theme_surface,
+    theme_surface_border,
     theme_text_muted,
     theme_text_primary,
     theme_text_secondary,
@@ -112,68 +113,121 @@ async def backtest_page() -> None:
                 ui.label("Could not load experiment details.").style(f"color: {color_error()};")
                 return
 
-            page_header(
-                "Backtest Results",
-                f"Experiment: {exp_id[:16]}...",
-                kpi_row=[
-                    dict(
-                        title="Strategy",
-                        value=str(exp.get("strategy_name", "-")),
-                        icon="flag",
-                        color=color_info(),
-                    ),
-                    dict(
-                        title="Period",
-                        value=f"{exp.get('start_year', '-')}-{exp.get('end_year', '-')}",
-                        icon="date_range",
-                        color=color_gray(),
-                    ),
-                    dict(
-                        title="Status",
-                        value=str(exp.get("status", "-")).upper(),
-                        icon="check_circle",
-                        color=color_success(),
-                    ),
-                ],
-            )
+            strategy = str(exp.get("strategy_name", "-"))
+            start_date = str(exp.get("start_date", "-"))[:10]
+            end_date = str(exp.get("end_date", "-"))[:10]
 
-            ret_val = float(exp.get("total_return_pct", 0))
+            # ── Header: strategy badge + period + run_id ──────────────────
+            with ui.row().classes("w-full justify-between items-center mb-3"):
+                with ui.row().classes("items-center gap-3"):
+                    # Strategy badge (colored pill)
+                    ui.html(strat_badge(strategy))
+                    ui.label(f"{start_date} → {end_date}").classes("text-sm mono-font").style(
+                        f"color: {theme_text_secondary()};"
+                    )
+                    ui.label(f"ID: {exp_id[:12]}").classes("text-xs mono-font").style(
+                        f"color: {theme_text_muted()};"
+                    )
+                with ui.row().classes("items-center gap-2"):
+                    status = str(exp.get("status", "-")).upper()
+                    status_color = color_success() if status == "COMPLETED" else color_warning()
+                    ui.label(status).classes("text-xs font-bold").style(f"color: {status_color};")
+
+            # ── Param header strip — compact inline pills ─────────────────
+            try:
+                display_params = json.loads(exp.get("params_json") or "{}")
+            except TypeError, ValueError:
+                display_params = {}
+            if display_params:
+                key_params = ["gap_threshold", "universe_size", "holding_days", "atr_period"]
+                with ui.row().classes("w-full gap-2 mb-3 flex-wrap"):
+                    for pk in key_params:
+                        pv = display_params.get(pk)
+                        if pv is not None:
+                            ui.html(
+                                f'<span style="background:{hex_to_rgba(color_info(), 0.12)};'
+                                f"color:{color_info()};padding:2px 8px;border-radius:3px;"
+                                f"font-size:0.7rem;font-family:monospace;"
+                                f'border:1px solid {hex_to_rgba(color_info(), 0.25)}">'
+                                f"{pk}: {pv}</span>"
+                            )
+
+            # ── Primary KPIs (4 big cards) ────────────────────────────────
+            win_rate = float(exp.get("win_rate_pct") or 0)
+            total_return = float(exp.get("total_return_pct") or 0)
+            max_dd = float(exp.get("max_drawdown_pct") or 0)
+
             kpi_grid(
                 [
                     dict(
-                        title="Total Return",
-                        value=f"{ret_val:.1f}%",
-                        icon="attach_money",
-                        color=color_success() if ret_val > 0 else color_error(),
-                    ),
-                    dict(
-                        title="Annualized",
-                        value=f"{float(exp.get('annualized_return_pct', 0)):.1f}%",
-                        icon="trending_up",
-                        color=color_info(),
-                    ),
-                    dict(
                         title="Win Rate",
-                        value=f"{float(exp.get('win_rate_pct', 0)):.1f}%",
+                        value=f"{win_rate:.1f}%",
                         icon="target",
-                        color=color_warning(),
+                        color=color_success() if win_rate >= 40 else color_error(),
+                    ),
+                    dict(
+                        title="Total Return",
+                        value=f"{total_return:.1f}%",
+                        icon="trending_up",
+                        color=color_success() if total_return > 0 else color_error(),
                     ),
                     dict(
                         title="Max Drawdown",
-                        value=f"{float(exp.get('max_drawdown_pct', 0)):.1f}",
+                        value=f"{max_dd:.1f}%",
                         icon="trending_down",
                         color=color_error(),
                     ),
                     dict(
                         title="Total Trades",
                         value=f"{int(exp.get('total_trades') or 0):,}",
-                        icon="bar_chart",
-                        color=color_primary(),
+                        icon="swap_horiz",
+                        color=color_info(),
                     ),
                 ],
-                columns=5,
+                columns=4,
             )
 
+            # ── Secondary metrics — mini card row ─────────────────────────
+            annualized = float(exp.get("annualized_return_pct") or 0)
+            pf = float(exp.get("profit_factor") or 0)
+
+            with ui.row().classes("w-full gap-3 mb-4 flex-wrap"):
+                for title, value, color in [
+                    (
+                        "Annualized",
+                        f"{annualized:.1f}%",
+                        color_success() if annualized >= 0 else color_error(),
+                    ),
+                    (
+                        "Profit Factor",
+                        f"{pf:.2f}",
+                        color_success() if pf >= 1.5 else color_warning(),
+                    ),
+                    (
+                        "Period",
+                        f"{exp.get('start_year', '-')}-{exp.get('end_year', '-')}",
+                        color_gray(),
+                    ),
+                    ("Status", str(exp.get("status", "-")).upper(), color_info()),
+                ]:
+                    with (
+                        ui.column()
+                        .classes("items-center px-5 py-3")
+                        .style(
+                            f"background:{theme_surface()};"
+                            f"border:1px solid {theme_surface_border()};"
+                            f"border-top:3px solid {color};"
+                            f"border-radius:6px;min-width:100px;"
+                        )
+                    ):
+                        ui.label(value).classes("text-lg font-bold mono-font tabular-nums").style(
+                            f"color: {color};"
+                        )
+                        ui.label(title).classes("text-xs uppercase tracking-wide mt-1").style(
+                            f"color: {theme_text_secondary()};"
+                        )
+
+            # ── Full parameters (expandable, grouped) ─────────────────────
             with ui.expansion("Run Parameters", icon="tune", value=False).classes("w-full"):
                 ui.label("Stored run parameters for this experiment.").classes("text-sm").style(
                     f"color: {color_gray()};"
@@ -724,57 +778,643 @@ async def backtest_page() -> None:
                 return [
                     {
                         "trade_row_id": int(row["trade_row_id"]),
-                        **{col: _format_trade_val(row.get(col), col) for col in avail_cols},
+                        **{
+                            col: (
+                                # Keep numeric cols as raw floats so QTable sorts correctly.
+                                # None stays None — JS format handles the null display.
+                                row.get(col)
+                                if col in ("pnl_pct", "pnl_r") and row.get(col) is not None
+                                else _format_trade_val(row.get(col), col)
+                            )
+                            for col in avail_cols
+                        },
                     }
                     for row in df_slice.to_dicts()
                 ]
 
-            table_columns = [
-                {"name": col, "label": col.replace("_", " ").title(), "field": col}
-                for col in avail_cols
+            def _col_def(col: str) -> dict:
+                base = {
+                    "name": col,
+                    "label": col.replace("_", " ").title(),
+                    "field": col,
+                }
+                if col == "pnl_pct":
+                    base["format"] = "val => val == null ? '-' : val.toFixed(2) + '%'"
+                    base["sortable"] = True
+                elif col == "pnl_r":
+                    base["format"] = "val => val == null ? '-' : val.toFixed(2) + 'R'"
+                    base["sortable"] = True
+                return base
+
+            table_columns = [_col_def(col) for col in avail_cols]
+
+            # ── 5-Tab analytics layout (CPR-style grouping) ─────────────
+            _months = [
+                "Jan",
+                "Feb",
+                "Mar",
+                "Apr",
+                "May",
+                "Jun",
+                "Jul",
+                "Aug",
+                "Sep",
+                "Oct",
+                "Nov",
+                "Dec",
             ]
 
             tabs = ui.tabs().classes("w-full")
             with tabs:
-                tab_trades = ui.tab("All Trades")
-                tab_yearly = ui.tab("Yearly")
-                tab_equity = ui.tab("Equity Curve")
-                tab_exit = ui.tab("Exit Reasons")
-                tab_r = ui.tab("R-Multiple")
-                tab_wl = ui.tab("Winners/Losers")
-                tab_stock = ui.tab("Per-Stock")
-                tab_monthly = ui.tab("Monthly Heatmap")
+                tab_trades = ui.tab("trades", label="Trades")
+                tab_top = ui.tab("top_trades", label="Top Trades")
+                tab_charts = ui.tab("charts", label="Charts")
+                tab_analysis = ui.tab("analysis", label="Analysis")
+                tab_audit = ui.tab("audit", label="Audit")
 
-            with ui.tab_panels(tabs, value=tab_trades).classes("w-full"):
+            with ui.tab_panels(tabs, value=tab_trades).classes("w-full bg-transparent pt-4"):
+                # ── Tab: Trades ──────────────────────────────────────────
                 with ui.tab_panel(tab_trades):
-                    with ui.row().classes(f"w-full {SPACE_GROUP_TIGHT} mb-2"):
-                        n_total = trades_df.height
-                        n_winners = int(
-                            trades_df.filter(pl.col("pnl_pct") > 0).height
-                            if "pnl_pct" in trades_df.columns
-                            else 0
+                    with ui.expansion("All Trades", icon="table_chart", value=True).classes(
+                        "w-full"
+                    ):
+                        with ui.row().classes(f"w-full {SPACE_GROUP_TIGHT} mb-2"):
+                            n_total = trades_df.height
+                            n_winners = int(
+                                trades_df.filter(pl.col("pnl_pct") > 0).height
+                                if "pnl_pct" in trades_df.columns
+                                else 0
+                            )
+                            ui.label(f"{n_total:,} trades total").classes("text-sm").style(
+                                f"color: {theme_text_secondary()};"
+                            )
+                            ui.label(f"{n_winners:,} winners").classes("text-sm").style(
+                                f"color: {color_success()};"
+                            )
+                            ui.label(f"{n_total - n_winners:,} losers").classes("text-sm").style(
+                                f"color: {color_error()};"
+                            )
+                        ui.label("Click any trade row to inspect details.").classes(
+                            "text-xs"
+                        ).style(f"color: {theme_text_muted()};")
+                        trade_table_with_filters(
+                            trades_df=trades_df,
+                            columns=table_columns,
+                            rows=_trade_rows(trades_df),
+                            page_size=50,
+                            row_key="trade_row_id",
+                            on_row_click=_open_trade_details_from_payload,
                         )
-                        ui.label(f"{n_total:,} trades total").classes("text-sm").style(
-                            f"color: {theme_text_secondary()};"
+
+                    with ui.expansion("Daily Summary", icon="calendar_view_day").classes("w-full"):
+                        if "entry_date" in trades_df.columns and "pnl_pct" in trades_df.columns:
+                            daily = (
+                                trades_df.with_columns(
+                                    (pl.col("pnl_pct") > 0).alias("_is_win"),
+                                    pl.col("entry_date")
+                                    .cast(pl.Date, strict=False)
+                                    .alias("_entry_date"),
+                                )
+                                .drop_nulls("_entry_date")
+                                .group_by("_entry_date")
+                                .agg(
+                                    pl.len().alias("trades"),
+                                    pl.col("pnl_pct").sum().round(2).alias("day_pnl"),
+                                    pl.col("_is_win").sum().alias("wins"),
+                                    (pl.col("_is_win").sum() * 100.0 / pl.len())
+                                    .round(1)
+                                    .alias("win_rate"),
+                                )
+                                .sort("_entry_date", descending=True)
+                            )
+                            daily_rows = [
+                                {
+                                    "date": str(row["_entry_date"])[:10],
+                                    "trades": int(row["trades"]),
+                                    "wins": int(row["wins"]),
+                                    "win_rate": float(row["win_rate"]),
+                                    "day_pnl": float(row["day_pnl"]),
+                                }
+                                for row in daily.iter_rows(named=True)
+                            ]
+                            paginated_table(
+                                columns=[
+                                    {
+                                        "name": "date",
+                                        "label": "Date",
+                                        "field": "date",
+                                        "align": "left",
+                                    },
+                                    {
+                                        "name": "trades",
+                                        "label": "Trades",
+                                        "field": "trades",
+                                        "align": "right",
+                                    },
+                                    {
+                                        "name": "wins",
+                                        "label": "Wins",
+                                        "field": "wins",
+                                        "align": "right",
+                                    },
+                                    {
+                                        "name": "win_rate",
+                                        "label": "Win %",
+                                        "field": "win_rate",
+                                        "align": "right",
+                                        "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                    },
+                                    {
+                                        "name": "day_pnl",
+                                        "label": "Day P/L",
+                                        "field": "day_pnl",
+                                        "align": "right",
+                                        "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    },
+                                ],
+                                rows=daily_rows,
+                                row_key="date",
+                                page_size=25,
+                            )
+
+                # ── Tab: Top Trades ──────────────────────────────────────
+                with ui.tab_panel(tab_top):
+                    if "pnl_pct" in trades_df.columns:
+                        with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
+                            with ui.column().classes("flex-1"):
+                                ui.label("Top Winners").classes(
+                                    f"text-lg font-semibold {SPACE_SM}"
+                                ).style(f"color: {color_success()};")
+                                top_winners = trades_df.sort(
+                                    "pnl_pct", descending=True, nulls_last=True
+                                ).head(min(25, trades_df.height))
+                                with ui.element("div").style(
+                                    "width: 100%; max-height: 500px; overflow-x: auto;"
+                                ):
+                                    paginated_table(
+                                        columns=table_columns,
+                                        rows=_trade_rows(top_winners),
+                                        page_size=25,
+                                        row_key="trade_row_id",
+                                        on_row_click=_open_trade_details_from_payload,
+                                    )
+
+                            with ui.column().classes("flex-1"):
+                                ui.label("Top Losers").classes(
+                                    f"text-lg font-semibold {SPACE_SM}"
+                                ).style(f"color: {color_error()};")
+                                top_losers = trades_df.sort(
+                                    "pnl_pct", descending=False, nulls_last=True
+                                ).head(min(25, trades_df.height))
+                                with ui.element("div").style(
+                                    "width: 100%; max-height: 500px; overflow-x: auto;"
+                                ):
+                                    paginated_table(
+                                        columns=table_columns,
+                                        rows=_trade_rows(top_losers),
+                                        page_size=25,
+                                        row_key="trade_row_id",
+                                        on_row_click=_open_trade_details_from_payload,
+                                    )
+
+                # ── Tab: Charts (equity + monthly + daily heatmap) ───────
+                with ui.tab_panel(tab_charts):
+                    # Equity Curve
+                    if "pnl_pct" in trades_df.columns and "entry_date" in trades_df.columns:
+                        equity = (
+                            trades_df.sort("entry_date")
+                            .with_columns(
+                                pl.col("pnl_pct")
+                                .fill_null(0.0)
+                                .cum_sum()
+                                .alias("cumulative_return")
+                            )
+                            .with_columns(pl.col("cumulative_return").cum_max().alias("cummax"))
+                            .with_columns(
+                                (pl.col("cumulative_return") - pl.col("cummax")).alias("drawdown")
+                            )
                         )
-                        ui.label(f"{n_winners:,} winners").classes("text-sm").style(
-                            f"color: {color_success()};"
+
+                        fig_eq = go.Figure()
+                        fig_eq.add_trace(
+                            go.Scatter(
+                                x=equity.get_column("entry_date").to_list(),
+                                y=equity.get_column("drawdown").to_list(),
+                                fill="tozeroy",
+                                fillcolor=hex_to_rgba(color_error(), 0.15),
+                                line_color=color_error(),
+                                name="Drawdown",
+                                hovertemplate="%{x}<br>DD: %{y:.2f}%<extra></extra>",
+                            )
                         )
-                        ui.label(f"{n_total - n_winners:,} losers").classes("text-sm").style(
-                            f"color: {color_error()};"
+                        fig_eq.add_trace(
+                            go.Scatter(
+                                x=equity.get_column("entry_date").to_list(),
+                                y=equity.get_column("cumulative_return").to_list(),
+                                mode="lines",
+                                name="Cumulative Return %",
+                                line=dict(color=color_primary(), width=2.5),
+                                hovertemplate="%{x}<br>Return: %{y:.2f}%<extra></extra>",
+                            )
                         )
-                    ui.label("Click any trade row to inspect details.").classes("text-xs").style(
-                        f"color: {theme_text_muted()};"
-                    )
-                    trade_table_with_filters(
-                        trades_df=trades_df,
-                        columns=table_columns,
-                        rows=_trade_rows(trades_df),
-                        page_size=50,
-                        row_key="trade_row_id",
-                        on_row_click=_open_trade_details_from_payload,
-                    )
-                with ui.tab_panel(tab_yearly):
+                        fig_eq.update_layout(
+                            title="Equity Curve with Drawdown",
+                            xaxis_title="Date",
+                            yaxis_title="Return %",
+                            hovermode="x unified",
+                        )
+                        apply_chart_theme(fig_eq)
+                        ui.plotly(fig_eq).classes("w-full h-80")
+
+                    divider()
+
+                    # Monthly P/L Heatmap
+                    if "entry_date" in trades_df.columns and "pnl_pct" in trades_df.columns:
+                        monthly_returns = (
+                            trades_df.with_columns(
+                                pl.col("entry_date").cast(pl.Date, strict=False).alias("entry_date")
+                            )
+                            .drop_nulls("entry_date")
+                            .with_columns(
+                                pl.col("entry_date").dt.year().alias("year"),
+                                pl.col("entry_date").dt.month().alias("month"),
+                            )
+                            .group_by(["year", "month"])
+                            .agg(pl.col("pnl_pct").sum().alias("monthly_return"))
+                            .sort(["year", "month"])
+                        )
+                        years = monthly_returns.get_column("year").unique().sort().to_list()
+                        monthly_lookup = {
+                            (row["year"], row["month"]): row["monthly_return"]
+                            for row in monthly_returns.to_dicts()
+                        }
+                        z_data = [
+                            [monthly_lookup.get((y, m), None) for m in range(1, 13)] for y in years
+                        ]
+                        pnl_max = max(abs(v) for row in z_data for v in row if v is not None) or 1
+
+                        fig_monthly = go.Figure(
+                            go.Heatmap(
+                                z=z_data,
+                                x=_months,
+                                y=[str(y) for y in years],
+                                colorscale=[
+                                    [0, color_error()],
+                                    [0.5, theme_surface()],
+                                    [1, color_success()],
+                                ],
+                                zmid=0,
+                                zmin=-pnl_max,
+                                zmax=pnl_max,
+                                text=[
+                                    [f"{v:.1f}%" if v is not None else "" for v in row]
+                                    for row in z_data
+                                ],
+                                texttemplate="%{text}",
+                                textfont={"size": 9},
+                                hovertemplate="Month: %{x}<br>Year: %{y}<br>P/L: %{z:.1f}%<extra></extra>",
+                                colorbar=dict(title="Return %"),
+                            )
+                        )
+                        fig_monthly.update_layout(
+                            title="Monthly P/L Heatmap",
+                            height=max(300, len(years) * 38 + 100),
+                        )
+                        apply_chart_theme(fig_monthly)
+                        ui.plotly(fig_monthly).classes("w-full")
+
+                    divider()
+
+                    # Daily P/L Heatmap (calendar-style: x=day, y=year-month)
+                    if "entry_date" in trades_df.columns and "pnl_pct" in trades_df.columns:
+                        daily_hm = (
+                            trades_df.with_columns(
+                                pl.col("entry_date").cast(pl.Date, strict=False).alias("_edate")
+                            )
+                            .drop_nulls("_edate")
+                            .group_by("_edate")
+                            .agg(pl.col("pnl_pct").sum().round(2).alias("pnl"))
+                            .sort("_edate")
+                        )
+                        if not daily_hm.is_empty():
+                            daily_with_cal = daily_hm.with_columns(
+                                pl.col("_edate").dt.year().alias("year"),
+                                pl.col("_edate").dt.month().alias("month"),
+                                pl.col("_edate").dt.day().alias("day"),
+                            )
+                            month_groups = (
+                                daily_with_cal.group_by(["year", "month"])
+                                .agg(
+                                    pl.col("day").alias("days"),
+                                    pl.col("pnl").alias("pnls"),
+                                )
+                                .sort(["year", "month"])
+                            )
+                            y_labels = []
+                            z_daily = []
+                            text_daily = []
+                            for row in month_groups.iter_rows(named=True):
+                                label = f"{row['year']}-{row['month']:02d}"
+                                y_labels.append(label)
+                                day_pnl = {
+                                    int(d): float(p)
+                                    for d, p in zip(row["days"], row["pnls"], strict=True)
+                                }
+                                z_row = [None] * 31
+                                t_row = [""] * 31
+                                for d in range(1, 32):
+                                    if d in day_pnl:
+                                        z_row[d - 1] = day_pnl[d]
+                                        t_row[d - 1] = f"{day_pnl[d]:.1f}%"
+                                z_daily.append(z_row)
+                                text_daily.append(t_row)
+
+                            daily_max = (
+                                max(abs(v) for row in z_daily for v in row if v is not None) or 1
+                            )
+                            fig_daily = go.Figure(
+                                go.Heatmap(
+                                    z=z_daily,
+                                    x=list(range(1, 32)),
+                                    y=y_labels,
+                                    colorscale=[
+                                        [0, color_error()],
+                                        [0.5, theme_surface()],
+                                        [1, color_success()],
+                                    ],
+                                    zmid=0,
+                                    zmin=-daily_max,
+                                    zmax=daily_max,
+                                    text=text_daily,
+                                    texttemplate="%{text}",
+                                    textfont={"size": 8},
+                                    hovertemplate="Day %{x}<br>%{y}<br>P/L: %{z:.1f}%<extra></extra>",
+                                    colorbar=dict(title="Return %"),
+                                    xgap=2,
+                                    ygap=2,
+                                )
+                            )
+                            fig_daily.update_layout(
+                                title="Daily P/L Heatmap",
+                                xaxis_title="Day of Month",
+                                xaxis=dict(dtick=1, tickfont={"size": 10}),
+                                height=max(350, len(y_labels) * 28 + 120),
+                            )
+                            apply_chart_theme(fig_daily)
+                            ui.plotly(fig_daily).classes("w-full")
+
+                # ── Tab: Analysis (exits + R-multiple + per-stock + yearly)
+                with ui.tab_panel(tab_analysis):
+                    # Exit Reasons
+                    if "exit_reason" in trades_df.columns:
+                        exit_pnl = trades_df.group_by("exit_reason").agg(
+                            pl.len().alias("count"),
+                            pl.col("pnl_pct").mean().alias("avg_pnl"),
+                            pl.col("pnl_r").mean().alias("avg_r"),
+                        )
+                        with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
+                            with ui.column().classes("flex-1"):
+                                exit_counts = trades_df.group_by("exit_reason").agg(
+                                    pl.len().alias("count")
+                                )
+                                fig_pie = go.Figure()
+                                fig_pie.add_trace(
+                                    go.Pie(
+                                        labels=exit_counts.get_column("exit_reason").to_list(),
+                                        values=exit_counts.get_column("count").to_list(),
+                                        hole=0.3,
+                                    )
+                                )
+                                fig_pie.update_layout(title="Exit Reason Distribution")
+                                apply_chart_theme(fig_pie)
+                                ui.plotly(fig_pie).classes("w-full h-64")
+
+                            with ui.column().classes("flex-1"):
+                                exit_rows = [
+                                    {
+                                        "trade_row_id": _first_trade_row_id_by_exit_reason(
+                                            row.get("exit_reason")
+                                        ),
+                                        "exit_reason": row["exit_reason"],
+                                        "count": int(row["count"]),
+                                        "avg_pnl": float(row["avg_pnl"]),
+                                        "avg_r": float(row["avg_r"]),
+                                    }
+                                    for row in exit_pnl.to_dicts()
+                                ]
+                                paginated_table(
+                                    columns=[
+                                        {
+                                            "name": "exit_reason",
+                                            "label": "Reason",
+                                            "field": "exit_reason",
+                                        },
+                                        {
+                                            "name": "count",
+                                            "label": "Count",
+                                            "field": "count",
+                                        },
+                                        {
+                                            "name": "avg_pnl",
+                                            "label": "Avg %",
+                                            "field": "avg_pnl",
+                                            "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                        },
+                                        {
+                                            "name": "avg_r",
+                                            "label": "Avg R",
+                                            "field": "avg_r",
+                                            "format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
+                                        },
+                                    ],
+                                    rows=exit_rows,
+                                    row_key="trade_row_id",
+                                    on_row_click=_open_trade_details_from_payload,
+                                    page_size=20,
+                                )
+
+                    divider()
+
+                    # R-Multiple Distribution
+                    if "pnl_r" in trades_df.columns:
+                        r_vals = trades_df.get_column("pnl_r").drop_nulls().to_numpy()
+                        if len(r_vals) > 0:
+                            fig_r = go.Figure()
+                            fig_r.add_trace(
+                                go.Histogram(
+                                    x=r_vals,
+                                    nbinsx=50,
+                                    marker_color=color_primary(),
+                                    name="Distribution",
+                                    opacity=0.7,
+                                )
+                            )
+                            mu, sigma = r_vals.mean(), r_vals.std()
+                            if sigma > 0:
+                                x_norm = np.linspace(r_vals.min(), r_vals.max(), 100)
+                                y_norm = (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(
+                                    -0.5 * ((x_norm - mu) / sigma) ** 2
+                                )
+                                bin_width = (r_vals.max() - r_vals.min()) / 50
+                                y_norm_scaled = y_norm * len(r_vals) * bin_width
+                                fig_r.add_trace(
+                                    go.Scatter(
+                                        x=x_norm,
+                                        y=y_norm_scaled,
+                                        mode="lines",
+                                        name="Normal Dist",
+                                        line=dict(color=color_error(), dash="dash"),
+                                    )
+                                )
+                            fig_r.add_vline(x=0, line_dash="dash", line_color=theme_text_muted())
+                            fig_r.add_vline(
+                                x=mu,
+                                line_dash="dot",
+                                line_color=color_success(),
+                                annotation_text=f"Mean: {mu:.2f}R",
+                            )
+                            fig_r.update_layout(
+                                title="R-Multiple Distribution",
+                                xaxis_title="R-Multiple",
+                                yaxis_title="Count",
+                                barmode="overlay",
+                            )
+                            apply_chart_theme(fig_r)
+                            ui.plotly(fig_r).classes("w-full h-64")
+
+                            percentiles = [10, 25, 50, 75, 90]
+                            pct_data = [
+                                {
+                                    "Percentile": f"P{p}",
+                                    "Value": float(np.percentile(r_vals, p)),
+                                }
+                                for p in percentiles
+                            ]
+                            pct_data.extend(
+                                [
+                                    {
+                                        "Percentile": "Mean",
+                                        "Value": float(r_vals.mean()),
+                                    },
+                                    {
+                                        "Percentile": "Min",
+                                        "Value": float(r_vals.min()),
+                                    },
+                                    {
+                                        "Percentile": "Max",
+                                        "Value": float(r_vals.max()),
+                                    },
+                                ]
+                            )
+                            paginated_table(
+                                columns=[
+                                    {
+                                        "name": "Percentile",
+                                        "label": "Percentile",
+                                        "field": "Percentile",
+                                    },
+                                    {
+                                        "name": "Value",
+                                        "label": "R-Multiple",
+                                        "field": "Value",
+                                        "format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
+                                    },
+                                ],
+                                rows=pct_data,
+                                page_size=20,
+                            )
+
+                    divider()
+
+                    # Per-Stock Analysis
+                    if "symbol" in trades_df.columns and "pnl_pct" in trades_df.columns:
+                        stock_stats = (
+                            trades_df.group_by("symbol")
+                            .agg(
+                                pl.len().alias("trades"),
+                                pl.col("pnl_pct").sum().alias("total_pnl"),
+                                pl.col("pnl_pct").mean().alias("avg_pnl"),
+                                pl.col("pnl_r").mean().alias("avg_r"),
+                                ((pl.col("pnl_pct") > 0).cast(pl.Float64).mean() * 100).alias(
+                                    "win_rate"
+                                ),
+                                pl.col("pnl_pct").max().alias("best"),
+                                pl.col("pnl_pct").min().alias("worst"),
+                            )
+                            .sort("total_pnl", descending=True)
+                        )
+                        stock_rows = [
+                            {
+                                "trade_row_id": _first_trade_row_id_by_symbol(row["symbol"]),
+                                "symbol": row["symbol"],
+                                "trades": int(row["trades"]),
+                                "total_pnl": float(row["total_pnl"]),
+                                "avg_pnl": float(row["avg_pnl"]),
+                                "avg_r": float(row["avg_r"]),
+                                "win_rate": float(row["win_rate"]),
+                                "best": float(row["best"]),
+                                "worst": float(row["worst"]),
+                            }
+                            for row in stock_stats.head(50).to_dicts()
+                        ]
+                        paginated_table(
+                            columns=[
+                                {
+                                    "name": "symbol",
+                                    "label": "Symbol",
+                                    "field": "symbol",
+                                },
+                                {
+                                    "name": "trades",
+                                    "label": "Trades",
+                                    "field": "trades",
+                                },
+                                {
+                                    "name": "total_pnl",
+                                    "label": "Total %",
+                                    "field": "total_pnl",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                },
+                                {
+                                    "name": "avg_pnl",
+                                    "label": "Avg %",
+                                    "field": "avg_pnl",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                },
+                                {
+                                    "name": "avg_r",
+                                    "label": "Avg R",
+                                    "field": "avg_r",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
+                                },
+                                {
+                                    "name": "win_rate",
+                                    "label": "Win %",
+                                    "field": "win_rate",
+                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                },
+                                {
+                                    "name": "best",
+                                    "label": "Best",
+                                    "field": "best",
+                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                },
+                                {
+                                    "name": "worst",
+                                    "label": "Worst",
+                                    "field": "worst",
+                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                },
+                            ],
+                            rows=stock_rows,
+                            row_key="trade_row_id",
+                            on_row_click=_open_trade_details_from_payload,
+                            page_size=20,
+                        )
+
+                    divider()
+
+                    # Yearly Performance
                     if not yearly_df.is_empty():
                         display_cols = {
                             "year": "Year",
@@ -790,27 +1430,45 @@ async def backtest_page() -> None:
                         }
                         available = [c for c in display_cols if c in yearly_df.columns]
                         rename_dict = {k: v for k, v in display_cols.items() if k in available}
-
                         if available:
                             display_df = yearly_df.select(available).rename(rename_dict)
 
-                            def format_for_display(val, col):
-                                if val is None or (isinstance(val, float) and np.isnan(val)):
-                                    return "-"
+                            def _yearly_col_format(col: str) -> str | None:
                                 if "Return" in col or "Rate" in col or "DD" in col:
-                                    return f"{float(val):.2f}%"
+                                    return "val => val == null ? '-' : val.toFixed(2) + '%'"
                                 if col in ["Avg R", "PF"]:
-                                    return f"{float(val):.2f}"
-                                return f"{int(val)}"
+                                    return "val => val == null ? '-' : val.toFixed(2)"
+                                return None
 
                             paginated_table(
                                 columns=[
-                                    {"name": col, "label": col, "field": col}
+                                    {
+                                        "name": col,
+                                        "label": col,
+                                        "field": col,
+                                        **(
+                                            {"format": fmt}
+                                            if (fmt := _yearly_col_format(col))
+                                            else {}
+                                        ),
+                                    }
                                     for col in display_df.columns
                                 ],
                                 rows=[
                                     {
-                                        col: format_for_display(row.get(col), col)
+                                        col: (
+                                            None
+                                            if row.get(col) is None
+                                            or (
+                                                isinstance(row.get(col), float)
+                                                and np.isnan(row.get(col))
+                                            )
+                                            else (
+                                                float(row[col])
+                                                if _yearly_col_format(col) is not None
+                                                else int(row[col])
+                                            )
+                                        )
                                         for col in display_df.columns
                                     }
                                     for row in display_df.to_dicts()
@@ -852,338 +1510,171 @@ async def backtest_page() -> None:
                         ui.label("No yearly data available for this experiment.").style(
                             f"color: {theme_text_secondary()};"
                         )
-                with ui.tab_panel(tab_equity):
-                    if "pnl_pct" in trades_df.columns and "entry_date" in trades_df.columns:
-                        equity = (
-                            trades_df.sort("entry_date")
-                            .with_columns(
-                                pl.col("pnl_pct")
-                                .fill_null(0.0)
-                                .cum_sum()
-                                .alias("cumulative_return")
-                            )
-                            .with_columns(pl.col("cumulative_return").cum_max().alias("cummax"))
-                            .with_columns(
-                                (pl.col("cumulative_return") - pl.col("cummax")).alias("drawdown")
-                            )
-                        )
 
-                        fig_eq = go.Figure()
+                # ── Tab: Audit (execution shape) ─────────────────────────
+                with ui.tab_panel(tab_audit):
+                    enriched = trades_df.with_columns(
+                        pl.col("entry_date").cast(pl.Date, strict=False).alias("_trade_date"),
+                        pl.col("entry_time")
+                        .cast(pl.Utf8, strict=False)
+                        .str.slice(0, 5)
+                        .alias("_entry_hhmm"),
+                        (pl.col("pnl_pct") > 0).alias("_is_win"),
+                    )
 
-                        fig_eq.add_trace(
-                            go.Scatter(
-                                x=equity.get_column("entry_date").to_list(),
-                                y=equity.get_column("drawdown").to_list(),
-                                fill="tozeroy",
-                                fillcolor=hex_to_rgba(color_error(), 0.15),
-                                line_color=color_error(),
-                                name="Drawdown",
-                                hovertemplate="%{x}<br>Drawdown: %{y:.2f}%<extra></extra>",
-                            )
-                        )
+                    total_days = int(
+                        enriched["_trade_date"].n_unique()
+                        if "_trade_date" in enriched.columns
+                        else 0
+                    )
 
-                        fig_eq.add_trace(
-                            go.Scatter(
-                                x=equity.get_column("entry_date").to_list(),
-                                y=equity.get_column("cumulative_return").to_list(),
-                                mode="lines",
-                                name="Cumulative Return %",
-                                line=dict(color=color_primary(), width=2.5),
-                                hovertemplate="%{x}<br>Return: %{y:.2f}%<extra></extra>",
-                            )
-                        )
+                    def _mean_or_zero(series: pl.Series | None) -> float:
+                        if series is None:
+                            return 0.0
+                        val = series.drop_nulls().mean()
+                        return float(val) if val is not None else 0.0
 
-                        fig_eq.update_layout(
-                            title="Equity Curve with Drawdown",
-                            xaxis_title="Date",
-                            yaxis_title="Return %",
-                            hovermode="x unified",
-                        )
-                        apply_chart_theme(fig_eq)
-                        ui.plotly(fig_eq).classes("w-full h-80")
+                    avg_entry_price = _mean_or_zero(
+                        enriched.get_column("entry_price")
+                        if "entry_price" in enriched.columns
+                        else None
+                    )
+                    avg_holding = _mean_or_zero(
+                        enriched.get_column("holding_days")
+                        if "holding_days" in enriched.columns
+                        else None
+                    )
+                    avg_abs_gap = _mean_or_zero(
+                        enriched.get_column("gap_pct").abs()
+                        if "gap_pct" in enriched.columns
+                        else None
+                    )
+                    n_winners_audit = int(enriched.filter(pl.col("_is_win")).height)
+                    _r_col = enriched.get_column("pnl_r") if "pnl_r" in enriched.columns else None
+                    if _r_col is not None:
+                        _r_clean = _r_col.drop_nulls().filter(_r_col.drop_nulls().abs() < 100)
+                        avg_r = float(_r_clean.mean()) if len(_r_clean) > 0 else 0.0
+                    else:
+                        avg_r = 0.0
 
-                with ui.tab_panel(tab_exit):
-                    if "exit_reason" in trades_df.columns:
-                        exit_pnl = trades_df.group_by("exit_reason").agg(
-                            pl.len().alias("count"),
-                            pl.col("pnl_pct").mean().alias("avg_pnl"),
-                            pl.col("pnl_r").mean().alias("avg_r"),
+                    kpi_grid(
+                        [
+                            dict(
+                                title="Trading Days",
+                                value=f"{total_days:,}",
+                                icon="calendar_month",
+                                color=color_info(),
+                            ),
+                            dict(
+                                title="Winners",
+                                value=f"{n_winners_audit:,}",
+                                icon="north_east",
+                                color=color_success(),
+                            ),
+                            dict(
+                                title="Avg Entry ₹",
+                                value=f"₹{avg_entry_price:,.0f}",
+                                icon="account_balance_wallet",
+                                color=color_primary(),
+                            ),
+                            dict(
+                                title="Avg Holding",
+                                value=f"{avg_holding:.1f}d",
+                                icon="schedule",
+                                color=color_warning(),
+                            ),
+                            dict(
+                                title="Avg |Gap| %",
+                                value=f"{avg_abs_gap:.3f}%",
+                                icon="difference",
+                                color=color_info(),
+                            ),
+                            dict(
+                                title="Avg R",
+                                value=f"{avg_r:.2f}R",
+                                icon="bar_chart",
+                                color=color_success() if avg_r >= 0 else color_error(),
+                            ),
+                        ],
+                        columns=6,
+                    )
+
+                    # Entry-Time Distribution + Exit by Holding Period
+                    entry_bins = (
+                        enriched.drop_nulls("_entry_hhmm")
+                        .group_by("_entry_hhmm")
+                        .agg(
+                            pl.len().alias("trades"),
+                            pl.col("pnl_pct").sum().round(2).alias("pnl"),
                         )
-                        with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
-                            with ui.column().classes("flex-1"):
-                                exit_counts = trades_df.group_by("exit_reason").agg(
-                                    pl.len().alias("count")
+                        .sort("_entry_hhmm")
+                    )
+                    exit_by_hold = (
+                        enriched.with_columns(
+                            pl.col("holding_days").cast(pl.Int64, strict=False).alias("_hold")
+                        )
+                        .group_by(["_hold", "exit_reason"])
+                        .agg(pl.len().alias("count"))
+                        .sort(["_hold", "exit_reason"])
+                    )
+
+                    with ui.row().classes(f"w-full gap-4 {SPACE_GRID_DEFAULT}"):
+                        with ui.column().classes("flex-1"):
+                            if not entry_bins.is_empty():
+                                fig_entry = go.Figure(
+                                    data=[
+                                        go.Bar(
+                                            x=entry_bins["_entry_hhmm"].to_list(),
+                                            y=entry_bins["trades"].to_list(),
+                                            marker_color=color_primary(),
+                                            hovertemplate="Entry %{x}<br>Trades %{y}<extra></extra>",
+                                        )
+                                    ]
                                 )
-                                fig_pie = go.Figure()
-                                fig_pie.add_trace(
-                                    go.Pie(
-                                        labels=exit_counts.get_column("exit_reason").to_list(),
-                                        values=exit_counts.get_column("count").to_list(),
-                                        hole=0.3,
-                                    )
+                                fig_entry.update_layout(
+                                    title="Entry-Time Distribution",
+                                    xaxis_title="Entry Time (HH:MM)",
+                                    yaxis_title="Trades",
                                 )
-                                fig_pie.update_layout(title="Exit Reason Distribution")
-                                apply_chart_theme(fig_pie)
-                                ui.plotly(fig_pie).classes("w-full h-64")
+                                apply_chart_theme(fig_entry)
+                                ui.plotly(fig_entry).classes("w-full h-72")
 
-                            with ui.column().classes("flex-1"):
-                                exit_rows = [
+                        with ui.column().classes("flex-1"):
+                            if not exit_by_hold.is_empty():
+                                hold_days = sorted(
                                     {
-                                        "trade_row_id": _first_trade_row_id_by_exit_reason(
-                                            row.get("exit_reason")
-                                        ),
-                                        "exit_reason": row["exit_reason"],
-                                        "count": int(row["count"]),
-                                        "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
-                                        "avg_r_fmt": f"{row['avg_r']:.2f}R",
+                                        int(v)
+                                        for v in exit_by_hold["_hold"].to_list()
+                                        if v is not None
                                     }
-                                    for row in exit_pnl.to_dicts()
-                                ]
-                                paginated_table(
-                                    columns=[
-                                        {
-                                            "name": "exit_reason",
-                                            "label": "Reason",
-                                            "field": "exit_reason",
-                                        },
-                                        {"name": "count", "label": "Count", "field": "count"},
-                                        {
-                                            "name": "avg_pnl_fmt",
-                                            "label": "Avg %",
-                                            "field": "avg_pnl_fmt",
-                                        },
-                                        {
-                                            "name": "avg_r_fmt",
-                                            "label": "Avg R",
-                                            "field": "avg_r_fmt",
-                                        },
-                                    ],
-                                    rows=exit_rows,
-                                    row_key="trade_row_id",
-                                    on_row_click=_open_trade_details_from_payload,
-                                    page_size=20,
                                 )
-
-                with ui.tab_panel(tab_r):
-                    if "pnl_r" in trades_df.columns:
-                        r_vals = trades_df.get_column("pnl_r").drop_nulls().to_numpy()
-                        if len(r_vals) > 0:
-                            fig_r = go.Figure()
-
-                            fig_r.add_trace(
-                                go.Histogram(
-                                    x=r_vals,
-                                    nbinsx=50,
-                                    marker_color=color_primary(),
-                                    name="Distribution",
-                                    opacity=0.7,
+                                reasons = sorted(
+                                    {str(v) for v in exit_by_hold["exit_reason"].to_list()}
                                 )
-                            )
-
-                            mu, sigma = r_vals.mean(), r_vals.std()
-                            if sigma > 0:
-                                x_norm = np.linspace(r_vals.min(), r_vals.max(), 100)
-                                y_norm = (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(
-                                    -0.5 * ((x_norm - mu) / sigma) ** 2
-                                )
-                                bin_width = (r_vals.max() - r_vals.min()) / 50
-                                y_norm_scaled = y_norm * len(r_vals) * bin_width
-
-                                fig_r.add_trace(
-                                    go.Scatter(
-                                        x=x_norm,
-                                        y=y_norm_scaled,
-                                        mode="lines",
-                                        name="Normal Dist",
-                                        line=dict(color=color_error(), dash="dash"),
+                                fig_hold = go.Figure()
+                                for reason in reasons:
+                                    reason_counts = {}
+                                    for row in exit_by_hold.filter(
+                                        pl.col("exit_reason") == reason
+                                    ).iter_rows(named=True):
+                                        if row["_hold"] is not None:
+                                            reason_counts[int(row["_hold"])] = int(row["count"])
+                                    fig_hold.add_trace(
+                                        go.Bar(
+                                            name=reason,
+                                            x=[str(d) for d in hold_days],
+                                            y=[reason_counts.get(d, 0) for d in hold_days],
+                                        )
                                     )
+                                fig_hold.update_layout(
+                                    title="Exit Reasons by Holding Days",
+                                    xaxis_title="Holding Days",
+                                    yaxis_title="Trades",
+                                    barmode="group",
+                                    showlegend=True,
                                 )
-
-                            fig_r.add_vline(x=0, line_dash="dash", line_color=theme_text_muted())
-                            fig_r.add_vline(
-                                x=mu,
-                                line_dash="dot",
-                                line_color=color_success(),
-                                annotation_text=f"Mean: {mu:.2f}R",
-                            )
-
-                            fig_r.update_layout(
-                                title="R-Multiple Distribution",
-                                xaxis_title="R-Multiple",
-                                yaxis_title="Count",
-                                barmode="overlay",
-                            )
-                            apply_chart_theme(fig_r)
-                            ui.plotly(fig_r).classes("w-full h-64")
-
-                            percentiles = [10, 25, 50, 75, 90]
-                            pct_data = [
-                                {"Percentile": f"P{p}", "Value": f"{np.percentile(r_vals, p):.2f}R"}
-                                for p in percentiles
-                            ]
-                            pct_data.extend(
-                                [
-                                    {"Percentile": "Mean", "Value": f"{r_vals.mean():.2f}R"},
-                                    {"Percentile": "Min", "Value": f"{r_vals.min():.2f}R"},
-                                    {"Percentile": "Max", "Value": f"{r_vals.max():.2f}R"},
-                                ]
-                            )
-                            paginated_table(
-                                columns=[
-                                    {
-                                        "name": "Percentile",
-                                        "label": "Percentile",
-                                        "field": "Percentile",
-                                    },
-                                    {"name": "Value", "label": "R-Multiple", "field": "Value"},
-                                ],
-                                rows=pct_data,
-                                page_size=20,
-                            )
-
-                with ui.tab_panel(tab_wl):
-                    if "pnl_pct" in trades_df.columns:
-                        with ui.row().classes(f"w-full {SPACE_GRID_DEFAULT}"):
-                            with ui.column().classes("flex-1"):
-                                ui.label("Top Winners").classes(
-                                    f"text-lg font-semibold {SPACE_SM}"
-                                ).style(f"color: {color_success()};")
-                                top_winners = trades_df.sort(
-                                    "pnl_pct", descending=True, nulls_last=True
-                                ).head(min(20, trades_df.height))
-                                with ui.element("div").style(
-                                    "width: 100%; max-height: 450px; overflow-x: auto;"
-                                ):
-                                    paginated_table(
-                                        columns=table_columns,
-                                        rows=_trade_rows(top_winners),
-                                        page_size=20,
-                                        row_key="trade_row_id",
-                                        on_row_click=_open_trade_details_from_payload,
-                                    )
-
-                            with ui.column().classes("flex-1"):
-                                ui.label("Top Losers").classes(
-                                    f"text-lg font-semibold {SPACE_SM}"
-                                ).style(f"color: {color_error()};")
-                                top_losers = trades_df.sort(
-                                    "pnl_pct", descending=False, nulls_last=True
-                                ).head(min(20, trades_df.height))
-                                with ui.element("div").style(
-                                    "width: 100%; max-height: 450px; overflow-x: auto;"
-                                ):
-                                    paginated_table(
-                                        columns=table_columns,
-                                        rows=_trade_rows(top_losers),
-                                        page_size=20,
-                                        row_key="trade_row_id",
-                                        on_row_click=_open_trade_details_from_payload,
-                                    )
-
-                with ui.tab_panel(tab_stock):
-                    if "symbol" in trades_df.columns and "pnl_pct" in trades_df.columns:
-                        stock_stats = (
-                            trades_df.group_by("symbol")
-                            .agg(
-                                pl.len().alias("trades"),
-                                pl.col("pnl_pct").sum().alias("total_pnl"),
-                                pl.col("pnl_pct").mean().alias("avg_pnl"),
-                                pl.col("pnl_r").mean().alias("avg_r"),
-                                ((pl.col("pnl_pct") > 0).cast(pl.Float64).mean() * 100).alias(
-                                    "win_rate"
-                                ),
-                                pl.col("pnl_pct").max().alias("best"),
-                                pl.col("pnl_pct").min().alias("worst"),
-                            )
-                            .sort("total_pnl", descending=True)
-                        )
-
-                        stock_rows = [
-                            {
-                                "trade_row_id": _first_trade_row_id_by_symbol(row["symbol"]),
-                                "symbol": row["symbol"],
-                                "trades_fmt": f"{int(row['trades'])}",
-                                "total_pnl_fmt": f"{row['total_pnl']:.2f}%",
-                                "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
-                                "avg_r_fmt": f"{row['avg_r']:.2f}R",
-                                "win_rate_fmt": f"{row['win_rate']:.1f}%",
-                                "best_fmt": f"{row['best']:.1f}%",
-                                "worst_fmt": f"{row['worst']:.1f}%",
-                            }
-                            for row in stock_stats.head(50).to_dicts()
-                        ]
-
-                        paginated_table(
-                            columns=[
-                                {"name": "symbol", "label": "Symbol", "field": "symbol"},
-                                {"name": "trades", "label": "Trades", "field": "trades_fmt"},
-                                {"name": "total_pnl", "label": "Total %", "field": "total_pnl_fmt"},
-                                {"name": "avg_pnl", "label": "Avg %", "field": "avg_pnl_fmt"},
-                                {"name": "avg_r", "label": "Avg R", "field": "avg_r_fmt"},
-                                {"name": "win_rate", "label": "Win %", "field": "win_rate_fmt"},
-                                {"name": "best", "label": "Best", "field": "best_fmt"},
-                                {"name": "worst", "label": "Worst", "field": "worst_fmt"},
-                            ],
-                            rows=stock_rows,
-                            row_key="trade_row_id",
-                            on_row_click=_open_trade_details_from_payload,
-                            page_size=20,
-                        )
-
-                with ui.tab_panel(tab_monthly):
-                    if "entry_date" in trades_df.columns and "pnl_pct" in trades_df.columns:
-                        monthly_returns = (
-                            trades_df.with_columns(
-                                pl.col("entry_date").cast(pl.Date, strict=False).alias("entry_date")
-                            )
-                            .drop_nulls("entry_date")
-                            .with_columns(
-                                pl.col("entry_date").dt.year().alias("year"),
-                                pl.col("entry_date").dt.month().alias("month"),
-                            )
-                            .group_by(["year", "month"])
-                            .agg(pl.col("pnl_pct").sum().alias("monthly_return"))
-                            .sort(["year", "month"])
-                        )
-                        years = monthly_returns.get_column("year").unique().sort().to_list()
-                        monthly_lookup = {
-                            (row["year"], row["month"]): row["monthly_return"]
-                            for row in monthly_returns.to_dicts()
-                        }
-                        monthly_matrix = [
-                            [monthly_lookup.get((year, month), 0.0) for month in range(1, 13)]
-                            for year in years
-                        ]
-
-                        fig = px.imshow(
-                            monthly_matrix,
-                            labels=dict(x="Month", y="Year", color="Return %"),
-                            x=[
-                                "Jan",
-                                "Feb",
-                                "Mar",
-                                "Apr",
-                                "May",
-                                "Jun",
-                                "Jul",
-                                "Aug",
-                                "Sep",
-                                "Oct",
-                                "Nov",
-                                "Dec",
-                            ],
-                            y=years,
-                            color_continuous_scale=[
-                                color_error(),
-                                theme_surface(),
-                                color_success(),
-                            ],
-                            color_continuous_midpoint=0,
-                            title="Monthly Returns Heatmap",
-                        )
-                        fig.update_xaxes(side="top")
-                        apply_chart_theme(fig)
-                        ui.plotly(fig).classes("w-full h-80")
+                                apply_chart_theme(fig_hold)
+                                ui.plotly(fig_hold).classes("w-full h-72")
 
             divider()
             with ui.expansion("Run New Backtest", icon="play_arrow").classes("w-full"):

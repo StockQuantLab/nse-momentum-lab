@@ -14,11 +14,9 @@ if str(_project_root / "src") not in sys.path:
 if str(_apps_root) not in sys.path:
     sys.path.insert(0, str(_apps_root))
 
-import json
-
 from nicegui import ui
 
-from apps.nicegui.state import get_experiments
+from apps.nicegui.state import _strategy_display_name, get_experiments
 from apps.nicegui.components import (
     color_error,
     color_success,
@@ -34,27 +32,6 @@ from apps.nicegui.components import (
     SPACE_SM,
     theme_text_secondary,
 )
-
-
-def _strategy_display_name(row: dict) -> str:
-    """Build a human-readable strategy label that includes threshold when applicable."""
-    name = row.get("strategy_name", "-")
-    params: dict = {}
-    if "params_json" in row and row.get("params_json") is not None:
-        try:
-            params = json.loads(row["params_json"])
-        except ValueError, TypeError:
-            pass
-    threshold = params.get("breakout_threshold")
-    # Show threshold for all breakout strategies except the canonical 4% baseline label.
-    if threshold is not None and name not in (
-        "2LYNCHBreakout",
-        "thresholdbreakout",
-        "threshold_breakout",
-    ):
-        pct = round(float(threshold) * 100)
-        return f"{name} {pct}%"
-    return name
 
 
 def strategy_page() -> None:
@@ -111,29 +88,44 @@ def strategy_page() -> None:
 
             paginated_table(
                 columns=[
-                    {"name": "exp_id", "label": "Experiment", "field": "exp_id_fmt"},
+                    {"name": "exp_id", "label": "Experiment", "field": "exp_id"},
                     {"name": "strategy_name", "label": "Strategy", "field": "strategy_label"},
                     {"name": "start_year", "label": "Start", "field": "start_year"},
                     {"name": "end_year", "label": "End", "field": "end_year"},
-                    {"name": "total_return_pct", "label": "Return", "field": "return_fmt"},
-                    {"name": "win_rate_pct", "label": "Win Rate", "field": "win_rate_fmt"},
-                    {"name": "max_drawdown_pct", "label": "Max DD", "field": "max_dd_fmt"},
-                    {"name": "total_trades", "label": "Trades", "field": "trades_fmt"},
+                    {
+                        "name": "total_return_pct",
+                        "label": "Return",
+                        "field": "total_return_pct",
+                        "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                    },
+                    {
+                        "name": "win_rate_pct",
+                        "label": "Win Rate",
+                        "field": "win_rate_pct",
+                        "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                    },
+                    {
+                        "name": "max_drawdown_pct",
+                        "label": "Max DD",
+                        "field": "max_drawdown_pct",
+                        "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                    },
+                    {"name": "total_trades", "label": "Trades", "field": "total_trades"},
                 ],
                 rows=[
                     {
-                        "exp_id_fmt": str(row["exp_id"])[:12],
+                        "exp_id": str(row["exp_id"])[:12],
                         "strategy_label": _strategy_display_name(row),
                         "start_year": int(row["start_year"])
                         if row.get("start_year") is not None
-                        else "-",
+                        else None,
                         "end_year": int(row["end_year"])
                         if row.get("end_year") is not None
-                        else "-",
-                        "return_fmt": f"{float(row.get('total_return_pct') or 0):.1f}%",
-                        "win_rate_fmt": f"{float(row.get('win_rate_pct') or 0):.1f}%",
-                        "max_dd_fmt": f"{float(row.get('max_drawdown_pct') or 0):.1f}%",
-                        "trades_fmt": f"{int(row.get('total_trades') or 0):,}",
+                        else None,
+                        "total_return_pct": float(row.get("total_return_pct") or 0),
+                        "win_rate_pct": float(row.get("win_rate_pct") or 0),
+                        "max_drawdown_pct": float(row.get("max_drawdown_pct") or 0),
+                        "total_trades": int(row.get("total_trades") or 0),
                     }
                     for row in experiments_df.iter_rows(named=True)
                 ],

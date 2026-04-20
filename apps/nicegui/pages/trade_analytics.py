@@ -187,23 +187,39 @@ async def trade_analytics_page() -> None:
                             columns=[
                                 {"name": "exit_reason", "label": "Reason", "field": "exit_reason"},
                                 {"name": "count", "label": "Trades", "field": "count"},
-                                {"name": "avg_pnl_fmt", "label": "Avg %", "field": "avg_pnl_fmt"},
-                                {"name": "avg_r_fmt", "label": "Avg R", "field": "avg_r_fmt"},
-                                {"name": "win_rate_fmt", "label": "Win %", "field": "win_rate_fmt"},
                                 {
-                                    "name": "total_pnl_fmt",
+                                    "name": "avg_pnl",
+                                    "label": "Avg %",
+                                    "field": "avg_pnl",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                },
+                                {
+                                    "name": "avg_r",
+                                    "label": "Avg R",
+                                    "field": "avg_r",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
+                                },
+                                {
+                                    "name": "win_rate",
+                                    "label": "Win %",
+                                    "field": "win_rate",
+                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                },
+                                {
+                                    "name": "total_pnl",
                                     "label": "Total %",
-                                    "field": "total_pnl_fmt",
+                                    "field": "total_pnl",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                             ],
                             rows=[
                                 {
                                     "exit_reason": row["exit_reason"],
                                     "count": int(row["count"]),
-                                    "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
-                                    "avg_r_fmt": f"{row['avg_r']:.2f}R",
-                                    "win_rate_fmt": f"{row['win_rate']:.1f}%",
-                                    "total_pnl_fmt": f"{row['total_pnl']:.2f}%",
+                                    "avg_pnl": float(row["avg_pnl"]),
+                                    "avg_r": float(row["avg_r"]),
+                                    "win_rate": float(row["win_rate"]),
+                                    "total_pnl": float(row["total_pnl"]),
                                 }
                                 for row in exit_summary.iter_rows(named=True)
                             ],
@@ -262,22 +278,33 @@ async def trade_analytics_page() -> None:
                         paginated_table(
                             columns=[
                                 {"name": "month_str", "label": "Month", "field": "month_str"},
-                                {"name": "trades_fmt", "label": "Trades", "field": "trades_fmt"},
+                                {"name": "trades", "label": "Trades", "field": "trades"},
                                 {
-                                    "name": "total_pnl_fmt",
+                                    "name": "total_pnl",
                                     "label": "Total %",
-                                    "field": "total_pnl_fmt",
+                                    "field": "total_pnl",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
-                                {"name": "avg_pnl_fmt", "label": "Avg %", "field": "avg_pnl_fmt"},
-                                {"name": "win_rate_fmt", "label": "Win %", "field": "win_rate_fmt"},
+                                {
+                                    "name": "avg_pnl",
+                                    "label": "Avg %",
+                                    "field": "avg_pnl",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                },
+                                {
+                                    "name": "win_rate",
+                                    "label": "Win %",
+                                    "field": "win_rate",
+                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                },
                             ],
                             rows=[
                                 {
                                     "month_str": row["month_str"],
-                                    "trades_fmt": f"{int(row['trades'])}",
-                                    "total_pnl_fmt": f"{row['total_pnl']:.2f}%",
-                                    "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
-                                    "win_rate_fmt": f"{row['win_rate']:.1f}%",
+                                    "trades": int(row["trades"]),
+                                    "total_pnl": float(row["total_pnl"]),
+                                    "avg_pnl": float(row["avg_pnl"]),
+                                    "win_rate": float(row["win_rate"]),
                                 }
                                 for row in monthly_data.iter_rows(named=True)
                             ],
@@ -317,24 +344,40 @@ async def trade_analytics_page() -> None:
                         paginated_table(
                             columns=[
                                 {"name": "symbol", "label": "Symbol", "field": "symbol"},
-                                {"name": "trades_fmt", "label": "Trades", "field": "trades_fmt"},
+                                {"name": "trades", "label": "Trades", "field": "trades"},
                                 {
-                                    "name": "total_pnl_fmt",
+                                    "name": "total_pnl",
                                     "label": "Total %",
-                                    "field": "total_pnl_fmt",
+                                    "field": "total_pnl",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
-                                {"name": "avg_pnl_fmt", "label": "Avg %", "field": "avg_pnl_fmt"},
-                                {"name": "best_fmt", "label": "Best %", "field": "best_fmt"},
-                                {"name": "worst_fmt", "label": "Worst %", "field": "worst_fmt"},
+                                {
+                                    "name": "avg_pnl",
+                                    "label": "Avg %",
+                                    "field": "avg_pnl",
+                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                },
+                                {
+                                    "name": "best",
+                                    "label": "Best %",
+                                    "field": "best",
+                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                },
+                                {
+                                    "name": "worst",
+                                    "label": "Worst %",
+                                    "field": "worst",
+                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                },
                             ],
                             rows=[
                                 {
                                     "symbol": row["symbol"],
-                                    "trades_fmt": f"{int(row['trades'])}",
-                                    "total_pnl_fmt": f"{row['total_pnl']:.2f}%",
-                                    "avg_pnl_fmt": f"{row['avg_pnl']:.2f}%",
-                                    "best_fmt": f"{row['best']:.1f}%",
-                                    "worst_fmt": f"{row['worst']:.1f}%",
+                                    "trades": int(row["trades"]),
+                                    "total_pnl": float(row["total_pnl"]),
+                                    "avg_pnl": float(row["avg_pnl"]),
+                                    "best": float(row["best"]),
+                                    "worst": float(row["worst"]),
                                 }
                                 for row in symbol_stats.head(30).iter_rows(named=True)
                             ],

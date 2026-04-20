@@ -353,6 +353,10 @@ def _evaluate_entry(
                 initial_stop = session_low
             else:
                 initial_stop = entry_price - atr * 2.0 if atr > 0 else entry_price * 0.96
+            # Reject if stop is too wide (matches backtest max_stop_dist_pct guard).
+            max_stop_dist = getattr(strategy_config, "max_stop_dist_pct", 0.08)
+            if entry_price > 0 and initial_stop < entry_price * (1 - max_stop_dist):
+                return {"action": "SKIP", "reason": "stop_too_wide"}
             return {
                 "action": "ENTRY_CANDIDATE",
                 "symbol": symbol,
@@ -376,6 +380,15 @@ def _evaluate_entry(
             if short_stop_atr_mult is not None and float(short_stop_atr_mult) > 0 and atr > 0:
                 capped = entry_price + float(short_stop_atr_mult) * atr
                 initial_stop = min(initial_stop, capped)
+            # Reject if stop is too wide (matches backtest short_max_stop_dist_pct guard).
+            short_max = getattr(strategy_config, "short_max_stop_dist_pct", None)
+            effective_max_stop = (
+                float(short_max)
+                if short_max is not None
+                else getattr(strategy_config, "max_stop_dist_pct", 0.08)
+            )
+            if entry_price > 0 and initial_stop > entry_price * (1 + effective_max_stop):
+                return {"action": "SKIP", "reason": "stop_too_wide"}
             return {
                 "action": "ENTRY_CANDIDATE",
                 "symbol": symbol,
