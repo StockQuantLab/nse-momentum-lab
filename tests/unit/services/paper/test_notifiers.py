@@ -13,7 +13,6 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
 )
 from nse_momentum_lab.services.paper.notifiers.telegram import TelegramNotifier
 
-
 # --- _redact_url ---
 
 
@@ -48,7 +47,7 @@ async def test_telegram_notifier_raises_on_http_error():
     mock_resp.raise_for_status = MagicMock(side_effect=Exception("HTTP 400"))
 
     with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=mock_resp):
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             await notifier.send("subject", "body")
 
 

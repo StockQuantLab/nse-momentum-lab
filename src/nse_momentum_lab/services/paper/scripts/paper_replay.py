@@ -33,6 +33,10 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertDispatcher,
     get_alert_config,
 )
+from nse_momentum_lab.services.paper.scripts.paper_eod_carry import (
+    apply_eod_carry_decisions,
+    prefetch_daily_features,
+)
 from nse_momentum_lab.services.paper.scripts.paper_feed_audit import record_closed_candles
 
 logger = logging.getLogger(__name__)
@@ -45,11 +49,14 @@ async def run_replay(
     paper_db_path: str = "data/paper.duckdb",
     market_db_path: str = "data/market.duckdb",
     max_cycles: int | None = None,
+    no_alerts: bool = False,
 ) -> dict[str, Any]:
     """Run a paper replay session from start to finish."""
     paper_db = PaperDB(paper_db_path)
     market_db = MarketDataDB(Path(market_db_path))
-    alert_dispatcher = AlertDispatcher(paper_db=paper_db, config=get_alert_config())
+    alert_dispatcher = AlertDispatcher(
+        paper_db=paper_db, config=get_alert_config(), enabled=not no_alerts
+    )
     paper_path = Path(paper_db_path)
     replica = VersionedReplicaSync(
         source_path=paper_path,
@@ -94,10 +101,17 @@ async def run_replay(
             max_position_pct=strategy_config.max_position_pct,
         )
 
-        # Seed existing positions if resuming.
+        # Adopt open positions from prior sessions for this strategy (cross-day carry).
+        paper_db.adopt_open_positions_from_strategy(session_id, strategy)
+
+        # Seed existing positions (carried from prior session or intra-day resume).
         existing = paper_db.list_open_positions(session_id)
         if existing:
             tracker.seed_open_positions(existing)
+
+        # Expand symbol universe to include any carried position symbols not in today's list.
+        carried_symbols = {p["symbol"] for p in existing}
+        symbols = list(set(symbols) | carried_symbols)
 
         # Seed candidate setup_rows from feat_daily so evaluate_candle can open trades.
         seed_candidates_from_market_db(
@@ -228,7 +242,42 @@ async def run_replay(
             cycles += 1
 
         # Finalize.
-        await complete_session(session_id=session_id, paper_db=paper_db, status=final_status)
+        if final_status == "MAX_CYCLES":
+            # Partial/debug replay — skip EOD carry, leave positions open, pause session.
+            paper_db.update_session(session_id, status="PAUSED")
+            logger.info(
+                "Partial replay (max_cycles=%d): EOD carry skipped, session paused session=%s",
+                max_cycles,
+                session_id,
+            )
+        else:
+            # Apply EOD H-carry decisions using feat_daily (same source as backtest).
+            open_before_carry = paper_db.list_open_positions(session_id)
+            if open_before_carry:
+                carry_symbols = [p["symbol"] for p in open_before_carry]
+                daily_features = prefetch_daily_features(market_db, carry_symbols, trade_date)
+                carry_summary = apply_eod_carry_decisions(
+                    session_id=session_id,
+                    trade_date=trade_date,
+                    paper_db=paper_db,
+                    daily_features=daily_features,
+                    strategy_config=strategy_config,
+                )
+                logger.info("EOD carry summary session=%s: %s", session_id, carry_summary)
+
+            # PAUSE if positions remain open (carried overnight), COMPLETE otherwise.
+            remaining_open = paper_db.list_open_positions(session_id)
+            if remaining_open and final_status not in ("RISK_BREACH",):
+                paper_db.update_session(session_id, status="PAUSED")
+                logger.info(
+                    "Session PAUSED with %d open position(s) for overnight carry session=%s",
+                    len(remaining_open),
+                    session_id,
+                )
+            else:
+                await complete_session(
+                    session_id=session_id, paper_db=paper_db, status=final_status
+                )
         replica.force_sync(source_conn=paper_db.con)
 
         # Purge old feed audit rows (retention housekeeping).

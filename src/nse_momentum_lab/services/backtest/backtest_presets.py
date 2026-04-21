@@ -169,6 +169,8 @@ ALL_PRESETS: dict[str, StrategyPreset] = {
             **_ENGINE_DEFAULTS,
             "strategy": "thresholdbreakdown",
             "breakout_threshold": 0.02,
+            # 3D time stop — matches BREAKDOWN_4PCT; short momentum is time-sensitive
+            "short_time_stop_days": 3,
             # Phase-1 breakdown quality flags
             "breakdown_daily_candidate_budget": 5,
             "breakdown_rs_min": -0.10,

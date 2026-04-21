@@ -511,7 +511,7 @@ def _format_exp_created_at(value: object) -> str:
 def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
     """Build {label: exp_id} dict with human-readable labels, latest first.
 
-    Label format: "exp_id[:12] | 2026-04-20 21:54 | Breakout 4% | 2025-01-01→2026-04-20 | TotRet 53.9% | PF 1.94 | Trades 579 | ID exp-123..."
+    Label format: "exp_id[:12] | 2026-04-20 21:54 | Breakout 4% | 2025-01-01→2026-04-20 | TotRet 53.9% | PF 1.94 | Trades 579"
     """
     options: dict[str, str] = {}
     for row in experiments_df.iter_rows(named=True):
@@ -537,7 +537,6 @@ def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
         parts.append(f"TotRet {ret:.1f}%")
         parts.append(f"PF {pf:.2f}")
         parts.append(f"Trades {trades:,}")
-        parts.append(f"ID {exp_id}")
 
         label = " | ".join(parts)
         options[label] = exp_id

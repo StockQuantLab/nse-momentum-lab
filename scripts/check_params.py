@@ -1,4 +1,6 @@
-import duckdb, json  # noqa: E401
+import json
+
+import duckdb
 
 con = duckdb.connect("data/backtest.duckdb", read_only=True)
 

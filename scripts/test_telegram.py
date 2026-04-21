@@ -33,7 +33,7 @@ async def test_telegram() -> None:
         print("ERROR: TELEGRAM_CHAT_IDS is set but empty after parsing")
         return
 
-    print(f"Bot token : [SET]")
+    print("Bot token : [SET]")
     print(f"Chat IDs  : {chat_ids}")
     print()
 

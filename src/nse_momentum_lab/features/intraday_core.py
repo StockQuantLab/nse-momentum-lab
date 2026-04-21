@@ -643,8 +643,8 @@ def _build_feat_intraday_core_yearly(
 ) -> int:
     """Legacy yearly helper retained only for emergency debugging.
 
-    The production path now uses CPR-style symbol batches and symbol-specific
-    parquet reads. This helper stays gated so it cannot be invoked accidentally.
+    The production path now uses symbol batches and symbol-specific parquet reads.
+    This helper stays gated so it cannot be invoked accidentally.
     """
 
     if os.getenv("ALLOW_LEGACY_INTRADAY_YEARLY_REBUILD", "").strip() != "1":
@@ -789,8 +789,8 @@ def _build_feat_intraday_core_batched(
 ) -> int:
     """Build feat_intraday_core in symbol batches.
 
-    This mirrors the CPR pack builder pattern: small symbol batches, per-batch
-    transactions, symbol-scoped parquet reads, and structured progress output.
+    This mirrors the production batch-builder pattern: small symbol batches,
+    per-batch transactions, symbol-scoped parquet reads, and structured progress output.
     """
 
     import time as _time

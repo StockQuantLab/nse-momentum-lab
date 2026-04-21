@@ -50,10 +50,12 @@ _STALE_TIMEOUT = 300  # seconds
 _WEBSOCKET_RECOVERY_AFTER_SEC = 20.0
 
 
-def _build_alert_dispatcher(paper_db: PaperDB | None = None) -> AlertDispatcher:
+def _build_alert_dispatcher(
+    paper_db: PaperDB | None = None, *, enabled: bool = True
+) -> AlertDispatcher:
     """Build an AlertDispatcher wired from Doppler settings (TELEGRAM_BOT_TOKEN/CHAT_IDS)."""
     config = get_alert_config()
-    return AlertDispatcher(paper_db=paper_db, config=config)
+    return AlertDispatcher(paper_db=paper_db, config=config, enabled=enabled)
 
 
 async def run_live_session(
@@ -66,11 +68,12 @@ async def run_live_session(
     access_token: str | None = None,
     poll_interval: float = _POLL_INTERVAL,
     max_cycles: int | None = None,
+    no_alerts: bool = False,
 ) -> dict[str, Any]:
     """Run a paper trading session — live or replay."""
     paper_db = PaperDB(paper_db_path)
     market_db = MarketDataDB(Path(market_db_path))
-    alert_dispatcher = _build_alert_dispatcher(paper_db)
+    alert_dispatcher = _build_alert_dispatcher(paper_db, enabled=not no_alerts)
     paper_path = Path(paper_db_path)
     replica = VersionedReplicaSync(
         source_path=paper_path,
@@ -135,10 +138,17 @@ async def run_live_session(
             max_position_pct=strategy_config.max_position_pct,
         )
 
-        # Seed existing positions if resuming.
+        # Adopt open positions from prior sessions for this strategy (cross-day carry).
+        paper_db.adopt_open_positions_from_strategy(session_id, strategy)
+
+        # Seed existing positions (carried from prior session or intra-day resume).
         existing = paper_db.list_open_positions(session_id)
         if existing:
             tracker.seed_open_positions(existing)
+
+        # Expand symbol universe to include any carried position symbols not in today's list.
+        carried_symbols = {p["symbol"] for p in existing}
+        symbols = list(set(symbols) | carried_symbols)
 
         # Seed candidate setup_rows from feat_daily so evaluate_candle can open trades.
         seed_candidates_from_market_db(

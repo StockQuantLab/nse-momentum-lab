@@ -8,8 +8,11 @@ Adapted from cpr-pivot-lab's bar_orchestrator.py for NSE momentum strategies.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def slot_capital_for(
@@ -57,6 +60,7 @@ class TrackedPosition:
     status: str = "OPEN"
     trail_state: dict[str, Any] = field(default_factory=dict)
     raw_position: dict[str, Any] | None = None
+    days_held: int = 0  # nights carried since entry (0 = entry day, 1 = first overnight)
 
 
 class SessionPositionTracker:
@@ -130,25 +134,44 @@ class SessionPositionTracker:
             tracked.trail_state = trail_state
 
     def seed_open_positions(self, positions: list[dict[str, Any]]) -> None:
-        """Pre-populate tracker with existing positions on session restart."""
+        """Pre-populate tracker with existing positions on session restart or carry-over."""
         for p in positions:
             qty = p.get("qty", 0) or 0
             sym = p.get("symbol", "")
+            meta = p.get("metadata_json", {}) if isinstance(p.get("metadata_json"), dict) else {}
+            days_held = int(meta.get("days_held", 0))
+            # Restore the latest trail stop from metadata (updated each HOLD bar).
+            # Fallback chain: current_sl (latest) → initial_sl (entry-day) → warn and use 0.
+            # Never fall back to avg_entry — that silently sets stop to breakeven on resume.
+            current_sl = meta.get("current_sl")
+            initial_sl = meta.get("initial_sl")
+            if current_sl is None and initial_sl is None:
+                logger.warning(
+                    "seed_open_positions: skipping %s (%s) because metadata has no stop",
+                    sym,
+                    p.get("position_id", ""),
+                )
+                continue
+            stop_source = current_sl if current_sl is not None else initial_sl
+            stop_loss = float(stop_source)
+            trail_state = dict(meta)
+            # Signal the runtime to apply post-day3 stop tightening on the first bar.
+            if days_held >= 3:
+                trail_state["pending_day_tighten"] = True
             tracked = TrackedPosition(
                 position_id=p.get("position_id", ""),
                 symbol=sym,
                 direction=p.get("direction", "LONG"),
                 entry_price=float(p.get("avg_entry", 0)),
-                stop_loss=0.0,
+                stop_loss=stop_loss,
                 target_price=None,
                 entry_time="",
                 quantity=qty,
                 current_qty=qty,
                 status="OPEN",
-                trail_state=p.get("metadata_json", {})
-                if isinstance(p.get("metadata_json"), dict)
-                else {},
+                trail_state=trail_state,
                 raw_position=p,
+                days_held=days_held,
             )
             self._open[sym] = tracked
             self.cash_available -= tracked.entry_price * qty

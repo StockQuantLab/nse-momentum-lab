@@ -18,6 +18,7 @@ Commands:
     nseml-paper-v2 daily-replay  — Replay today's candles
     nseml-paper-v2 daily-live    — Run live session for today
     nseml-paper-v2 daily-sim     — Fast daily simulation probe
+    nseml-paper-v2 eod-carry     — Post-market H-carry decisions for open positions
 """
 
 from __future__ import annotations
@@ -200,6 +201,7 @@ def _cmd_replay(args: argparse.Namespace) -> None:
             trade_date=args.trade_date,
             paper_db_path=args.paper_db,
             market_db_path=args.market_db,
+            no_alerts=getattr(args, "no_alerts", False),
         )
     )
     print(json.dumps(result, default=str))
@@ -220,6 +222,7 @@ def _cmd_live(args: argparse.Namespace) -> None:
             market_db_path=args.market_db,
             poll_interval=args.poll_interval,
             max_cycles=args.max_cycles,
+            no_alerts=getattr(args, "no_alerts", False),
         )
     )
     print(json.dumps(result, default=str))
@@ -397,6 +400,7 @@ def _cmd_daily_sim(args: argparse.Namespace) -> None:
             trade_date=args.trade_date,
             paper_db_path=args.paper_db,
             market_db_path=args.market_db,
+            no_alerts=getattr(args, "no_alerts", False),
         )
     )
 
@@ -408,6 +412,25 @@ def _cmd_daily_sim(args: argparse.Namespace) -> None:
     print(f"Status:  {result.get('status', '?')}")
     print(f"Bars:    {result.get('closed_bars', 0)}")
     print(f"Cycles:  {result.get('cycles', 0)}")
+
+
+def _cmd_eod_carry(args: argparse.Namespace) -> None:
+    """Post-market H-carry decisions: TIME_EXIT + WEAK_CLOSE_EXIT or carry forward."""
+    from nse_momentum_lab.services.paper.scripts.paper_eod_carry import run_eod_carry
+
+    session_id = getattr(args, "session_id", None)
+    if not session_id:
+        session_id = _resolve_session_id(
+            args, args.paper_db, mode="live", trade_date=getattr(args, "trade_date", None)
+        )
+    result = run_eod_carry(
+        session_id=session_id,
+        trade_date=args.trade_date,
+        paper_db_path=args.paper_db,
+        market_db_path=args.market_db,
+    )
+    print(json.dumps(result, default=str))
+    sys.exit(0 if "error" not in result else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Strategy key for auto-discovery (used when --session-id is not provided).",
     )
     replay.add_argument("--trade-date", required=True, help="YYYY-MM-DD")
+    replay.add_argument("--no-alerts", action="store_true", help="Disable Telegram/email alerts")
     replay.set_defaults(handler=_cmd_replay)
 
     # live
@@ -472,6 +496,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live.add_argument("--poll-interval", type=float, default=1.0)
     live.add_argument("--max-cycles", type=int, default=None)
+    live.add_argument("--no-alerts", action="store_true", help="Disable Telegram/email alerts")
     live.set_defaults(handler=_cmd_live)
 
     # plan
@@ -495,6 +520,7 @@ def build_parser() -> argparse.ArgumentParser:
     daily_sim = sub.add_parser("daily-sim", help="Fast daily simulation probe")
     daily_sim.add_argument("--session-id", required=True)
     daily_sim.add_argument("--trade-date", required=True, help="YYYY-MM-DD")
+    daily_sim.add_argument("--no-alerts", action="store_true", help="Disable Telegram/email alerts")
     daily_sim.set_defaults(handler=_cmd_daily_sim)
 
     # stop
@@ -551,6 +577,9 @@ def build_parser() -> argparse.ArgumentParser:
     daily_replay = sub.add_parser("daily-replay", help="Replay today's candles")
     daily_replay.add_argument("--session-id", default=None)
     daily_replay.add_argument("--strategy", default=None)
+    daily_replay.add_argument(
+        "--no-alerts", action="store_true", help="Disable Telegram/email alerts"
+    )
     daily_replay.set_defaults(handler=_cmd_daily_replay)
 
     # daily-live
@@ -559,7 +588,24 @@ def build_parser() -> argparse.ArgumentParser:
     daily_live.add_argument("--strategy", default=None)
     daily_live.add_argument("--poll-interval", type=float, default=1.0)
     daily_live.add_argument("--max-cycles", type=int, default=None)
+    daily_live.add_argument(
+        "--no-alerts", action="store_true", help="Disable Telegram/email alerts"
+    )
     daily_live.set_defaults(handler=_cmd_daily_live)
+
+    # eod-carry
+    eod_carry = sub.add_parser(
+        "eod-carry",
+        help="Post-market H-carry decisions (TIME_EXIT / carry) — run after nseml-build-features",
+    )
+    eod_carry.add_argument(
+        "--session-id",
+        default=None,
+        help="Session ID. If omitted, auto-discovers via --strategy + --trade-date.",
+    )
+    eod_carry.add_argument("--strategy", default=None, help="Strategy key for auto-discovery")
+    eod_carry.add_argument("--trade-date", required=True, help="YYYY-MM-DD")
+    eod_carry.set_defaults(handler=_cmd_eod_carry)
 
     return parser
 

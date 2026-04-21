@@ -170,7 +170,7 @@ async def backtest_page() -> None:
                                 f"{pk}: {pv}</span>"
                             )
 
-            # ── Primary KPIs (4 big cards — CPR-style) ───────────────────
+            # ── Primary KPIs (4 big cards — compact dashboard style) ──────
             win_rate = float(enriched.get("win_rate_pct") or 0)
             total_pnl = float(enriched.get("total_pnl") or 0)
             calmar = float(enriched.get("calmar_ratio") or 0)
@@ -210,7 +210,7 @@ async def backtest_page() -> None:
                 columns=4,
             )
 
-            # ── Secondary metrics — mini card row (CPR-style) ────────────
+            # ── Secondary metrics — mini card row (compact dashboard style) ─
             n_trades = int(enriched.get("total_trades") or 0)
             total_return = float(enriched.get("total_return_pct") or 0)
             pf = float(enriched.get("profit_factor") or 0)
@@ -909,7 +909,7 @@ async def backtest_page() -> None:
                 trades_df.sort(_sort_cols, descending=True) if _sort_cols else trades_df
             )
 
-            # ── 5-Tab analytics layout (CPR-style grouping) ─────────────
+            # ── 5-Tab analytics layout (grouped by workflow stage) ────────
             _months = [
                 "Jan",
                 "Feb",

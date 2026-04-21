@@ -286,9 +286,11 @@ class AlertDispatcher:
         config: AlertConfig | None = None,
         # Legacy: accept bare notifiers list for backward compat with old callers.
         notifiers: list[Any] | None = None,
+        enabled: bool = True,
     ) -> None:
         self._paper_db = paper_db
         self._config = config or AlertConfig()
+        self._enabled = enabled
         self._queue: asyncio.Queue[AlertEvent] = asyncio.Queue(maxsize=MAX_QUEUE_SIZE)
         self._running = False
         self._consumer_task: asyncio.Task[None] | None = None
@@ -331,6 +333,8 @@ class AlertDispatcher:
 
     def enqueue(self, event: AlertEvent) -> None:
         """Fire-and-forget: add an alert to the queue."""
+        if not self._enabled:
+            return
         if not _should_send(event.alert_type, self._config):
             return
         try:

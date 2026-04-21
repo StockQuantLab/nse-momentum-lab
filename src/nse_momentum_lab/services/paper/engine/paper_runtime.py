@@ -197,6 +197,17 @@ def _advance_open_position(
     stop_level = trail_state.get("current_sl", tracked.stop_loss)
     entry_price = tracked.entry_price
 
+    # Post-day3 stop tightening — applied once on the first bar of a new session
+    # after the position has been carried for 3+ nights (matching backtest behaviour).
+    if trail_state.pop("pending_day_tighten", False):
+        prior_day_low = trail_state.get("prior_day_low")
+        prior_day_high = trail_state.get("prior_day_high")
+        if direction == "LONG" and prior_day_low:
+            stop_level = max(stop_level, float(prior_day_low))
+        elif direction == "SHORT" and prior_day_high:
+            stop_level = min(stop_level, float(prior_day_high))
+        trail_state["current_sl"] = stop_level
+
     # Gap-through stop on open.
     if direction == "LONG" and open_px <= stop_level:
         return {
@@ -250,25 +261,6 @@ def _advance_open_position(
             stop_level = min(stop_level, new_stop) if stop_level > 0 else new_stop
             trail_state["phase"] = "TRAIL"
         trail_state["lowest_since_entry"] = min(trail_state.get("lowest_since_entry", low), low)
-
-    # Time stop: exit EOD if configured.
-    flatten_time_str = session.get("risk_config", {}).get("flatten_time", "15:15:00")
-    bar_end = candle.get("bar_end") or candle.get("ts")
-    if bar_end is not None:
-        if isinstance(bar_end, (int, float)):
-            bar_time = datetime.fromtimestamp(bar_end, tz=_IST).time()
-        elif hasattr(bar_end, "time"):
-            bar_time = bar_end.time()
-        else:
-            bar_time = None
-        if bar_time is not None:
-            flatten_time = time.fromisoformat(flatten_time_str)
-            if bar_time >= flatten_time:
-                return {
-                    "action": "CLOSE",
-                    "exit_price": close,
-                    "reason": "EXIT_EOD",
-                }
 
     # HOLD: update trail state.
     trail_state["current_sl"] = stop_level

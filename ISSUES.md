@@ -323,6 +323,27 @@ the short-side override pattern. When set, override base param for LONG directio
 
 ---
 
+### ISSUE-015 — BREAKDOWN_2PCT time stop was 5D (now corrected to 3D)
+
+**Status**: ✅ FIXED — `backtest_presets.py` (current session)
+**Severity**: Medium (paper-backtest parity gap; BREAKDOWN_2PCT canonical IDs invalidated)
+**Found**: Current session (user review of `TIME_EXIT` hold durations)
+
+**Problem**: `BREAKDOWN_2PCT` preset was inheriting `time_stop_days=5` from `_ENGINE_DEFAULTS`
+instead of using the short-side 3D. `BREAKDOWN_4PCT` already had `short_time_stop_days=3`
+explicitly, but `BREAKDOWN_2PCT` did not.
+
+**Impact**: All BREAKDOWN_2PCT canonical experiment IDs run before this fix are **invalidated**:
+- `937dfce553f20956` (Apr-20 v3, 2015–2026) — **INVALIDATED**
+- `b0840fc1dc510cbf` (Apr-20 v2, 2025–2026) — **INVALIDATED**
+- `b769984bf6d0c5c7` (Apr-21, 2015–2026) — **INVALIDATED**
+
+**Fix**: Added `"short_time_stop_days": 3` to `BREAKDOWN_2PCT` overrides dict in `backtest_presets.py`.
+
+**Required action**: Re-run `scripts/run_full_operating_point.py` to produce new BREAKDOWN_2PCT baseline.
+
+---
+
 ## Canonical Experiment IDs (2026-04-21)
 
 Wave-1 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard.

@@ -137,14 +137,17 @@ async def process_closed_bar_group(
             elif result.get("action") == "HOLD":
                 trail_state = result.get("next_trail_state", {})
                 tracker.update_trail_state(symbol, trail_state)
-                # Persist mark price so flatten() has a real exit price on crash recovery.
+                # Persist mark price and current stop so flatten() and eod-carry
+                # have accurate exit prices and trail state on crash recovery.
                 if paper_db is not None:
                     mark = close_prices.get(symbol)
                     if mark is not None:
                         tracked_pos = tracker.get_open_position(symbol)
                         if tracked_pos and tracked_pos.position_id:
                             paper_db.patch_position_metadata(
-                                tracked_pos.position_id, last_mark_price=mark
+                                tracked_pos.position_id,
+                                last_mark_price=mark,
+                                current_sl=trail_state.get("current_sl"),
                             )
 
         # ------------------------------------------------------------------
@@ -202,7 +205,7 @@ async def process_closed_bar_group(
         # ------------------------------------------------------------------
         # Step 4: NSEML-specific filtering (placeholder for strategy filters)
         # ------------------------------------------------------------------
-        # NSEML does not use CPR's Stage B direction filter.
+        # NSEML does not use the separate Stage B direction filter from the pivot workflow.
         # Strategy-specific post-entry filters can be added here per strategy type.
 
         # ------------------------------------------------------------------

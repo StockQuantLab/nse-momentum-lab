@@ -125,7 +125,7 @@ class BacktestParams:
     risk_per_trade_pct: float = 0.01
     portfolio_value: float = 1_000_000.0
     fees_per_trade: float = 0.001
-    # CPR-style execution costs. Keep the default aligned with Zerodha intraday costs.
+    # Zerodha-style execution costs. Keep the default aligned with intraday fees.
     commission_model: str = "zerodha"
     slippage_bps: float = 0.0
     trail_activation_pct: float = 0.08
@@ -1690,7 +1690,7 @@ class DuckDBBacktestRunner:
             )
 
         # Build trade dicts — direction-aware PnL percentage.
-        # Costs are applied here using the CPR/Zerodha model so the saved PnL is net of fees.
+        # Costs are applied here using the Zerodha fee model so the saved PnL is net of fees.
         trades_out: list[dict] = []
         for t in result.trades if result is not None else []:
             hd = (t.exit_date - t.entry_date).days if t.exit_date and t.entry_date else 0

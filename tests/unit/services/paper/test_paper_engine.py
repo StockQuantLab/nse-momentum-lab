@@ -147,6 +147,40 @@ class TestSessionPositionTracker:
         assert not t.has_open_position("RELIANCE")
         assert t.cash_available == 500_000.0 - 25_000.0 + 26_000.0
 
+    def test_seed_open_positions_skips_rows_without_stop_metadata(self, caplog):
+        from nse_momentum_lab.services.paper.engine.bar_orchestrator import SessionPositionTracker
+
+        tracker = SessionPositionTracker(max_positions=5, portfolio_value=500_000.0)
+        positions = [
+            {
+                "position_id": "bad-1",
+                "symbol": "BAD",
+                "direction": "LONG",
+                "avg_entry": 100.0,
+                "qty": 10,
+                "metadata_json": {"signal_id": "sig-bad"},
+            },
+            {
+                "position_id": "ok-1",
+                "symbol": "OK",
+                "direction": "LONG",
+                "avg_entry": 200.0,
+                "qty": 5,
+                "metadata_json": {"initial_sl": 180.0, "signal_id": "sig-ok"},
+            },
+        ]
+
+        with caplog.at_level("WARNING"):
+            tracker.seed_open_positions(positions)
+
+        ok = tracker.get_open_position("OK")
+        assert tracker.open_count == 1
+        assert tracker.get_open_position("BAD") is None
+        assert ok is not None
+        assert ok.stop_loss == 180.0
+        assert tracker.cash_available == 499_000.0
+        assert "skipping BAD (bad-1) because metadata has no stop" in caplog.text
+
     def test_slots_available_decrements(self):
         from nse_momentum_lab.services.paper.engine.bar_orchestrator import (
             SessionPositionTracker,
@@ -599,7 +633,7 @@ class TestEvaluateCandle:
         assert result["direction"] == "SHORT"
 
     def test_eod_time_stop_on_open_position(self):
-        """Position should receive CLOSE/EXIT_EOD when bar_end is past flatten_time."""
+        """Bars past 15:15 are held (not force-closed) — EOD carry is post-market via eod-carry."""
         from nse_momentum_lab.services.paper.engine.bar_orchestrator import (
             SessionPositionTracker,
             TrackedPosition,
@@ -630,7 +664,7 @@ class TestEvaluateCandle:
         runtime = self._runtime_with_candidate("SBIN", prev_close=490.0)
         runtime.for_symbol("SBIN").setup_status = "pending"
 
-        ts = _epoch_at_ist(15, 16)  # After 15:15 flatten time
+        ts = _epoch_at_ist(15, 16)  # After 15:15 — no longer force-closed by bar engine
         candle = _make_candle(open=510.0, high=515.0, low=508.0, close=512.0, bar_end=ts)
         cfg = self._make_strategy_config()
 
@@ -642,8 +676,8 @@ class TestEvaluateCandle:
             session=_make_session(flatten_time="15:15:00"),
             strategy_config=cfg,
         )
-        assert result["action"] == "CLOSE"
-        assert result["reason"] == "EXIT_EOD"
+        # EXIT_EOD was removed: positions carry overnight via eod-carry post-market command.
+        assert result["action"] == "HOLD"
 
     def test_gap_through_stop_long(self):
         """Bar opens below active stop → gap-through-stop close at open price."""

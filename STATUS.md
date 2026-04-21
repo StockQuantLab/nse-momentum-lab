@@ -24,7 +24,7 @@ Window: `2015-01-01 → 2026-04-17`, universe 2000. Wave-1 fixes applied (H-carr
 | Breakout 4% | `0cd353d536dd6f91` | +54.1% | 3.16% | 17.1 | 22.98 | 2,211 | 0 |
 | Breakout 2% | `f923e1a9517d9b2c` | +121.8% | 2.73% | 44.6 | 19.06 | 7,078 | 0 |
 | Breakdown 4% | `f6e7646ac932697d` | +3.1% | 0.74% | 4.2 | 6.65 | 258 | 2 |
-| Breakdown 2% | `b769984bf6d0c5c7` | +8.1% | 1.99% | 4.1 | 6.52 | 790 | 0 |
+| Breakdown 2% | ⚠️ `b769984bf6d0c5c7` **INVALIDATED** (ISSUE-015 — 3D time stop fix; re-run required) | — | — | — | — | — | — |
 
 Frozen reporting runset: `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-21.md`
 
@@ -75,14 +75,18 @@ doppler run -- uv run nseml-kite-ingest --today --5min --resume
 # 4. Rebuild features incrementally
 doppler run -- uv run nseml-build-features --since TODAY
 
-# 5. Refresh runtime monitor tables
+# 5. EOD H-carry decisions (post-market, before next-day prepare)
+doppler run -- uv run nseml-paper eod-carry --strategy thresholdbreakout --trade-date TODAY
+doppler run -- uv run nseml-paper eod-carry --strategy 2lynchbreakdown --trade-date TODAY
+
+# 6. Refresh runtime monitor tables
 doppler run -- uv run nseml-market-monitor --incremental --since TODAY
 
-# 6. Data quality check
+# 7. Data quality check
 doppler run -- uv run nseml-hygiene --refresh --full
 doppler run -- uv run nseml-hygiene --report
 
-# 7. Verify DB coverage
+# 8. Verify DB coverage
 doppler run -- uv run nseml-db-verify
 ```
 

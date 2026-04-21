@@ -46,6 +46,10 @@ class PaperStrategyConfig:
     # For SHORT, short_max_stop_dist_pct overrides max_stop_dist_pct when set.
     max_stop_dist_pct: float = 0.08
     short_max_stop_dist_pct: float | None = None
+    # Multi-day hold parameters — must match backtest preset values for parity.
+    time_stop_days: int = 5  # LONG default; 2lynchbreakdown overrides to 3
+    h_carry_enabled: bool = True  # carry overnight if filter_h passes
+    h_filter_threshold: float = 0.70  # close_pos >= 0.70 for LONG; <= 0.30 for SHORT
     extra_params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -62,6 +66,7 @@ _STRATEGY_DEFAULTS: dict[str, PaperStrategyConfig] = {
         direction="SHORT",
         breakout_threshold=0.04,
         breakout_reference="prior_close",
+        time_stop_days=3,  # all breakdown strategies: 3D (matches backtest BREAKDOWN_4PCT + BREAKDOWN_2PCT)
     ),
     "episodicpivot": PaperStrategyConfig(
         strategy_key="episodicpivot",
@@ -104,10 +109,13 @@ def get_paper_strategy_config(
         "slippage_bps_small": base.slippage_bps_small,
         "max_stop_dist_pct": base.max_stop_dist_pct,
         "short_max_stop_dist_pct": base.short_max_stop_dist_pct,
+        "time_stop_days": base.time_stop_days,
+        "h_carry_enabled": base.h_carry_enabled,
+        "h_filter_threshold": base.h_filter_threshold,
     }
     for k, v in overrides.items():
         if k in fields:
-            fields[k] = type(fields[k])(v)
+            fields[k] = type(fields[k])(v) if fields[k] is not None else v
         else:
             params[k] = v
 
@@ -125,6 +133,9 @@ def get_paper_strategy_config(
         slippage_bps_small=fields["slippage_bps_small"],
         max_stop_dist_pct=fields["max_stop_dist_pct"],
         short_max_stop_dist_pct=fields["short_max_stop_dist_pct"],
+        time_stop_days=fields["time_stop_days"],
+        h_carry_enabled=fields["h_carry_enabled"],
+        h_filter_threshold=fields["h_filter_threshold"],
         extra_params=params,
     )
 

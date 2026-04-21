@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import threading
 import uuid
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import duckdb
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Status constants (kept identical to the PostgreSQL module)
@@ -1293,6 +1296,40 @@ class PaperDB:
             "SELECT * FROM paper_positions WHERE closed_at IS NULL ORDER BY opened_at ASC",
         )
         return [_serialize_position(r) for r in rows]
+
+    def adopt_open_positions_from_strategy(
+        self, new_session_id: str, strategy_name: str
+    ) -> list[dict[str, Any]]:
+        """Re-assign open positions from prior sessions of this strategy to new_session_id.
+
+        Called at the start of each daily session to carry positions forward.
+        Returns the list of adopted positions (now owned by new_session_id).
+        """
+        with self._lock:
+            result = self.con.execute(
+                """
+                UPDATE paper_positions
+                SET session_id = $1
+                WHERE closed_at IS NULL
+                  AND session_id != $1
+                  AND session_id IN (
+                      SELECT session_id FROM paper_sessions WHERE strategy_name = $2
+                  )
+                RETURNING *
+                """,
+                [new_session_id, strategy_name],
+            )
+            desc = result.description
+            rows = result.fetchall()
+        adopted = [_serialize_position(_row_to_dict(desc, r)) for r in rows]
+        if adopted:
+            logger.info(
+                "Adopted %d open position(s) into session %s strategy=%s",
+                len(adopted),
+                new_session_id,
+                strategy_name,
+            )
+        return adopted
 
     def list_all_positions(self) -> list[dict[str, Any]]:
         """Return all positions across all sessions (for global API queries)."""
