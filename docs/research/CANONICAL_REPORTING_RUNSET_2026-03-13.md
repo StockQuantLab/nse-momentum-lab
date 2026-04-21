@@ -1,5 +1,10 @@
 # Canonical Reporting Runset (2026-03-13)
 
+> ⚠️ **SUPERSEDED** by `CANONICAL_REPORTING_RUNSET_2026-04-21.md`
+> Wave-1 bug fixes (H-carry, entry gate, filter parity, pnl_r) and 11-year window invalidate these IDs.
+> Retained for historical reference only. Do not use these exp IDs for new comparisons.
+
+---
 This document freezes the current default backtest IDs used for dashboard/report comparisons.
 
 ## Active Runset

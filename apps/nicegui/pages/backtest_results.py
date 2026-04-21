@@ -252,7 +252,7 @@ async def backtest_page() -> None:
 
             raw_trades_df = get_experiment_trades(exp_id).with_row_index("trade_row_id")
             trades_df = raw_trades_df
-            trades_df = prepare_trades_df(trades_df)
+            trades_df = prepare_trades_df(trades_df, strategy_name=strategy)
             execution_diagnostics_df = get_experiment_execution_diagnostics(exp_id)
             raw_trade_lookup = {
                 int(row["trade_row_id"]): row for row in raw_trades_df.iter_rows(named=True)
@@ -344,13 +344,18 @@ async def backtest_page() -> None:
                     "entry_time": row.get("entry_time"),
                     "exit_date": row.get("exit_date"),
                     "exit_time": row.get("exit_time"),
+                    "qty": row.get("qty"),
                     "entry_price": _safe_float(row.get("entry_price")),
                     "exit_price": _safe_float(row.get("exit_price")),
+                    "initial_stop": _safe_float(row.get("initial_stop")),
+                    "position_value": _safe_float(row.get("position_value")),
                     "pnl_pct": _safe_float(row.get("pnl_pct")),
                     "pnl_r": _safe_float(row.get("pnl_r")),
+                    "net_pnl": _safe_float(row.get("net_pnl")),
+                    "total_costs": _safe_float(row.get("total_costs")),
+                    "gap_pct": _safe_float(row.get("gap_pct")),
                     "exit_reason": row.get("exit_reason"),
                     "holding_days": _safe_float(row.get("holding_days")),
-                    "gap_pct": _safe_float(row.get("gap_pct")),
                     "filters_passed": row.get("filters_passed"),
                     "year": row.get("year"),
                 }
@@ -539,7 +544,7 @@ async def backtest_page() -> None:
                                         _render_kv_table(
                                             [
                                                 ("Symbol", details["symbol"]),
-                                                ("Year", details["year"]),
+                                                ("Qty", details["qty"] or "—"),
                                                 ("Entry Date", entry_date),
                                                 ("Entry Time", details["entry_time"] or "—"),
                                                 ("Exit Date", exit_date),
@@ -557,11 +562,29 @@ async def backtest_page() -> None:
                                         ).style(f"color: {color_success()};")
                                         _render_kv_table(
                                             [
+                                                ("Entry Price", _safe_fmt(details["entry_price"])),
+                                                ("Exit Price", _safe_fmt(details["exit_price"])),
                                                 (
-                                                    "P&L",
+                                                    "Initial Stop",
+                                                    _safe_fmt(details["initial_stop"]),
+                                                ),
+                                                (
+                                                    "Position Value",
+                                                    _safe_fmt(details["position_value"]),
+                                                ),
+                                                (
+                                                    "P&L %",
                                                     f"{_safe_fmt(details['pnl_pct'])}%"
                                                     if details["pnl_pct"] is not None
                                                     else "—",
+                                                ),
+                                                (
+                                                    "Net P&L",
+                                                    _safe_fmt(details["net_pnl"]),
+                                                ),
+                                                (
+                                                    "Costs",
+                                                    _safe_fmt(details["total_costs"]),
                                                 ),
                                                 (
                                                     "R Multiple",
@@ -577,8 +600,6 @@ async def backtest_page() -> None:
                                                 ),
                                                 ("Exit Reason", details["exit_reason"] or "—"),
                                                 ("Filters Passed", details["filters_passed"] or 0),
-                                                ("Entry Price", _safe_fmt(details["entry_price"])),
-                                                ("Exit Price", _safe_fmt(details["exit_price"])),
                                             ],
                                             mono=True,
                                         )
@@ -748,28 +769,52 @@ async def backtest_page() -> None:
             # --- Shared trade table helpers (used by All Trades and Winners/Losers tabs) ---
             trade_cols = [
                 "entry_date",
-                "entry_time",
                 "symbol",
+                "entry_time",
+                "qty",
                 "entry_price",
-                "exit_date",
-                "exit_time",
                 "exit_price",
-                "exit_reason",
-                "holding_days",
+                "position_value",
+                "net_pnl",
+                "total_costs",
                 "pnl_pct",
                 "pnl_r",
+                "exit_reason",
+                "holding_days",
+                "gap_pct",
             ]
             avail_cols = [c for c in trade_cols if c in trades_df.columns]
+
+            _numeric_sort_cols = frozenset(
+                {
+                    "pnl_pct",
+                    "pnl_r",
+                    "entry_price",
+                    "exit_price",
+                    "holding_days",
+                    "position_value",
+                    "net_pnl",
+                    "gross_pnl",
+                    "total_costs",
+                    "gap_pct",
+                    "initial_stop",
+                    "qty",
+                }
+            )
 
             def _format_trade_val(val, col):
                 if _is_missing(val):
                     return "-"
-                if col == "pnl_pct":
+                if col in ("pnl_pct", "gap_pct"):
                     return f"{val:.2f}%"
                 if col == "pnl_r":
                     return f"{val:.2f}R"
+                if col in ("position_value", "net_pnl", "total_costs", "initial_stop"):
+                    return f"{val:,.2f}"
                 if "price" in col:
                     return f"{val:.2f}"
+                if col == "qty":
+                    return str(int(val))
                 if col == "holding_days":
                     return f"{int(val)}d"
                 return str(val)
@@ -780,10 +825,8 @@ async def backtest_page() -> None:
                         "trade_row_id": int(row["trade_row_id"]),
                         **{
                             col: (
-                                # Keep numeric cols as raw floats so QTable sorts correctly.
-                                # None stays None — JS format handles the null display.
                                 row.get(col)
-                                if col in ("pnl_pct", "pnl_r") and row.get(col) is not None
+                                if col in _numeric_sort_cols
                                 else _format_trade_val(row.get(col), col)
                             )
                             for col in avail_cols
@@ -792,18 +835,45 @@ async def backtest_page() -> None:
                     for row in df_slice.to_dicts()
                 ]
 
+            _short_labels = {
+                "entry_date": "Date",
+                "entry_time": "In",
+                "exit_time": "Out",
+                "symbol": "Symbol",
+                "qty": "Qty",
+                "entry_price": "Entry",
+                "exit_price": "Exit",
+                "position_value": "Position",
+                "net_pnl": "Net P&L",
+                "total_costs": "Costs",
+                "pnl_pct": "P&L %",
+                "pnl_r": "R",
+                "exit_reason": "Reason",
+                "holding_days": "Days",
+                "gap_pct": "Gap",
+            }
+
             def _col_def(col: str) -> dict:
                 base = {
                     "name": col,
-                    "label": col.replace("_", " ").title(),
+                    "label": _short_labels.get(col, col.replace("_", " ").title()),
                     "field": col,
                 }
-                if col == "pnl_pct":
-                    base["format"] = "val => val == null ? '-' : val.toFixed(2) + '%'"
-                    base["sortable"] = True
+                if col in ("pnl_pct", "gap_pct"):
+                    base[":format"] = "val => val == null ? '-' : val.toFixed(2) + '%'"
                 elif col == "pnl_r":
-                    base["format"] = "val => val == null ? '-' : val.toFixed(2) + 'R'"
-                    base["sortable"] = True
+                    base[":format"] = "val => val == null ? '-' : val.toFixed(2) + 'R'"
+                elif col in ("position_value", "net_pnl", "total_costs"):
+                    base[":format"] = (
+                        "val => val == null ? '-' : "
+                        "val.toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2})"
+                    )
+                elif col in ("entry_price", "exit_price", "initial_stop"):
+                    base[":format"] = "val => val == null ? '-' : val.toFixed(2)"
+                elif col == "qty":
+                    base[":format"] = "val => val == null ? '-' : Math.round(val)"
+                elif col == "holding_days":
+                    base[":format"] = "val => val == null ? '-' : Math.round(val) + 'd'"
                 return base
 
             table_columns = [_col_def(col) for col in avail_cols]
@@ -880,6 +950,11 @@ async def backtest_page() -> None:
                                 .agg(
                                     pl.len().alias("trades"),
                                     pl.col("pnl_pct").sum().round(2).alias("day_pnl"),
+                                    (
+                                        pl.col("net_pnl").sum().round(2)
+                                        if "net_pnl" in trades_df.columns
+                                        else pl.lit(None).alias("day_net_pnl")
+                                    ).alias("day_net_pnl"),
                                     pl.col("_is_win").sum().alias("wins"),
                                     (pl.col("_is_win").sum() * 100.0 / pl.len())
                                     .round(1)
@@ -894,6 +969,9 @@ async def backtest_page() -> None:
                                     "wins": int(row["wins"]),
                                     "win_rate": float(row["win_rate"]),
                                     "day_pnl": float(row["day_pnl"]),
+                                    "day_net_pnl": float(row["day_net_pnl"])
+                                    if row.get("day_net_pnl") is not None
+                                    else None,
                                 }
                                 for row in daily.iter_rows(named=True)
                             ]
@@ -922,14 +1000,25 @@ async def backtest_page() -> None:
                                         "label": "Win %",
                                         "field": "win_rate",
                                         "align": "right",
-                                        "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                        ":format": "val => val == null ? '-' : val.toFixed(1) + '%'",
                                     },
                                     {
                                         "name": "day_pnl",
-                                        "label": "Day P/L",
+                                        "label": "Day P/L %",
                                         "field": "day_pnl",
                                         "align": "right",
-                                        "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                        ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    },
+                                    {
+                                        "name": "day_net_pnl",
+                                        "label": "Day P/L",
+                                        "field": "day_net_pnl",
+                                        "align": "right",
+                                        ":format": (
+                                            "val => val == null ? '-' : "
+                                            "'₹' + val.toLocaleString('en-IN', "
+                                            "{minimumFractionDigits: 0, maximumFractionDigits: 0})"
+                                        ),
                                     },
                                 ],
                                 rows=daily_rows,
@@ -1218,13 +1307,13 @@ async def backtest_page() -> None:
                                             "name": "avg_pnl",
                                             "label": "Avg %",
                                             "field": "avg_pnl",
-                                            "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                            ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                         },
                                         {
                                             "name": "avg_r",
                                             "label": "Avg R",
                                             "field": "avg_r",
-                                            "format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
+                                            ":format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
                                         },
                                     ],
                                     rows=exit_rows,
@@ -1317,7 +1406,7 @@ async def backtest_page() -> None:
                                         "name": "Value",
                                         "label": "R-Multiple",
                                         "field": "Value",
-                                        "format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
+                                        ":format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
                                     },
                                 ],
                                 rows=pct_data,
@@ -1373,37 +1462,37 @@ async def backtest_page() -> None:
                                     "name": "total_pnl",
                                     "label": "Total %",
                                     "field": "total_pnl",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                                 {
                                     "name": "avg_pnl",
                                     "label": "Avg %",
                                     "field": "avg_pnl",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                                 {
                                     "name": "avg_r",
                                     "label": "Avg R",
                                     "field": "avg_r",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
                                 },
                                 {
                                     "name": "win_rate",
                                     "label": "Win %",
                                     "field": "win_rate",
-                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(1) + '%'",
                                 },
                                 {
                                     "name": "best",
                                     "label": "Best",
                                     "field": "best",
-                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(1) + '%'",
                                 },
                                 {
                                     "name": "worst",
                                     "label": "Worst",
                                     "field": "worst",
-                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(1) + '%'",
                                 },
                             ],
                             rows=stock_rows,
@@ -1447,7 +1536,7 @@ async def backtest_page() -> None:
                                         "label": col,
                                         "field": col,
                                         **(
-                                            {"format": fmt}
+                                            {":format": fmt}
                                             if (fmt := _yearly_col_format(col))
                                             else {}
                                         ),

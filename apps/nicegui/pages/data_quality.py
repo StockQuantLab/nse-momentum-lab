@@ -298,7 +298,7 @@ def _render_tables_section(m: dict) -> None:
             "field": "rows",
             "align": "right",
             "classes": "font-mono text-sm tabular-nums",
-            "format": "val => val == null ? '-' : val.toLocaleString()",
+            ":format": "val => val == null ? '-' : val.toLocaleString()",
         },
     ]
     paginated_table(
@@ -757,7 +757,7 @@ async def _render_coverage_tab() -> None:
                 "field": "coverage_pct",
                 "align": "right",
                 "classes": "tabular-nums",
-                "format": "val => val == null ? '-' : val.toFixed(1)",
+                ":format": "val => val == null ? '-' : val.toFixed(1)",
             },
             {
                 "name": "gap_estimate",

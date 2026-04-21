@@ -165,13 +165,21 @@ def resolve_intraday_execution_from_5min(
     entry_cutoff_minutes: int = 30,
     is_short: bool = False,
     orh_window_minutes: int = 0,
+    entry_start_minutes: int = 0,
     same_day_r_ladder: bool = False,
     same_day_r_ladder_start_r: int = 2,
     short_initial_stop_atr: float | None = None,
     short_initial_stop_atr_cap_mult: float | None = None,
     short_same_day_take_profit_pct: float | None = None,
 ) -> IntradayExecutionResult | None:
-    """Resolve intraday entry and same-day stop behavior from 5-minute candles."""
+    """Resolve intraday entry and same-day stop behavior from 5-minute candles.
+
+    ``entry_start_minutes`` skips entry-trigger checks for candles that open
+    within the first N minutes of the session (session stats are still
+    accumulated).  Use ``entry_start_minutes=5`` so the first 5-min candle
+    (9:15-9:20) is observed but never traded - entries only happen once the
+    full first candle is known at 9:20.
+    """
     if candles.is_empty():
         return None
 
@@ -198,6 +206,12 @@ def resolve_intraday_execution_from_5min(
         low_px = float(row["low"])
         session_high = h if session_high is None else max(session_high, h)
         session_low = low_px if session_low is None else min(session_low, low_px)
+
+        # Skip entry-trigger check for early candles (e.g. the 9:15 candle when
+        # entry_start_minutes=5).  Session stats above are still accumulated so
+        # the initial stop always reflects the full opening range.
+        if entry_start_minutes > 0 and minutes < entry_start_minutes:
+            continue
 
         triggered = False
         trigger_price = float(breakout_price)

@@ -171,10 +171,23 @@ class BacktestParams:
     # True  -> use breakout-day feat values (hindsight / analysis only)
     # False -> prefer T-1 feat values when available (causal default)
     breakout_use_current_day_c_quality: bool = False
-    # Parity toggle for threshold_breakout long-side carry semantics.
-    # When enabled, apply filter_h as a hold-quality check after entry admission
-    # (restores weak-close/breakeven-carry behavior used in earlier canonical runs).
+    # H-carry rule: use end-of-day close position (filter_h) to manage overnight carry.
+    # When True (default): if close not near high (long) or near low (short), either exit at
+    # the close (losing position) or carry with a breakeven stop (winning position).
+    # When False: always carry overnight without any H-based stop tightening (legacy behavior).
+    h_carry_enabled: bool = True
+    # Minimum close_pos_in_range for "near high" on longs; 1-threshold = "near low" for shorts.
+    # Default 0.70 = close must be in top 30% of day's range to satisfy H-filter (long).
+    # For shorts: H passes when close_pos_in_range <= (1 - h_filter_close_pos_threshold) = 0.30.
+    h_filter_close_pos_threshold: float = 0.70
+    # Deprecated — kept for hash stability of old experiments; do not set in new presets.
+    # Use h_carry_enabled instead.
     breakout_legacy_h_carry_rule: bool = False
+    # Skip entry-trigger checks for the first N minutes of the session so that
+    # the opening candle is fully observed before any entry is considered.
+    # Applies to both long (breakout) and short (breakdown) threshold strategies.
+    # Default 5 = skip the 9:15-9:20 candle; set 0 to replicate old behavior.
+    entry_start_minutes: int = 5
     # Daily cap for breakdown (short) candidates. Analogous to breakout_daily_candidate_budget
     # but for short setups. Default is much tighter (5) because the 2% breakdown universe
     # is far larger than the 4% breakout universe in down-trending markets.
@@ -274,9 +287,7 @@ class BacktestParams:
             same_day_r_ladder=self.same_day_r_ladder,
             same_day_r_ladder_start_r=self.same_day_r_ladder_start_r,
             short_post_day3_buffer_pct=resolved_buffer,
-            respect_same_day_exit_metadata=(
-                direction == PositionSide.LONG and self.breakout_legacy_h_carry_rule
-            ),
+            respect_same_day_exit_metadata=self.h_carry_enabled,
             follow_through_threshold=self.follow_through_threshold,
         )
 
@@ -1243,8 +1254,12 @@ class DuckDBBacktestRunner:
         hold_quality_cols = self._active_strategy.hold_quality_filter_columns or []
         if (
             not hold_quality_cols
-            and self._active_strategy.family == "threshold_breakout"
-            and bool(getattr(params, "breakout_legacy_h_carry_rule", False))
+            and self._active_strategy.family
+            in (
+                "threshold_breakout",
+                "threshold_breakdown",
+            )
+            and bool(getattr(params, "h_carry_enabled", True))
         ):
             hold_quality_cols = ["filter_h"]
         for col in active_filter_cols:
@@ -1413,6 +1428,10 @@ class DuckDBBacktestRunner:
         if params.entry_timeframe.lower() == "5min":
             is_ep_proxy = self._active_strategy.family == "ep_proxy"
             orh_window = params.orh_window_minutes if is_ep_proxy else 0
+            # Skip the first candle (9:15-9:20) for threshold strategies so entries
+            # only happen once the opening candle is fully observed.  EP-proxy keeps
+            # its own ORH-based window and is the only exception.
+            entry_start = 0 if is_ep_proxy else params.entry_start_minutes
             intraday_entry_by_signal = self._resolve_intraday_entries_bulk(
                 df_filtered=df_filtered,
                 breakout_threshold=params.breakout_threshold,
@@ -1421,6 +1440,7 @@ class DuckDBBacktestRunner:
                 ),
                 is_short=is_short,
                 orh_window_minutes=orh_window,
+                entry_start_minutes=entry_start,
                 same_day_r_ladder=params.same_day_r_ladder,
                 same_day_r_ladder_start_r=self._resolve_same_day_r_ladder_start_r(
                     params, self._active_strategy
@@ -1741,16 +1761,10 @@ class DuckDBBacktestRunner:
                 if t.initial_stop is not None and entry_price > 0
                 else 0.0
             )
-            gross_r_multiple = (
-                round(gross_pnl / (risk_per_share * qty), 4)
-                if risk_per_share > 0 and qty > 0
-                else 0.0
-            )
-            net_r_multiple = (
-                round(net_pnl / (risk_per_share * qty), 4)
-                if risk_per_share > 0 and qty > 0
-                else 0.0
-            )
+            # Guard: skip R-multiple if risk per share is effectively zero to avoid huge numbers.
+            _risk_valid = risk_per_share >= 0.01 and qty > 0
+            gross_r_multiple = round(gross_pnl / (risk_per_share * qty), 4) if _risk_valid else 0.0
+            net_r_multiple = round(net_pnl / (risk_per_share * qty), 4) if _risk_valid else 0.0
 
             # Find gap_pct and filters_passed for this trade
             context = signal_context.get((t.symbol_id, t.entry_date), {})
@@ -1991,8 +2005,14 @@ class DuckDBBacktestRunner:
         signal_date: date,
         is_short: bool,
     ) -> tuple[float | None, str | None, datetime | None, time | None, float | None, str]:
-        """Apply post-entry carry logic driven by hold-quality filters."""
-        if hold_quality_passed or same_day_exit_reason is not None:
+        """Apply post-entry carry logic driven by hold-quality filters.
+
+        H=True (close near high/low for long/short): tighten carry stop to at least breakeven.
+        H=False + losing/flat position: WEAK_CLOSE_EXIT (exit at day close).
+        H=False + profitable position: carry overnight with breakeven stop.
+        """
+        if same_day_exit_reason is not None:
+            # Already exited intraday — no carry rule to apply.
             return (
                 same_day_exit_price,
                 same_day_exit_reason,
@@ -2012,19 +2032,34 @@ class DuckDBBacktestRunner:
                 "normal",
             )
 
-        # Keep short-side H=false behavior conservative: exit at the close.
-        if is_short:
+        if hold_quality_passed:
+            # H=True: close is near high (long) or near low (short). Tighten carry stop to
+            # at least breakeven so overnight carry doesn't give back more than entry price.
+            base = carry_stop_next_session if carry_stop_next_session is not None else entry_price
+            tightened = (
+                min(float(base), float(entry_price))
+                if is_short
+                else max(float(base), float(entry_price))
+            )
             return (
-                float(close_price),
-                ExitReason.WEAK_CLOSE_EXIT.value,
-                datetime.combine(signal_date, time(15, 30)),
-                time(15, 30),
-                carry_stop_next_session,
-                "weak_close_exit",
+                same_day_exit_price,
+                same_day_exit_reason,
+                same_day_exit_ts,
+                same_day_exit_time,
+                tightened,
+                "normal",
             )
 
-        close_failed_entry = close_price <= entry_price
+        # H=False: check whether the position is profitable or losing.
+        # For shorts: in profit when close < entry (price fell); losing/flat when close >= entry.
+        # For longs: in profit when close > entry (price rose); losing/flat when close <= entry.
+        if is_short:
+            close_failed_entry = close_price >= entry_price
+        else:
+            close_failed_entry = close_price <= entry_price
+
         if close_failed_entry:
+            # Price moved against us (or flat) AND didn't close near high/low: exit at close.
             return (
                 float(close_price),
                 ExitReason.WEAK_CLOSE_EXIT.value,
@@ -2156,6 +2191,7 @@ class DuckDBBacktestRunner:
         entry_cutoff_minutes: int = 30,
         is_short: bool = False,
         orh_window_minutes: int = 0,
+        entry_start_minutes: int = 0,
         same_day_r_ladder: bool = False,
         same_day_r_ladder_start_r: int = 2,
         short_initial_stop_atr_cap_mult: float | None = None,
@@ -2184,6 +2220,7 @@ class DuckDBBacktestRunner:
             entry_cutoff_minutes=entry_cutoff_minutes,
             is_short=is_short,
             orh_window_minutes=orh_window_minutes,
+            entry_start_minutes=entry_start_minutes,
             same_day_r_ladder=same_day_r_ladder,
             same_day_r_ladder_start_r=same_day_r_ladder_start_r,
             short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,

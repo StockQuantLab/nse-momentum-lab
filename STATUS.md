@@ -1,6 +1,6 @@
 # NSE Momentum Lab — System Status
 
-> Last updated: 2026-04-18 (update manually after each data catch-up)
+> Last updated: 2026-04-21 (update manually after each data catch-up)
 
 ---
 
@@ -17,16 +17,16 @@
 
 ## Canonical Experiment Baselines
 
-Window: `2025-04-01 → 2026-03-10`, universe 2000.
+Window: `2015-01-01 → 2026-04-17`, universe 2000. Wave-1 fixes applied (H-carry, entry gate 09:20, filter direction parity, pnl_r guard).
 
-| Strategy | Exp ID | Return | Max DD | Profit Factor | Trades |
-|----------|--------|--------|--------|---------------|--------|
-| Breakout 4% | `1716b78c208a90f3` | +136.4% | 2.26% | — | 991 |
-| Breakout 2% | `87577645e9c99961` | +160.6% | 3.50% | — | 1842 |
-| Breakdown 4% (Opt-B) | `84d9a58f3ad105be` | +3.36% | 1.24% | 2.49 | 37 |
-| Breakdown 2% (canonical) | `c52e19a02db552d1` | +9.4% | 3.46% | 1.59 | 292 |
+| Strategy | Exp ID | Avg Annual | Max DD | Calmar | Profit Factor | Trades | Neg Years |
+|----------|--------|-----------|--------|--------|---------------|--------|-----------|
+| Breakout 4% | `0cd353d536dd6f91` | +54.1% | 3.16% | 17.1 | 22.98 | 2,211 | 0 |
+| Breakout 2% | `f923e1a9517d9b2c` | +121.8% | 2.73% | 44.6 | 19.06 | 7,078 | 0 |
+| Breakdown 4% | `f6e7646ac932697d` | +3.1% | 0.74% | 4.2 | 6.65 | 258 | 2 |
+| Breakdown 2% | `b769984bf6d0c5c7` | +8.1% | 1.99% | 4.1 | 6.52 | 790 | 0 |
 
-Frozen reporting runset: `docs/research/CANONICAL_REPORTING_RUNSET_2026-03-13.md`
+Frozen reporting runset: `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-21.md`
 
 ---
 
@@ -104,7 +104,7 @@ The promotion gate requires:
 
 ## Known Constraints
 
-- DuckDB is **single-writer**: stop the dashboard before running backtests or feature rebuilds.
+- DuckDB is **single-writer**: stop the dashboard before running backtests or feature rebuilds. The dashboard reads from a versioned replica so cleanup (`nseml-backtest-cleanup`) is safe while the dashboard runs.
 - `KITE_ACCESS_TOKEN` is process-singleton — restart the process after a daily token refresh.
 - `--force --allow-full-rebuild` is required for full feature rebuilds (safety guard against accidental rebuilds).
 - Windows sandbox (Codex): run `doppler`, `docker`, `git commit`, and `git push` on the **host**, not inside the sandbox.

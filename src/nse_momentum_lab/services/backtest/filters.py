@@ -185,11 +185,20 @@ class FilterChecker:
         self.lynch_min_passed = lynch_min_passed
         self.min_filters = min_filters
 
-    def check_h(self, close_pos_in_range: float | None) -> FilterResult:
-        """H: Close near high of the day."""
+    def check_h(self, close_pos_in_range: float | None, is_short: bool = False) -> FilterResult:
+        """H: Close near high of the day (long) or near low of the day (short)."""
         if close_pos_in_range is None:
             return FilterResult("H", False, "No close position data")
 
+        if is_short:
+            short_threshold = round(1.0 - self.close_pos_threshold, 6)
+            passed = close_pos_in_range <= short_threshold
+            return FilterResult(
+                "H",
+                passed,
+                f"Close pos {close_pos_in_range:.2f} {'<=' if passed else '>'} {short_threshold} (short)",
+                close_pos_in_range,
+            )
         passed = close_pos_in_range >= self.close_pos_threshold
         return FilterResult(
             "H",
@@ -205,8 +214,13 @@ class FilterChecker:
         prev_close: float | None,
         prev_open: float | None,
         atr_20: float | None,
+        is_short: bool = False,
     ) -> FilterResult:
-        """N: Narrow range or negative prior day."""
+        """N: Narrow range or directional prior day.
+
+        For longs: prior day narrow OR red (close < open) — exhaustion before breakout.
+        For shorts: prior day narrow OR green (close > open) — buying exhaustion before breakdown.
+        """
         if None in (prev_high, prev_low, prev_close, prev_open, atr_20):
             return FilterResult("N", False, "Missing prior day data")
 
@@ -217,23 +231,30 @@ class FilterChecker:
         assert prev_open is not None
         assert atr_20 is not None
 
-        # Check 1: Prior day negative close
-        if prev_close < prev_open:
+        # Check 2: Narrow range (True Range in bottom half) — shared for both directions
+        prior_tr = prev_high - prev_low
+        is_narrow = prior_tr < (atr_20 * self.nr_atr_multiplier)
+        if is_narrow:
             return FilterResult(
                 "N",
                 True,
-                f"Prior day negative (close {prev_close:.2f} < open {prev_open:.2f})",
-                prev_close - prev_open,
+                f"Prior TR {prior_tr:.2f} < ATR*{self.nr_atr_multiplier} ({atr_20 * self.nr_atr_multiplier:.2f}) [narrow]",
+                prior_tr,
             )
 
-        # Check 2: Narrow range (True Range in bottom half)
-        prior_tr = prev_high - prev_low
-        passed = prior_tr < (atr_20 * self.nr_atr_multiplier)
+        # Check 1: Directional candle — red for longs, green for shorts
+        if is_short:
+            directional = prev_close > prev_open
+            direction_label = "green (exhaustion)"
+        else:
+            directional = prev_close < prev_open
+            direction_label = "red (exhaustion)"
+
         return FilterResult(
             "N",
-            passed,
-            f"Prior TR {prior_tr:.2f} {'<' if passed else '>='} ATR*{self.nr_atr_multiplier} ({atr_20 * self.nr_atr_multiplier:.2f})",
-            prior_tr,
+            directional,
+            f"Prior day {direction_label}: close {prev_close:.2f} {'>' if is_short else '<'} open {prev_open:.2f}",
+            prev_close - prev_open,
         )
 
     def check_2(self, ret_1d_lag1: float | None, ret_1d_lag2: float | None) -> FilterResult:
@@ -339,15 +360,22 @@ class FilterChecker:
         ma_20: float | None,
         ret_5d: float | None,
         r2_65: float | None,
+        *,
+        is_short: bool = False,
     ) -> dict[str, FilterResult]:
         """Check all filters and return results.
+
+        Args:
+            is_short: When True, inverts direction-sensitive filters H and N for short trades.
 
         Returns:
             Dict mapping filter letter to FilterResult
         """
         return {
-            "H": self.check_h(close_pos_in_range),
-            "N": self.check_n(prev_high, prev_low, prev_close, prev_open, atr_20),
+            "H": self.check_h(close_pos_in_range, is_short=is_short),
+            "N": self.check_n(
+                prev_high, prev_low, prev_close, prev_open, atr_20, is_short=is_short
+            ),
             "2": self.check_2(ret_1d_lag1, ret_1d_lag2),
             "Y": self.check_y(prior_breakouts_30d),
             "C": self.check_c(vol_dryup_ratio),

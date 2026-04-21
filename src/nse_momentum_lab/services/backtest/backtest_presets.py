@@ -101,6 +101,11 @@ _ENGINE_DEFAULTS: dict[str, Any] = {
     "entry_cutoff_minutes": 60,
     "max_stop_dist_pct": 0.08,
     "breakout_use_current_day_c_quality": True,
+    # Skip the first 5-min candle (9:15-9:20): entries only after opening candle closes.
+    "entry_start_minutes": 5,
+    # H-carry logic: exit at close when position is not profitable AND didn't close near
+    # high/low; tighten stop to at least breakeven when carrying. Enabled for all strategies.
+    "h_carry_enabled": True,
 }
 
 ALL_PRESETS: dict[str, StrategyPreset] = {

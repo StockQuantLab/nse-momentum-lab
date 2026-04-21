@@ -553,7 +553,7 @@ def format_time(value) -> str:
     return str(value)[:5]
 
 
-def prepare_trades_df(df: pl.DataFrame) -> pl.DataFrame:
+def prepare_trades_df(df: pl.DataFrame, strategy_name: str | None = None) -> pl.DataFrame:
     """Prepare trades dataframe for display with proper formatting."""
     if df.is_empty():
         return df
@@ -580,11 +580,35 @@ def prepare_trades_df(df: pl.DataFrame) -> pl.DataFrame:
         df = df.with_columns(time_cols)
 
     numeric_casts = []
-    for col in ["pnl_pct", "pnl_r", "holding_days", "year", "entry_price", "exit_price"]:
+    for col in [
+        "pnl_pct",
+        "pnl_r",
+        "holding_days",
+        "year",
+        "entry_price",
+        "exit_price",
+        "position_value",
+        "net_pnl",
+        "gross_pnl",
+        "total_costs",
+        "gap_pct",
+        "initial_stop",
+    ]:
         if col in df.columns:
             numeric_casts.append(pl.col(col).cast(pl.Float64, strict=False))
+    if "qty" in df.columns:
+        numeric_casts.append(pl.col("qty").cast(pl.Int64, strict=False))
     if numeric_casts:
         df = df.with_columns(numeric_casts)
+
+    # Derive qty from position_value / entry_price when null (old experiments)
+    if "qty" in df.columns and "position_value" in df.columns and "entry_price" in df.columns:
+        df = df.with_columns(
+            pl.when(pl.col("qty").is_null() & (pl.col("entry_price") > 0))
+            .then((pl.col("position_value") / pl.col("entry_price")).cast(pl.Int64))
+            .otherwise(pl.col("qty"))
+            .alias("qty")
+        )
 
     return df
 

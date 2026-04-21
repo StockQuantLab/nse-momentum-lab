@@ -70,18 +70,19 @@ Counter is surfaced in year stats and experiment summary.
 
 ### ISSUE-006 — backtest_dashboard.duckdb snapshot skipped when dashboard is open
 
-**Status**: OPEN (known limitation)
+**Status**: ✅ RESOLVED — 2026-04-21 (versioned replica system)
 **Severity**: Low
 **Found**: 2026-03-12
 
-**Problem**: After a backtest run completes, the engine attempts to snapshot `backtest.duckdb` →
-`backtest_dashboard.duckdb`. If the NiceGUI dashboard is open and holding a read connection to
-`backtest_dashboard.duckdb`, the snapshot may be skipped (DuckDB single-writer constraint). A
-warning is logged but the dashboard shows stale results.
+**Problem**: After a backtest run completes, the engine attempted to snapshot `backtest.duckdb` →
+`backtest_dashboard.duckdb`. If the NiceGUI dashboard was open and holding a read connection, the
+snapshot could be skipped (DuckDB single-writer constraint).
 
-**Workaround**: Close the dashboard before running a backtest, or refresh the dashboard page
-after the run (it will re-open the file). Alternatively, manually copy `backtest.duckdb` to
-`backtest_dashboard.duckdb` after closing the dashboard.
+**Resolution**: Replaced the single-file snapshot with `VersionedReplicaSync`. The backtest engine
+writes to `data/backtest.duckdb`; after each run it creates a new versioned replica (e.g.
+`data/backtest_replica/backtest_replica_v3.duckdb`) and atomically updates a pointer file.
+The dashboard reads only the replica, so the writer and reader never contend on the same file.
+`nseml-backtest-cleanup` also calls `force_sync()` after pruning, so the dashboard stays consistent.
 
 ---
 
@@ -178,4 +179,161 @@ The lower trade count in post-Mar-31 runs is correct. Pre-Mar-31 inflated return
 
 ---
 
-*Last updated: 2026-04-20*
+## Strategy Enhancement Wave 1
+
+### ISSUE-009 — WEAK_CLOSE_EXIT never triggers (H-carry rule disabled by default)
+
+**Status**: ✅ FIXED — `duckdb_backtest_runner.py`, `backtest_presets.py` (2026-04-21)
+**Severity**: High
+**Found**: 2026-04-21 (deep analysis post Apr-21 baseline run)
+
+**Problem**: Three compounding defects prevent WEAK_CLOSE_EXIT from ever firing:
+
+1. `breakout_legacy_h_carry_rule: bool = False` default makes `hold_quality_cols = []`,
+   so `hold_quality_passed = True` for every trade regardless of actual H-filter value.
+2. `to_vbt_config()` sets `respect_same_day_exit_metadata = (direction == LONG and self.breakout_legacy_h_carry_rule)`.
+   This is always `False` (rule disabled) AND only covers LONG trades — shorts never get WEAK_CLOSE_EXIT
+   even when the rule would fire.
+3. In `_apply_hold_quality_carry_rule`, the short branch at line 2026–2034 unconditionally exits at
+   close when H=False for shorts, regardless of whether the trade is profitable. A short position
+   where close < entry (in profit, but close not near day low) should carry overnight with a
+   breakeven stop, not exit immediately.
+
+**Result**: `min(holding_days) = 1` across all 12,930 trades in Apr-21 runs; zero same-day exits.
+Stocks that reverse on entry day and close below entry carry overnight, amplifying losses.
+
+**Fix**:
+- Add `h_carry_enabled: bool = True` to `BacktestParams` (replaces `breakout_legacy_h_carry_rule`)
+- Wire `hold_quality_cols = ["filter_h"]` when `h_carry_enabled=True` for both strategies
+- Fix `to_vbt_config()`: `respect_same_day_exit_metadata = self.h_carry_enabled`
+- Fix short branch: only WEAK_CLOSE_EXIT when `close >= entry` (losing/flat); carry with BE stop when `close < entry` (profitable)
+- Add `"h_carry_enabled": True` to `_ENGINE_DEFAULTS` in `backtest_presets.py`
+
+---
+
+### ISSUE-010 — FilterChecker.check_n() uses wrong candle direction for shorts (paper parity gap)
+
+**Status**: ✅ FIXED — `filters.py` (2026-04-21)
+**Severity**: Medium
+**Found**: 2026-04-21 (code review)
+
+**Problem**: `FilterChecker.check_n()` in `filters.py` checks `prev_close < prev_open` (RED candle)
+for ALL trades. For **breakdown (short)** strategies, a red prior-day candle is CONTINUATION
+(stock already falling — not a rest before further decline). The correct signal for shorts is
+a **GREEN prior day** (`prev_close > prev_open`): failed rally exhaustion creates the ideal setup.
+
+The **backtest SQL** in `strategy_families.py` already has the correct direction-specific logic:
+- Long path: `prev_close < prev_open` (red = compression)
+- Short path (default): `prev_close > prev_open` (green = exhaustion)
+
+But `FilterChecker.check_n()` is used by paper trading scan code and always applies the LONG
+(red candle) logic, creating a backtest-vs-paper parity gap for BREAKDOWN strategies.
+
+**Note**: `BREAKDOWN_2PCT` uses `breakdown_filter_n_narrow_only=True`, which skips the candle check
+entirely (narrow only), so this gap only affects `BREAKDOWN_4PCT` paper trades.
+
+**Fix**: Add `is_short: bool = False` parameter to `FilterChecker.check_n()` and `check_all()`.
+When `is_short=True`, check `prev_close > prev_open` instead of `prev_close < prev_open`.
+Update all callers in paper trading and scan code.
+
+---
+
+### ISSUE-011 — H-filter close_pos threshold hardcoded in strategy SQL (not configurable)
+
+**Status**: ✅ FIXED — `strategy_families.py`, `BacktestParams` (2026-04-21)
+**Severity**: Low
+**Found**: 2026-04-21 (code review)
+
+**Problem**: The "close near high" threshold is hardcoded as `>= 0.70` for longs and `<= 0.30` for
+shorts in `strategy_families.py` lines 130–131 and 371–372. To test a threshold of e.g. 0.65 or
+0.75, a code change is required rather than a preset parameter change.
+
+**Fix**: Add `h_filter_close_pos_threshold: float = 0.70` to `BacktestParams`. Pass this into the
+strategy SQL as a bound parameter. Short threshold becomes `1.0 - h_filter_close_pos_threshold`.
+Also thread into `FilterChecker` as `close_pos_threshold` (already accepted as a constructor param
+at line 174 of `filters.py`, so this is a wiring fix only).
+
+---
+
+### ISSUE-012 — pnl_r column has corrupt aggregate values (divide-by-zero)
+
+**Status**: ✅ FIXED — `vectorbt_engine.py` (2026-04-21) — guard added: `abs(initial_risk) < 0.01` stores `pnl_r = None`
+**Severity**: Medium
+**Found**: 2026-04-21 (data analysis — `avg(pnl_r)` returns values like 1.7e+12)
+
+**Problem**: `avg(pnl_r)` over experiment trades returns astronomically large values (1.7e+12),
+indicating Inf or NaN values stored in the `pnl_r` column. Root cause is likely divide-by-zero
+when `initial_risk = entry_price - initial_stop` is near zero (stock with extremely tight stop).
+
+**Impact**: Any dashboard card showing "avg R-multiple" or "% trades at 3R+" shows meaningless
+numbers. The underlying trade P&L is unaffected (pnl_pct is a separate column computed correctly).
+
+**Fix**:
+1. Identify where `pnl_r` is written (likely `vectorbt_engine.py` or trade row construction).
+2. Add guard: if `abs(initial_risk) < 1e-6`: store `pnl_r = None` (NULL).
+3. In dashboard queries: add `WHERE pnl_r IS NOT NULL AND ABS(pnl_r) < 100` guard when aggregating.
+
+---
+
+### ISSUE-013 — Entry quality degrades significantly after 9:30–9:40 IST
+
+**Status**: OPEN — needs backtest experiment to validate cutoff change
+**Severity**: Medium (late entries drag down per-trade expectancy)
+**Found**: 2026-04-21 (data analysis on Apr-21 runs, binned by 5-min entry slot)
+
+**Findings (avg PnL per trade by entry time, Apr-21 baseline, breakout strategies)**:
+
+| Entry Time | BO 4% (bps) | BO 4% WR | BO 2% (bps) | BO 2% WR |
+|------------|-------------|----------|-------------|----------|
+| 09:20      | 176.6       | 39.4%    | 144.9       | 36.9%    |
+| 09:25      | ~140        | ~38%     | ~120        | ~35%     |
+| 10:05      | 28.1        | —        | 64.1        | —        |
+| 10:15      | 98.9        | —        | 44.2        | —        |
+
+Current default `entry_cutoff_minutes = 60` (10:15 IST). An earlier note in `BacktestParams`
+says 60min gave Calmar 27.06 vs 19.74 at 30min — but that analysis predates the causal admission
+fix (Mar-31, 2026) which eliminated lookahead bias. The comparison needs to be re-run.
+
+**Next steps**: Run two experiments per leg (30min cutoff vs 45min cutoff) and compare Calmar ratio
+and total return vs Apr-21 baselines before changing the default.
+
+---
+
+### ISSUE-014 — Long-side lacks per-side tuning overrides (asymmetric vs short side)
+
+**Status**: OPEN — enhancement request
+**Severity**: Low (current long-side params are adequate; short-specific overrides already exist)
+**Found**: 2026-04-21 (code review)
+
+**Problem**: Short strategies have 6 dedicated per-side override params:
+`short_trail_activation_pct`, `short_time_stop_days`, `short_max_stop_dist_pct`,
+`short_abnormal_profit_pct`, `short_same_day_r_ladder_start_r`, `short_post_day3_buffer_pct`.
+The long side has no equivalent — any tuning of trail %, time stop, or max stop applies to both
+strategies. This limits the ability to tune breakout and breakdown independently when both run
+under a shared `_ENGINE_DEFAULTS`.
+
+**Proposed fix** (low priority — needed only when multi-leg tuning conflicts arise):
+Add `long_trail_activation_pct`, `long_time_stop_days`, `long_max_stop_dist_pct` mirroring
+the short-side override pattern. When set, override base param for LONG direction in
+`to_vbt_config()`.
+
+---
+
+*Last updated: 2026-04-21*
+
+---
+
+## Canonical Experiment IDs (2026-04-21)
+
+Wave-1 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard.
+Full 11-year window: `2015-01-01 → 2026-04-17`, universe 2000.
+
+| Leg | Exp ID | Avg Annual | Max DD | Calmar | PF | Trades |
+|-----|--------|-----------|--------|--------|----|--------|
+| Breakout 4% | `0cd353d536dd6f91` | +54.1% | 3.16% | 17.1 | 22.98 | 2,211 |
+| Breakout 2% | `f923e1a9517d9b2c` | +121.8% | 2.73% | 44.6 | 19.06 | 7,078 |
+| Breakdown 4% | `f6e7646ac932697d` | +3.1% | 0.74% | 4.2 | 6.65 | 258 |
+| Breakdown 2% | `b769984bf6d0c5c7` | +8.1% | 1.99% | 4.1 | 6.52 | 790 |
+
+All prior experiment IDs have been pruned from DuckDB. These four are the only active baselines.
+See `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-21.md` for the frozen report.

@@ -337,7 +337,9 @@ class MarketDataDB:
                 year            INTEGER,
                 entry_time      TIME,
                 exit_time       TIME,
-                commission_model VARCHAR
+                commission_model VARCHAR,
+                qty              INTEGER,
+                initial_stop     DOUBLE
             )
         """)
         # Backward compatibility: add timestamp columns to existing catalogs.
@@ -348,6 +350,8 @@ class MarketDataDB:
         self._ensure_column("bt_trade", "net_pnl", "DOUBLE")
         self._ensure_column("bt_trade", "total_costs", "DOUBLE")
         self._ensure_column("bt_trade", "commission_model", "VARCHAR")
+        self._ensure_column("bt_trade", "qty", "INTEGER")
+        self._ensure_column("bt_trade", "initial_stop", "DOUBLE")
 
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS bt_yearly_metric (
@@ -782,6 +786,8 @@ class MarketDataDB:
                 t.get("entry_time"),
                 t.get("exit_time"),
                 t.get("commission_model"),
+                t.get("qty"),
+                t.get("initial_stop"),
             )
             for t in trades
         ]
@@ -792,8 +798,8 @@ class MarketDataDB:
                    (exp_id, symbol, entry_date, exit_date, entry_price, exit_price,
                     position_value, gross_pnl, net_pnl, total_costs, pnl_pct, pnl_r,
                     exit_reason, holding_days, gap_pct, filters_passed, year,
-                    entry_time, exit_time, commission_model)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    entry_time, exit_time, commission_model, qty, initial_stop)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
             self.con.execute("COMMIT")

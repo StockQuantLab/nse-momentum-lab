@@ -66,15 +66,15 @@ Measures where the breakout/breakdown day's close lands within the day's range.
 
 - `H = true`: carry overnight; tighten stop to at least breakeven
 - `H = false` (long): if still in-favour at close → carry with tightened stop; if close is back through entry → exit with `WEAK_CLOSE_EXIT`
-- `H = false` (short): always exit at same-day close (no overnight carry for shorts)
+- `H = false` (short): if still in-favour at close (close < entry for shorts) → carry overnight with breakeven stop; if losing (close ≥ entry) → `WEAK_CLOSE_EXIT`
 
 ---
 
 ## Entry
 
-| Parameter | Value |
-|-----------|-------|
-| Entry window | 09:15–09:45 IST (first 30 minutes only) |
+| Variant | Value |
+|---------|-------|
+| Entry window | 09:20–09:45 IST (bars 2–7 only; first 5-minute bar excluded) |
 | Trigger bar | 5-minute bar crosses threshold |
 | Entry price | Bar open if gap-through; otherwise threshold price |
 | Admission filters | N, Y, C, L (all must pass pre-open) |
@@ -117,20 +117,21 @@ Risk-based: **1R per trade** (R = distance from entry to initial stop). Universe
 
 ## Canonical Operating Points
 
-All runs use window `2025-04-01 → 2026-03-10`, universe size 2000.
+All runs use window `2015-01-01 → 2026-04-17`, universe size 2000. Wave-1 fixes applied: H-carry enabled, entry gate at 09:20 (5 min after open), filter direction parity (N/H correct for shorts), pnl_r guard.
 
-| Leg | Threshold | Exp ID | Return | Max DD | Calmar | Trades |
-|-----|-----------|--------|--------|--------|--------|--------|
-| Breakout long | 4% | `1716b78c208a90f3` | +136.4% | 2.26% | ~60 | 991 |
-| Breakout long | 2% | `87577645e9c99961` | +160.6% | 3.50% | ~46 | 1842 |
-| Breakdown short | 4% (Option-B) | `84d9a58f3ad105be` | +3.36% | 1.24% | ~2.7 | 37 |
-| Breakdown short | 2% (canonical) | `c52e19a02db552d1` | +9.4% | 3.46% | ~2.7 | 292 |
+| Leg | Threshold | Exp ID | Avg Annual | Max DD | Calmar | Trades | Neg Years |
+|-----|-----------|--------|-----------|--------|--------|--------|-----------|
+| Breakout long | 4% | `0cd353d536dd6f91` | +54.1% | 3.16% | 17.1 | 2,211 | 0 |
+| Breakout long | 2% | `f923e1a9517d9b2c` | +121.8% | 2.73% | 44.6 | 7,078 | 0 |
+| Breakdown short | 4% | `f6e7646ac932697d` | +3.1% | 0.74% | 4.2 | 258 | 2 |
+| Breakdown short | 2% | `b769984bf6d0c5c7` | +8.1% | 1.99% | 4.1 | 790 | 0 |
 
-**Option-B (4% breakdown)** uses short-specific engine params: trailing 4%, time-stop day 3, max-stop 5%, abnormal-profit 5%.
-
-Run the full 4-leg preset:
+Run the full 4-leg preset (update dates as needed):
 ```bash
-doppler run -- uv run python scripts/run_full_operating_point.py
+doppler run -- uv run python scripts/run_full_operating_point.py \
+  --start-year 2015 --end-year 2026 \
+  --start-date 2015-01-01 --end-date 2026-04-17 \
+  --universe-size 2000 --parallel-workers 4 --force
 ```
 
 ---

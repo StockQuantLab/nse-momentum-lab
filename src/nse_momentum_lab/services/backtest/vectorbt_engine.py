@@ -1012,7 +1012,7 @@ class VectorBTEngine:
                     exit_price=exit_price if pd.notna(exit_price) else None,
                     pnl=pnl_value,
                     pnl_r=(pnl_value / (risk_per_share * qty))
-                    if pnl_value and risk_per_share > 0 and qty > 0
+                    if pnl_value is not None and risk_per_share >= 0.01 and qty > 0
                     else None,
                     fees=float(record.get("Entry Fees", 0.0)) + float(record.get("Exit Fees", 0.0)),
                     slippage_bps=slippage_bps,

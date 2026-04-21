@@ -77,7 +77,9 @@ async def trade_analytics_page() -> None:
         @ui.refreshable
         def render_analytics(exp_id: str) -> None:
             trades_df = get_experiment_trades(exp_id)
-            trades_df = prepare_trades_df(trades_df)
+            exp = get_experiment(exp_id)
+            strategy = str(exp.get("strategy_name", "")) if exp else ""
+            trades_df = prepare_trades_df(trades_df, strategy_name=strategy)
 
             if trades_df.is_empty():
                 empty_state(
@@ -191,25 +193,25 @@ async def trade_analytics_page() -> None:
                                     "name": "avg_pnl",
                                     "label": "Avg %",
                                     "field": "avg_pnl",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                                 {
                                     "name": "avg_r",
                                     "label": "Avg R",
                                     "field": "avg_r",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + 'R'",
                                 },
                                 {
                                     "name": "win_rate",
                                     "label": "Win %",
                                     "field": "win_rate",
-                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(1) + '%'",
                                 },
                                 {
                                     "name": "total_pnl",
                                     "label": "Total %",
                                     "field": "total_pnl",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                             ],
                             rows=[
@@ -283,19 +285,19 @@ async def trade_analytics_page() -> None:
                                     "name": "total_pnl",
                                     "label": "Total %",
                                     "field": "total_pnl",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                                 {
                                     "name": "avg_pnl",
                                     "label": "Avg %",
                                     "field": "avg_pnl",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                                 {
                                     "name": "win_rate",
                                     "label": "Win %",
                                     "field": "win_rate",
-                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(1) + '%'",
                                 },
                             ],
                             rows=[
@@ -349,25 +351,25 @@ async def trade_analytics_page() -> None:
                                     "name": "total_pnl",
                                     "label": "Total %",
                                     "field": "total_pnl",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                                 {
                                     "name": "avg_pnl",
                                     "label": "Avg %",
                                     "field": "avg_pnl",
-                                    "format": "val => val == null ? '-' : val.toFixed(2) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(2) + '%'",
                                 },
                                 {
                                     "name": "best",
                                     "label": "Best %",
                                     "field": "best",
-                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(1) + '%'",
                                 },
                                 {
                                     "name": "worst",
                                     "label": "Worst %",
                                     "field": "worst",
-                                    "format": "val => val == null ? '-' : val.toFixed(1) + '%'",
+                                    ":format": "val => val == null ? '-' : val.toFixed(1) + '%'",
                                 },
                             ],
                             rows=[
