@@ -289,6 +289,10 @@ ORDER BY updated_at DESC;
 
 5. **Incremental > Full**: Always prefer incremental rebuilds unless schema changed
 
+6. **DuckDB performance tuning**: DuckDB connections use 36GB memory limit and 8 threads by default. Override via `DUCKDB_MEMORY_LIMIT` and `DUCKDB_THREADS` env vars if needed. Feature builds apply these settings automatically via `configure_duckdb_for_feature_build()`.
+
+7. **Manifest optimization**: Intraday feature builds use a parquet file manifest (single pathlib walk) instead of per-symbol filesystem globs. This eliminates ~4000 glob calls for a 2000-symbol universe and provides explicit file paths to DuckDB (no glob resolution overhead). The manifest is built once per build session and passed through all batch operations.
+
 ---
 
 ## Append Performance Expectations

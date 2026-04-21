@@ -1,7 +1,7 @@
 # Command Reference - nse-momentum-lab
 
 **Version**: Multi-Strategy Platform (Phase 1–7 complete) + Paper Trading v2 Engine
-**Last Updated**: 2026-04-19
+**Last Updated**: 2026-04-21
 
 ---
 
@@ -323,6 +323,8 @@ Notes:
 - `--force` is reserved for exceptional full rebuilds and requires `--allow-full-rebuild`.
 - `--feature-set` rebuilds a single table without touching others.
 - All build commands now log per-step elapsed time.
+- DuckDB tuning: 36GB memory, 8 threads by default. Override via `DUCKDB_MEMORY_LIMIT` / `DUCKDB_THREADS` env vars.
+- Manifest optimization: Intraday feature builds use a single parquet file manifest instead of per-symbol filesystem globs, reducing glob overhead for large universes.
 
 #### Data quality report
 ```bash
@@ -848,5 +850,5 @@ doppler run -- uv run nseml-dashboard
 
 ---
 
-**Last Updated**: 2026-03-07
+**Last Updated**: 2026-04-21
 **For Issues**: Check [dev/AGENTS.md](../dev/AGENTS.md) runbook

@@ -19,9 +19,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT")
+DEFAULT_DUCKDB_MEMORY_LIMIT = os.getenv("DUCKDB_MEMORY_LIMIT", "36GB")
 DEFAULT_DUCKDB_MAX_TEMP_DIRECTORY_SIZE = os.getenv("DUCKDB_MAX_TEMP_DIRECTORY_SIZE")
-DEFAULT_DUCKDB_THREADS = int(os.getenv("DUCKDB_THREADS", str(min(os.cpu_count() or 2, 4))))
+DEFAULT_DUCKDB_THREADS = int(os.getenv("DUCKDB_THREADS", str(min(os.cpu_count() or 2, 8))))
 
 
 def _repo_root() -> Path:

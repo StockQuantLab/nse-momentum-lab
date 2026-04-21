@@ -23,6 +23,7 @@ import logging
 import os
 from datetime import date, timedelta
 from pathlib import Path
+from typing import TypedDict
 
 from nse_momentum_lab.features.progress import (
     FeatureBuildProgressReporter,
@@ -36,6 +37,14 @@ from nse_momentum_lab.features.registry import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _Manifest(TypedDict):
+    five_min: dict[str, list[str]]
+    daily: dict[str, list[str]]
+    symbols_5min: list[str]
+    symbols_daily: list[str]
+
 
 # Version for feat_intraday_core - bump when SQL logic changes
 FEAT_INTRADAY_CORE_VERSION = "feat_intraday_core_v1_2026_03_06"
@@ -68,7 +77,55 @@ def _escape_sql_literal(value: str) -> str:
     return value.replace("'", "''")
 
 
-def _list_parquet_symbols(parquet_dir: Path, subdir: str) -> list[str]:
+def _build_parquet_manifest(
+    parquet_dir: Path,
+) -> _Manifest | None:
+    """Walk parquet_dir once, returning {symbol: [sorted file paths]} for 5min and daily.
+
+    Replaces per-symbol filesystem globs with a single pathlib traversal.
+    Returns None if parquet_dir does not exist.
+    """
+    if not parquet_dir.exists():
+        return None
+
+    five_min: dict[str, list[str]] = {}
+    daily: dict[str, list[str]] = {}
+
+    for subdir, target in [("5min", five_min), ("daily", daily)]:
+        root = parquet_dir / subdir
+        if not root.exists():
+            continue
+        for symbol_dir in root.iterdir():
+            if not symbol_dir.is_dir():
+                continue
+            files = sorted(str(f) for f in symbol_dir.glob("*.parquet"))
+            if files:
+                target[symbol_dir.name.strip().upper()] = files
+
+    result: _Manifest = {
+        "five_min": five_min,
+        "daily": daily,
+        "symbols_5min": sorted(five_min.keys()),
+        "symbols_daily": sorted(daily.keys()),
+    }
+    logger.info(
+        "Parquet manifest: %d 5min symbols, %d daily symbols",
+        len(five_min),
+        len(daily),
+    )
+    return result
+
+
+def _list_parquet_symbols(
+    parquet_dir: Path,
+    subdir: str,
+    manifest: _Manifest | None = None,
+) -> list[str]:
+    if manifest is not None:
+        if subdir == "5min":
+            return manifest["symbols_5min"]
+        return manifest["symbols_daily"]
+
     root = parquet_dir / subdir
     if not root.exists():
         return []
@@ -82,8 +139,16 @@ def _list_parquet_symbols(parquet_dir: Path, subdir: str) -> list[str]:
 def _split_symbols_with_required_parquet(
     parquet_dir: Path,
     symbols: list[str],
+    manifest: _Manifest | None = None,
 ) -> tuple[list[str], list[str]]:
     """Split symbols into buildable vs missing-in-lake buckets."""
+
+    if manifest is not None:
+        five_min_map = manifest["five_min"]
+        daily_map = manifest["daily"]
+        buildable_manifest = [s for s in symbols if s in five_min_map and s in daily_map]
+        missing_manifest = [s for s in symbols if s not in buildable_manifest]
+        return buildable_manifest, missing_manifest
 
     buildable: list[str] = []
     missing: list[str] = []
@@ -107,25 +172,33 @@ def _build_symbol_source_select(
     start_date: date | None = None,
     end_date: date | None = None,
     fallback_view: str | None = None,
+    manifest: _Manifest | None = None,
 ) -> str:
     """Return a SELECT statement for a symbol-scoped parquet source."""
 
     if parquet_dir.exists():
-        globs: list[str] = []
-        for symbol in symbols:
-            glob_path = (parquet_dir / subdir / symbol / "*.parquet").as_posix()
-            globs.append(f"'{_escape_sql_literal(glob_path)}'")
-        if not globs:
-            raise RuntimeError("No parquet globs resolved for intraday batch")
+        path_list: list[str] = []
+        if manifest is not None:
+            file_map = manifest["five_min"] if subdir == "5min" else manifest["daily"]
+            for symbol in symbols:
+                if symbol in file_map:
+                    path_list.extend(file_map[symbol])
+        else:
+            for symbol in symbols:
+                glob_path = (parquet_dir / subdir / symbol / "*.parquet").as_posix()
+                path_list.append(glob_path)
+        if not path_list:
+            raise RuntimeError("No parquet paths resolved for intraday batch")
         where_clauses: list[str] = []
         if start_date is not None:
             where_clauses.append(f"date >= DATE '{start_date.isoformat()}'")
         if end_date is not None:
             where_clauses.append(f"date <= DATE '{end_date.isoformat()}'")
         where_sql = f" WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+        escaped = ",".join(f"'{_escape_sql_literal(p)}'" for p in path_list)
         return (
             "SELECT * FROM read_parquet("
-            f"[{','.join(globs)}], hive_partitioning=false, union_by_name=true)"
+            f"[{escaped}], hive_partitioning=false, union_by_name=true)"
             f"{where_sql}"
         )
 
@@ -725,12 +798,13 @@ def _build_feat_intraday_core_batched(
     progress = progress or FeatureBuildProgressReporter()
     parquet_dir = _default_local_parquet_dir()
     batch_size = max(1, int(batch_size or _default_batch_size()))
+    manifest = _build_parquet_manifest(parquet_dir) if parquet_dir.exists() else None
 
     if symbols is None:
         discovered: list[str] = []
         if parquet_dir.exists():
-            five_min_symbols = _list_parquet_symbols(parquet_dir, "5min")
-            daily_symbols = _list_parquet_symbols(parquet_dir, "daily")
+            five_min_symbols = _list_parquet_symbols(parquet_dir, "5min", manifest)
+            daily_symbols = _list_parquet_symbols(parquet_dir, "daily", manifest)
             if five_min_symbols and daily_symbols:
                 discovered = sorted(set(five_min_symbols).intersection(daily_symbols))
             else:
@@ -751,7 +825,7 @@ def _build_feat_intraday_core_batched(
 
     if parquet_dir.exists():
         buildable_symbols, missing_symbols = _split_symbols_with_required_parquet(
-            parquet_dir, target_symbols
+            parquet_dir, target_symbols, manifest
         )
         if missing_symbols:
             preview = ", ".join(missing_symbols[:5])
@@ -875,6 +949,7 @@ def _build_feat_intraday_core_batched(
                 start_date=year_start_date,
                 end_date=year_end_date,
                 fallback_view="v_5min",
+                manifest=manifest,
             )
             con.execute(f"CREATE OR REPLACE TEMP VIEW {source_5min_view} AS {source_5min_sql}")
             source_daily_sql = _build_symbol_source_select(
@@ -884,6 +959,7 @@ def _build_feat_intraday_core_batched(
                 start_date=daily_start_date,
                 end_date=year_end_date,
                 fallback_view="v_daily",
+                manifest=manifest,
             )
             con.execute(f"CREATE OR REPLACE TEMP VIEW {source_daily_view} AS {source_daily_sql}")
 

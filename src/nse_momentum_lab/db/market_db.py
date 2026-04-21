@@ -119,6 +119,7 @@ class MarketDataDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.con = duckdb.connect(str(db_path), read_only=read_only)
+        self._configure_connection_defaults()
         self._read_only = read_only
         self._parquet_dir = self.lake.local_parquet_dir
         self._data_source = self.lake.mode
@@ -193,6 +194,11 @@ class MarketDataDB:
         except Exception as exc:
             logger.warning("Failed to create %s: %s", view_name, exc)
             return False
+
+    def _configure_connection_defaults(self) -> None:
+        """Apply DuckDB performance settings (max 36GB memory, max 8 threads)."""
+        self.con.execute("SET memory_limit='36GB'")
+        self.con.execute("SET threads=8")
 
     def _setup(self) -> None:
         """Register Parquet glob views. Fast: reads metadata only."""
