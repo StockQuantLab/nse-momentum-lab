@@ -979,6 +979,7 @@ class MarketDataDB:
                 "total_trades",
                 "win_rate_pct",
                 "max_drawdown_pct",
+                "profit_factor",
                 "status",
                 "created_at",
             ],

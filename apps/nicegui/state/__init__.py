@@ -6,6 +6,7 @@ Provides persistent connections and reactive state across all pages.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import json
 import logging as _logging
 import sys
@@ -491,29 +492,54 @@ def _run_window_display(row: dict) -> str:
     return fallback
 
 
+def _format_exp_created_at(value: object) -> str:
+    """Format experiment created_at timestamp for label display."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M")
+    text = str(value).strip()
+    if not text:
+        return ""
+    if " " in text:
+        return text[:16]
+    if "T" in text:
+        return text.replace("T", " ")[:16]
+    return text[:16]
+
+
 def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
     """Build {label: exp_id} dict with human-readable labels, latest first.
 
-    Label format: "2LYNCHBreakout 4% | 2025-04-01 to 2026-03-10 | 991 trades | Ret 136.4% | Mar 12 13:52 | ID 2efe9e046f6e91bb"
+    Label format: "exp_id[:12] | 2026-04-20 21:54 | Breakout 4% | 2025-01-01→2026-04-20 | TotRet 53.9% | PF 1.94 | Trades 579 | ID exp-123..."
     """
     options: dict[str, str] = {}
     for row in experiments_df.iter_rows(named=True):
+        exp_id = str(row["exp_id"])
+        rid = exp_id[:12]
+        created = _format_exp_created_at(row.get("created_at"))
         strategy = _strategy_display_name(row)
-        window = _run_window_display(row)
+
+        # Date range — parse from params_json for exact dates, fallback to year range
+        window_raw = _run_window_display(row)
+        # Compact: "2025-01-01 to 2026-04-20" → "2025-01-01→2026-04-20"
+        window = window_raw.replace(" to ", "→").replace("from ", "").replace(" to", "")
+
         trades = int(row.get("total_trades", 0) or 0)
         ret = float(row.get("total_return_pct", 0) or 0)
-        exp_id = str(row["exp_id"])
+        pf = float(row.get("profit_factor", 0) or 0)
 
-        # Created-at date for disambiguation
-        created = ""
-        created_val = row.get("created_at")
-        if created_val is not None:
-            try:
-                created = f" | {created_val.strftime('%b %d %H:%M')}"
-            except AttributeError, TypeError:
-                created = f" | {str(created_val)[:16]}"
+        parts = [rid]
+        if created:
+            parts.append(created)
+        parts.append(strategy)
+        parts.append(window)
+        parts.append(f"TotRet {ret:.1f}%")
+        parts.append(f"PF {pf:.2f}")
+        parts.append(f"Trades {trades:,}")
+        parts.append(f"ID {exp_id}")
 
-        label = f"{strategy} | {window} | {trades:,} trades | Ret {ret:.1f}%{created} | ID {exp_id}"
+        label = " | ".join(parts)
         options[label] = exp_id
     return options
 
@@ -544,6 +570,63 @@ def get_experiment_param_items(experiment: dict) -> list[tuple[str, str]]:
         return str(value)
 
     return [(key, _format_value(params[key])) for key in sorted(params.keys())]
+
+
+def enrich_experiment_metrics(exp: dict, trades_df: pl.DataFrame | None = None) -> dict:
+    """Compute derived metrics for display from experiment data + trades.
+
+    Returns a dict with keys: total_pnl, calmar_ratio, cagr_pct, n_symbols,
+    allocated_capital. Existing experiment fields are passed through unchanged.
+    """
+    total_return_pct = float(exp.get("total_return_pct") or 0)
+    max_dd_pct = float(exp.get("max_drawdown_pct") or 0)
+    annualized_pct = float(exp.get("annualized_return_pct") or 0)
+
+    # Total P/L in rupees — sum from trades if available
+    total_pnl = 0.0
+    if trades_df is not None and not trades_df.is_empty() and "net_pnl" in trades_df.columns:
+        total_pnl = float(trades_df.select(pl.col("net_pnl").fill_null(0).sum()).item())
+
+    # Calmar ratio = annualized return / |max drawdown|
+    calmar_ratio = 0.0
+    if max_dd_pct > 0:
+        calmar_ratio = annualized_pct / max_dd_pct
+
+    # CAGR — compound from total return and number of years
+    start_year = int(exp.get("start_year") or 0)
+    end_year = int(exp.get("end_year") or 0)
+    n_years = max(end_year - start_year + 1, 1) if start_year and end_year else 0
+    cagr_pct = 0.0
+    if n_years > 0 and total_return_pct > -100:
+        cagr_pct = ((1 + total_return_pct / 100) ** (1 / n_years) - 1) * 100
+
+    # Symbol count from trades
+    n_symbols = 0
+    if trades_df is not None and not trades_df.is_empty() and "symbol" in trades_df.columns:
+        n_symbols = int(trades_df.select(pl.col("symbol").n_unique()).item())
+
+    # Allocated capital from params_json
+    allocated_capital = 1_000_000.0  # default ₹10L
+    try:
+        params = json.loads(exp.get("params_json") or "{}")
+        cap = (
+            params.get("allocated_capital")
+            or params.get("initial_capital")
+            or params.get("capital")
+        )
+        if cap is not None:
+            allocated_capital = float(cap)
+    except TypeError, ValueError:
+        pass
+
+    return {
+        **exp,
+        "total_pnl": total_pnl,
+        "calmar_ratio": calmar_ratio,
+        "cagr_pct": cagr_pct,
+        "n_symbols": n_symbols,
+        "allocated_capital": allocated_capital,
+    }
 
 
 def format_time(value) -> str:

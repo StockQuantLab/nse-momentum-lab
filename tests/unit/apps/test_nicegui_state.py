@@ -60,8 +60,11 @@ def test_build_experiment_options_includes_breakout_threshold() -> None:
     label = next(iter(options))
 
     assert "2LYNCHBreakout 2%" in label
-    assert "2025-01-01 to 2026-03-27" in label
-    assert "ID exp-1" in label
+    assert "2025-01-01→2026-03-27" in label
+    assert "exp-1" in label
+    assert "TotRet 45.6%" in label
+    assert "PF 0.00" in label
+    assert "Trades 123" in label
     assert options[label] == "exp-1"
 
 

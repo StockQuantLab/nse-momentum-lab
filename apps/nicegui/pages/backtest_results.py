@@ -31,6 +31,7 @@ from apps.nicegui.state import (
     get_experiment_yearly_metrics,
     prepare_trades_df,
     build_experiment_options,
+    enrich_experiment_metrics,
 )
 from apps.nicegui.components import (
     page_layout,
@@ -117,16 +118,33 @@ async def backtest_page() -> None:
             start_date = str(exp.get("start_date", "-"))[:10]
             end_date = str(exp.get("end_date", "-"))[:10]
 
+            # Load trades early for enriched metrics
+            raw_trades_df = get_experiment_trades(exp_id).with_row_index("trade_row_id")
+            trades_df = prepare_trades_df(raw_trades_df, strategy_name=strategy)
+
+            # Enrich experiment with computed metrics (Total P/L, Calmar, CAGR, etc.)
+            enriched = enrich_experiment_metrics(exp, trades_df)
+
             # ── Header: strategy badge + period + run_id ──────────────────
             with ui.row().classes("w-full justify-between items-center mb-3"):
                 with ui.row().classes("items-center gap-3"):
-                    # Strategy badge (colored pill)
                     ui.html(strat_badge(strategy))
-                    ui.label(f"{start_date} → {end_date}").classes("text-sm mono-font").style(
-                        f"color: {theme_text_secondary()};"
-                    )
-                    ui.label(f"ID: {exp_id[:12]}").classes("text-xs mono-font").style(
+                    n_syms = enriched.get("n_symbols", 0)
+                    ui.label(f"{start_date} → {end_date}  ·  {n_syms} symbols").classes(
+                        "text-sm mono-font"
+                    ).style(f"color: {theme_text_secondary()};")
+                    ui.label(f"run_id: {exp_id}").classes("text-xs mono-font").style(
                         f"color: {theme_text_muted()};"
+                    )
+
+                    async def _copy_run_id(_rid: str = exp_id) -> None:
+                        await ui.run_javascript(f"navigator.clipboard.writeText({_rid!a})")
+                        ui.notify("Run ID copied", type="positive", timeout=900)
+
+                    (
+                        ui.button(icon="content_copy", on_click=_copy_run_id)
+                        .props("flat dense round size=sm aria-label='Copy run ID'")
+                        .tooltip("Copy run ID")
                     )
                 with ui.row().classes("items-center gap-2"):
                     status = str(exp.get("status", "-")).upper()
@@ -152,80 +170,90 @@ async def backtest_page() -> None:
                                 f"{pk}: {pv}</span>"
                             )
 
-            # ── Primary KPIs (4 big cards) ────────────────────────────────
-            win_rate = float(exp.get("win_rate_pct") or 0)
-            total_return = float(exp.get("total_return_pct") or 0)
-            max_dd = float(exp.get("max_drawdown_pct") or 0)
+            # ── Primary KPIs (4 big cards — CPR-style) ───────────────────
+            win_rate = float(enriched.get("win_rate_pct") or 0)
+            total_pnl = float(enriched.get("total_pnl") or 0)
+            calmar = float(enriched.get("calmar_ratio") or 0)
+            max_dd = abs(float(enriched.get("max_drawdown_pct") or 0))
 
             kpi_grid(
                 [
                     dict(
                         title="Win Rate",
                         value=f"{win_rate:.1f}%",
+                        subtitle="Winning trades / all trades",
                         icon="target",
                         color=color_success() if win_rate >= 40 else color_error(),
                     ),
                     dict(
-                        title="Total Return",
-                        value=f"{total_return:.1f}%",
-                        icon="trending_up",
-                        color=color_success() if total_return > 0 else color_error(),
+                        title="Total P/L",
+                        value=f"₹{total_pnl:,.0f}",
+                        subtitle="Net rupees across saved trades",
+                        icon="monetization_on",
+                        color=color_success() if total_pnl >= 0 else color_error(),
+                    ),
+                    dict(
+                        title="Calmar",
+                        value=f"{calmar:.2f}",
+                        subtitle="Return vs drawdown",
+                        icon="speed",
+                        color=color_success() if calmar >= 2.0 else color_warning(),
                     ),
                     dict(
                         title="Max Drawdown",
-                        value=f"{max_dd:.1f}%",
+                        value=f"-{max_dd:.1f}%",
+                        subtitle="Worst peak-to-trough loss",
                         icon="trending_down",
                         color=color_error(),
-                    ),
-                    dict(
-                        title="Total Trades",
-                        value=f"{int(exp.get('total_trades') or 0):,}",
-                        icon="swap_horiz",
-                        color=color_info(),
                     ),
                 ],
                 columns=4,
             )
 
-            # ── Secondary metrics — mini card row ─────────────────────────
-            annualized = float(exp.get("annualized_return_pct") or 0)
-            pf = float(exp.get("profit_factor") or 0)
+            # ── Secondary metrics — mini card row (CPR-style) ────────────
+            n_trades = int(enriched.get("total_trades") or 0)
+            total_return = float(enriched.get("total_return_pct") or 0)
+            pf = float(enriched.get("profit_factor") or 0)
+            cagr = float(enriched.get("cagr_pct") or 0)
+            allocated_capital = float(enriched.get("allocated_capital") or 1_000_000)
+
+            def _mini_card(title: str, value: str, color: str) -> None:
+                with (
+                    ui.column()
+                    .classes("items-center px-5 py-3")
+                    .style(
+                        f"background:{theme_surface()};"
+                        f"border:1px solid {theme_surface_border()};"
+                        f"border-top:3px solid {color};"
+                        f"border-radius:6px;min-width:100px;"
+                    )
+                ):
+                    ui.label(value).classes("text-lg font-bold mono-font tabular-nums").style(
+                        f"color: {color};"
+                    )
+                    ui.label(title).classes("text-xs uppercase tracking-wide mt-1").style(
+                        f"color: {theme_text_secondary()};"
+                    )
 
             with ui.row().classes("w-full gap-3 mb-4 flex-wrap"):
-                for title, value, color in [
-                    (
-                        "Annualized",
-                        f"{annualized:.1f}%",
-                        color_success() if annualized >= 0 else color_error(),
-                    ),
-                    (
-                        "Profit Factor",
-                        f"{pf:.2f}",
-                        color_success() if pf >= 1.5 else color_warning(),
-                    ),
-                    (
-                        "Period",
-                        f"{exp.get('start_year', '-')}-{exp.get('end_year', '-')}",
-                        color_gray(),
-                    ),
-                    ("Status", str(exp.get("status", "-")).upper(), color_info()),
-                ]:
-                    with (
-                        ui.column()
-                        .classes("items-center px-5 py-3")
-                        .style(
-                            f"background:{theme_surface()};"
-                            f"border:1px solid {theme_surface_border()};"
-                            f"border-top:3px solid {color};"
-                            f"border-radius:6px;min-width:100px;"
-                        )
-                    ):
-                        ui.label(value).classes("text-lg font-bold mono-font tabular-nums").style(
-                            f"color: {color};"
-                        )
-                        ui.label(title).classes("text-xs uppercase tracking-wide mt-1").style(
-                            f"color: {theme_text_secondary()};"
-                        )
+                _mini_card("Trades", f"{n_trades:,}", color_info())
+                _mini_card("Symbols", str(n_syms), color_info())
+                _mini_card(
+                    "Return",
+                    f"{total_return:.1f}%",
+                    color_success() if total_return > 0 else color_error(),
+                )
+                _mini_card(
+                    "PF",
+                    f"{pf:.2f}",
+                    color_success() if pf >= 1.5 else color_warning(),
+                )
+                _mini_card(
+                    "CAGR",
+                    f"{cagr:.1f}%",
+                    color_success() if cagr >= 0 else color_error(),
+                )
+                _mini_card("Capital", f"₹{allocated_capital:,.0f}", color_info())
 
             # ── Full parameters (expandable, grouped) ─────────────────────
             with ui.expansion("Run Parameters", icon="tune", value=False).classes("w-full"):
@@ -250,9 +278,6 @@ async def backtest_page() -> None:
 
             divider()
 
-            raw_trades_df = get_experiment_trades(exp_id).with_row_index("trade_row_id")
-            trades_df = raw_trades_df
-            trades_df = prepare_trades_df(trades_df, strategy_name=strategy)
             execution_diagnostics_df = get_experiment_execution_diagnostics(exp_id)
             raw_trade_lookup = {
                 int(row["trade_row_id"]): row for row in raw_trades_df.iter_rows(named=True)
@@ -878,6 +903,12 @@ async def backtest_page() -> None:
 
             table_columns = [_col_def(col) for col in avail_cols]
 
+            # Display-sorted copy: latest trades first for table views
+            _sort_cols = [c for c in ("entry_date", "entry_time") if c in trades_df.columns]
+            trades_display_df = (
+                trades_df.sort(_sort_cols, descending=True) if _sort_cols else trades_df
+            )
+
             # ── 5-Tab analytics layout (CPR-style grouping) ─────────────
             _months = [
                 "Jan",
@@ -928,9 +959,9 @@ async def backtest_page() -> None:
                             "text-xs"
                         ).style(f"color: {theme_text_muted()};")
                         trade_table_with_filters(
-                            trades_df=trades_df,
+                            trades_df=trades_display_df,
                             columns=table_columns,
-                            rows=_trade_rows(trades_df),
+                            rows=_trade_rows(trades_display_df),
                             page_size=50,
                             row_key="trade_row_id",
                             on_row_click=_open_trade_details_from_payload,
