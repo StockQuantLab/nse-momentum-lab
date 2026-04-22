@@ -253,7 +253,7 @@ class KiteTickerAdapter:
     # KiteTicker callbacks
     # ------------------------------------------------------------------
 
-    def _on_connect(self, ws: Any) -> None:
+    def _on_connect(self, ws: Any, response: Any | None = None) -> None:
         """Called when WebSocket connects."""
         self._connected.set()
         self._disconnected_at = None

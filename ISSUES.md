@@ -386,6 +386,24 @@ independently. Known divergences at time of fix:
 
 ---
 
+### ISSUE-018 — Live candidate seeding queried the wrong feat_daily date column
+
+**Status**: ✅ FIXED — `paper_runtime.py` (current session)
+**Severity**: High (live sessions failed to seed candidates and immediately retried)
+**Found**: 2026-04-22 (during live Kite websocket launch)
+
+**Problem**: `seed_candidates_from_market_db()` queried `feat_daily.trading_date`, but the
+`feat_daily` table in this repo exposes the trading day as `date`.
+
+**Impact**: Both live 2% test sessions launched successfully, but candidate seeding failed on the
+first pass with a DuckDB binder error, so the sessions did not reach normal live evaluation.
+
+**Fix**: Switched the live seeding query to `WHERE date = CAST(? AS DATE)`.
+
+**Required action**: Restart the live sessions so they pick up the corrected seeding query.
+
+---
+
 ## Canonical Experiment IDs (2026-04-21)
 
 Wave-1 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard.

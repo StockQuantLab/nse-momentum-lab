@@ -653,7 +653,7 @@ def seed_candidates_from_market_db(
     try:
         # Load feat_daily as a Polars DataFrame using DuckDB's native .pl() API.
         df: pl.DataFrame = market_db.con.execute(
-            "SELECT * FROM feat_daily WHERE trading_date = CAST(? AS DATE)",
+            "SELECT * FROM feat_daily WHERE date = CAST(? AS DATE)",
             [trade_date],
         ).pl()
 

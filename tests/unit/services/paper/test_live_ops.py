@@ -56,6 +56,19 @@ async def test_run_live_session_with_retry_reuses_alert_dedup(monkeypatch):
     assert call_state[1][2] == {"SESSION_STARTED:sess-1"}
 
 
+def test_resolve_kite_credentials_falls_back_to_env(monkeypatch):
+    from nse_momentum_lab.services.paper.scripts import paper_live
+
+    def broken_get_settings():
+        raise ValueError("settings unavailable")
+
+    monkeypatch.setattr(paper_live, "get_settings", broken_get_settings)
+    monkeypatch.setenv("KITE_API_KEY", "env-api-key")
+    monkeypatch.setenv("KITE_ACCESS_TOKEN", "env-access-token")
+
+    assert paper_live._resolve_kite_credentials() == ("env-api-key", "env-access-token")
+
+
 def test_cmd_live_uses_retry_wrapper_and_forwards_no_alerts(monkeypatch):
     from nse_momentum_lab.cli import paper_v2
 

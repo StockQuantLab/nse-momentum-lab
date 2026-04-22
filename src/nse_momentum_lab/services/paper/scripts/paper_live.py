@@ -15,12 +15,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db.market_db import MarketDataDB
 from nse_momentum_lab.db.versioned_replica_sync import DEFAULT_PAPER_TABLES, VersionedReplicaSync
 from nse_momentum_lab.services.paper.db.paper_db import PaperDB
@@ -58,6 +60,31 @@ def _build_alert_dispatcher(
     """Build an AlertDispatcher wired from Doppler settings (TELEGRAM_BOT_TOKEN/CHAT_IDS)."""
     config = get_alert_config()
     return AlertDispatcher(paper_db=paper_db, config=config, enabled=enabled)
+
+
+def _resolve_kite_credentials(
+    api_key: str | None = None, access_token: str | None = None
+) -> tuple[str | None, str | None]:
+    """Resolve Kite credentials from explicit args, settings, or env vars.
+
+    Settings construction is allowed to fail in unit tests that only exercise the
+    retry wrapper. In that case we fall back to direct environment variables.
+    """
+    settings = None
+    try:
+        settings = get_settings()
+    except Exception:
+        logger.debug("Kite settings unavailable; falling back to environment")
+
+    resolved_api_key = (
+        api_key or getattr(settings, "kite_api_key", None) or os.getenv("KITE_API_KEY")
+    )
+    resolved_access_token = (
+        access_token
+        or getattr(settings, "kite_access_token", None)
+        or os.getenv("KITE_ACCESS_TOKEN")
+    )
+    return resolved_api_key, resolved_access_token
 
 
 async def run_live_session(
@@ -100,6 +127,7 @@ async def run_live_session(
     local_feed = False
     final_status = "COMPLETED"
     created_adapter = False
+    api_key, access_token = _resolve_kite_credentials(api_key, access_token)
 
     try:
         # Load session.
@@ -469,8 +497,6 @@ async def run_live_session(
         await alert_dispatcher.shutdown()
         # Purge old feed audit rows (retention housekeeping).
         try:
-            from nse_momentum_lab.config import get_settings
-
             retention = get_settings().feed_audit_retention_days
             paper_db.purge_old_feed_audit_rows(retention)
         except Exception:

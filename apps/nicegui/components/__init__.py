@@ -1511,7 +1511,7 @@ def kpi_grid(
     """Render a row of KPI cards using ``ui.grid`` for equal-width alignment.
 
     Each dict in *cards* is passed as kwargs to :func:`kpi_card`.
-    Keys: title, value, subtitle, icon, color, is_hero, trend, trend_label.
+    Keys: title or label, value, subtitle, icon, color, is_hero, trend, trend_label.
 
     Args:
         cards: List of card dictionaries
@@ -1528,8 +1528,9 @@ def kpi_grid(
 
 
 def _render_kpi_card_with_features(
-    title: str,
     value: str | float | int,
+    title: str | None = None,
+    label: str | None = None,
     subtitle: str | None = None,
     icon: str = "info",
     color: str = COLORS["primary"],
@@ -1545,6 +1546,8 @@ def _render_kpi_card_with_features(
       - default: medium icon + value, colored
       - muted: small icon + value, gray — for metadata (data source, IDs)
     """
+    resolved_title = title or label or "-"
+
     if muted:
         # Metadata tier: visually quiet
         card_classes = "kpi-card gap-1 p-4"
@@ -1571,7 +1574,7 @@ def _render_kpi_card_with_features(
     with ui.column().classes(card_classes):
         with ui.row().classes("items-center gap-3"):
             ui.icon(icon).classes(icon_size).style(f"color: {icon_color};")
-            ui.label(title).classes(label_cls).style(f"color: {THEME['text_secondary']};")
+            ui.label(resolved_title).classes(label_cls).style(f"color: {THEME['text_secondary']};")
 
         # Value and optional trend
         with ui.row().classes("items-baseline gap-2 mt-1"):
