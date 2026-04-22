@@ -23,7 +23,10 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, time
 from math import isclose
 from pathlib import Path
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
+
+if TYPE_CHECKING:
+    from nse_momentum_lab.services.paper.engine.strategy_presets import PaperStrategyConfig
 
 import duckdb
 import numpy as np
@@ -289,6 +292,67 @@ class BacktestParams:
             short_post_day3_buffer_pct=resolved_buffer,
             respect_same_day_exit_metadata=self.h_carry_enabled,
             follow_through_threshold=self.follow_through_threshold,
+        )
+
+    def to_paper_config(self, direction: PositionSide) -> PaperStrategyConfig:
+        """Produce a PaperStrategyConfig from this BacktestParams for direction.
+
+        Validates that direction matches the strategy type (breakout→LONG,
+        breakdown→SHORT) and maps all shared knobs direction-aware.
+        Paper-only fields (max_positions, flatten_time, slippage tiers, etc.)
+        use PaperStrategyConfig defaults — they have no backtest equivalents.
+        """
+        from nse_momentum_lab.services.paper.engine.strategy_presets import (
+            PaperStrategyConfig,
+            resolve_strategy_key,
+        )
+
+        strategy_key = resolve_strategy_key(self.strategy)
+        is_short_strategy = strategy_key == "2lynchbreakdown"
+        is_short = direction == PositionSide.SHORT
+
+        # Validate direction vs strategy type.
+        if is_short_strategy and not is_short:
+            raise ValueError(
+                f"Strategy '{self.strategy}' is a SHORT strategy; pass PositionSide.SHORT"
+            )
+        if not is_short_strategy and is_short:
+            raise ValueError(
+                f"Strategy '{self.strategy}' is a LONG strategy; pass PositionSide.LONG"
+            )
+
+        _entry_cutoff = (
+            self.short_entry_cutoff_minutes
+            if is_short and self.short_entry_cutoff_minutes is not None
+            else self.entry_cutoff_minutes
+        )
+        _max_stop = (
+            self.short_max_stop_dist_pct
+            if is_short and self.short_max_stop_dist_pct is not None
+            else self.max_stop_dist_pct
+        )
+        _time_stop = (
+            self.short_time_stop_days
+            if is_short and self.short_time_stop_days is not None
+            else self.time_stop_days
+        )
+        _trail_activation = self.trail_activation_pct
+        _short_trail = self.short_trail_activation_pct if is_short else None
+
+        return PaperStrategyConfig(
+            strategy_key=strategy_key,
+            direction=direction.value,
+            breakout_threshold=self.breakout_threshold,
+            entry_cutoff_minutes=_entry_cutoff,
+            entry_start_minutes=self.entry_start_minutes,
+            max_stop_dist_pct=_max_stop,
+            short_max_stop_dist_pct=self.short_max_stop_dist_pct,
+            time_stop_days=_time_stop,
+            h_carry_enabled=self.h_carry_enabled,
+            h_filter_close_pos_threshold=self.h_filter_close_pos_threshold,
+            trail_activation_pct=_trail_activation,
+            trail_stop_pct=self.trail_stop_pct,
+            short_trail_activation_pct=_short_trail,
         )
 
 

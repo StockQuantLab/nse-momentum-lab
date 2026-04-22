@@ -4,9 +4,16 @@ Called after market close (once daily ingest + feature build complete) to decide
 whether each open position should be carried overnight or exited at today's close.
 
 Decision logic — mirrors the backtest H-carry filter exactly:
-  - TIME_EXIT:       days_held + 1 >= time_stop_days → exit at feat_daily close
+  - TIME_EXIT:       days_held increments only on carries AFTER the entry day.
+                     Exit when new_days_held >= time_stop_days.
   - WEAK_CLOSE_EXIT: filter_h fails (close not in favourable end of range)
   - CARRY:           filter_h passes → keep position, increment days_held
+
+days_held parity rule:
+  The backtest exits at bar (entry_idx + time_stop_days), so a 3D time stop exits
+  3 trading days after entry.  To match this, days_held must NOT be incremented on
+  the EOD carry that runs the same night the position was opened.  Only subsequent
+  nightly carries count toward the time stop.
 
 Operator workflow (live sessions):
     1. nseml-kite-ingest --today
@@ -19,7 +26,7 @@ For replay sessions, called automatically at the end of each day's replay loop.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -155,10 +162,11 @@ def apply_eod_carry_decisions(
 
     time_stop_days: int = getattr(strategy_config, "time_stop_days", 5)
     h_carry_enabled: bool = getattr(strategy_config, "h_carry_enabled", True)
-    h_filter_threshold: float = getattr(strategy_config, "h_filter_threshold", 0.70)
+    h_filter_threshold: float = getattr(strategy_config, "h_filter_close_pos_threshold", 0.70)
 
     carried = time_exit = weak_close_exit = no_data = 0
     now = datetime.now(UTC)
+    trade_date_obj = date.fromisoformat(trade_date)
 
     for pos in open_positions:
         symbol = pos["symbol"]
@@ -167,7 +175,21 @@ def apply_eod_carry_decisions(
         if not isinstance(meta, dict):
             meta = {}
         days_held = int(meta.get("days_held", 0))
-        new_days_held = days_held + 1
+
+        # Parity rule: the backtest exits at bar (entry_idx + time_stop_days), so a 3D
+        # stop exits 3 full trading days after entry.  Do NOT increment days_held on the
+        # carry pass that runs the same night the position was opened — that first carry
+        # is "overnight 0 → day 1" and must not count as a completed hold day.
+        opened_at_str = pos.get("opened_at") or ""
+        is_entry_day = False
+        if opened_at_str:
+            try:
+                opened_date = datetime.fromisoformat(str(opened_at_str)).date()
+                is_entry_day = opened_date >= trade_date_obj
+            except ValueError, TypeError:
+                pass
+        new_days_held = days_held if is_entry_day else days_held + 1
+
         avg_entry = float(pos.get("avg_entry", 0))
 
         feat = daily_features.get(symbol)

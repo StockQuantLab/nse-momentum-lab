@@ -86,8 +86,8 @@ async def process_closed_bar_group(
         last_price = 0.0
         entry_cutoff_minutes = int(
             session.get("entry_cutoff_minutes")
-            or getattr(strategy_config, "entry_cutoff_minutes", 30)
-            or 30
+            or getattr(strategy_config, "entry_cutoff_minutes", 60)
+            or 60
         )
         slippage_bps = _resolve_slippage_bps(session)
 
@@ -198,6 +198,7 @@ async def process_closed_bar_group(
                 session=session,
                 paper_db=paper_db,
                 slippage_bps=slippage_bps,
+                strategy_config=strategy_config,
             )
             if result and result.get("status") == "opened" and alert_dispatcher is not None:
                 _dispatch_trade_opened(alert_dispatcher, session_id, result)

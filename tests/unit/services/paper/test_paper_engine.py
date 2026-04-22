@@ -479,6 +479,10 @@ class TestEvaluateCandle:
         direction: str = "LONG",
         threshold: float = 0.04,
         entry_cutoff_minutes: int = 360,
+        entry_start_minutes: int = 0,
+        trail_activation_pct: float = 0.08,
+        trail_stop_pct: float = 0.02,
+        short_trail_activation_pct: float | None = None,
         extra_params: dict | None = None,
     ):
         class _Config:
@@ -488,6 +492,10 @@ class TestEvaluateCandle:
         cfg.direction = direction
         cfg.breakout_threshold = threshold
         cfg.entry_cutoff_minutes = entry_cutoff_minutes
+        cfg.entry_start_minutes = entry_start_minutes
+        cfg.trail_activation_pct = trail_activation_pct
+        cfg.trail_stop_pct = trail_stop_pct
+        cfg.short_trail_activation_pct = short_trail_activation_pct
         cfg.extra_params = extra_params or {}
         return cfg
 

@@ -319,7 +319,7 @@ the short-side override pattern. When set, override base param for LONG directio
 
 ---
 
-*Last updated: 2026-04-21*
+*Last updated: 2026-04-22*
 
 ---
 
@@ -341,6 +341,30 @@ explicitly, but `BREAKDOWN_2PCT` did not.
 **Fix**: Added `"short_time_stop_days": 3` to `BREAKDOWN_2PCT` overrides dict in `backtest_presets.py`.
 
 **Required action**: Re-run `scripts/run_full_operating_point.py` to produce new BREAKDOWN_2PCT baseline.
+
+---
+
+### ISSUE-016 — Config split: BacktestParams and PaperStrategyConfig were manually synced
+
+**Status**: ✅ FIXED — `paper_backtest_bridge.py`, `strategy_presets.py`, `duckdb_backtest_runner.py` (current session)
+**Severity**: Medium (parity divergences accumulate each time a new knob lands in only one system)
+**Found**: Current session (code review comparing CPR-pivot-lab vs NSE config model)
+
+**Problem**: `BacktestParams` (40+ fields) and `PaperStrategyConfig` (~15 fields) were maintained
+independently. Known divergences at time of fix:
+- `entry_cutoff_minutes` default: BacktestParams=60, PaperStrategyConfig=**30** (parity bug)
+- `entry_start_minutes=5` present in BacktestParams, **absent** in PaperStrategyConfig
+- `trail_activation_pct=0.08`, `trail_stop_pct=0.02` present in BacktestParams, **hardcoded** in paper_runtime
+- `short_trail_activation_pct=0.04` (BREAKDOWN_4PCT), **absent** in PaperStrategyConfig
+- `h_filter_close_pos_threshold` in BacktestParams vs `h_filter_threshold` (old name) in paper
+
+**Fix**: Bridge method + neutral adapter module:
+1. Added `BacktestParams.to_paper_config(direction)` — pure method, no structural change (hash-safe)
+2. New `services/paper/paper_backtest_bridge.py` with `build_paper_config_from_preset(preset_name, direction)`
+3. Added 4 fields to `PaperStrategyConfig`: `trail_activation_pct`, `trail_stop_pct`, `short_trail_activation_pct`, `entry_start_minutes`
+4. Fixed `entry_cutoff_minutes` default 30→60 in `PaperStrategyConfig`
+5. Renamed `h_filter_threshold` → `h_filter_close_pos_threshold` with compat alias
+6. Wired trail params and `entry_start_minutes` gate into `paper_runtime.evaluate_candle()` / `execute_entry()`
 
 ---
 

@@ -152,6 +152,11 @@ def evaluate_candle(
     if state.position_closed_today:
         return {"action": "SKIP", "reason": "position_closed_today"}
 
+    # --- Entry start gate: skip bars before entry_start_minutes (matches backtest default=5) ---
+    entry_start = getattr(strategy_config, "entry_start_minutes", 0)
+    if bar_end is not None and entry_start > 0 and _minutes_from_open(bar_end) < entry_start:
+        return {"action": "SKIP", "reason": "entry_start_not_reached"}
+
     # --- Entry window closed ---
     if bar_end is not None and _minutes_from_open(bar_end) >= strategy_config.entry_cutoff_minutes:
         state.entry_window_closed = True
@@ -408,6 +413,7 @@ def execute_entry(
     session: dict[str, Any],
     paper_db: Any,
     slippage_bps: float = 5.0,
+    strategy_config: Any = None,
 ) -> dict[str, Any] | None:
     """Execute an entry from a candidate dict.
 
@@ -432,15 +438,22 @@ def execute_entry(
 
     position_value = entry_price * qty
 
-    # Trail state initialization.
+    # Trail state initialization — resolve direction-aware values from strategy_config.
+    is_short = direction == "SHORT"
+    _trail_activation = (
+        getattr(strategy_config, "short_trail_activation_pct", None)
+        if strategy_config is not None and is_short
+        else None
+    ) or getattr(strategy_config, "trail_activation_pct", 0.08)
+    _trail_stop = getattr(strategy_config, "trail_stop_pct", 0.02)
     trail_state = {
         "entry_price": entry_price,
         "direction": direction,
         "initial_sl": initial_stop,
         "current_sl": initial_stop,
         "phase": "PROTECT",
-        "trail_activation_pct": 0.08,
-        "trail_stop_pct": 0.02,
+        "trail_activation_pct": _trail_activation,
+        "trail_stop_pct": _trail_stop,
         "highest_since_entry": entry_price if direction == "LONG" else None,
         "lowest_since_entry": entry_price if direction == "SHORT" else None,
         "candle_count": 0,
