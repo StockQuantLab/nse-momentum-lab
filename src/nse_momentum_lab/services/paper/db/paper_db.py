@@ -2191,6 +2191,28 @@ class PaperDB:
 
         return [_serialize_session(s) for s in all_stale]
 
+    def cleanup_stale_sessions(self, *, max_age_minutes: int = 15) -> int:
+        """Cancel orphaned STOPPING sessions older than max_age_minutes.
+
+        Called on every CLI startup to clean up sessions left in STOPPING status
+        by crashed processes. ACTIVE sessions are intentionally left alone because
+        they might actually be running.
+
+        Returns the count of cleaned sessions.
+        """
+        cutoff = _now() - timedelta(minutes=max_age_minutes)
+        result = self._execute(
+            "UPDATE paper_sessions SET status = 'CANCELLED', "
+            "notes = 'auto-cancelled: stale session from previous run', "
+            "updated_at = $1 "
+            "WHERE status = 'STOPPING' AND updated_at < $2",
+            [_now(), cutoff],
+        )
+        count = result.get("rows_affected", 0) if isinstance(result, dict) else 0
+        if count > 0:
+            logger.info("Cleaned up %d stale STOPPING session(s)", count)
+        return count
+
     # ===================================================================
     # Convenience: sync session signals from signals
     # ===================================================================

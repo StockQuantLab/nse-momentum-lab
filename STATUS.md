@@ -17,14 +17,14 @@
 
 ## Canonical Experiment Baselines
 
-Window: `2015-01-01 → 2026-04-17`, universe 2000. Wave-1 fixes applied (H-carry, entry gate 09:20, filter direction parity, pnl_r guard).
+Window: `2015-01-01 → 2026-04-21`, universe 2000. Wave-1 fixes applied (H-carry, entry gate 09:20, filter direction parity, pnl_r guard).
 
 | Strategy | Exp ID | Avg Annual | Max DD | Calmar | Profit Factor | Trades | Neg Years |
 |----------|--------|-----------|--------|--------|---------------|--------|-----------|
-| Breakout 4% | `0cd353d536dd6f91` | +54.1% | 3.16% | 17.1 | 22.98 | 2,211 | 0 |
-| Breakout 2% | `f923e1a9517d9b2c` | +121.8% | 2.73% | 44.6 | 19.06 | 7,078 | 0 |
-| Breakdown 4% | `f6e7646ac932697d` | +3.1% | 0.74% | 4.2 | 6.65 | 258 | 2 |
-| Breakdown 2% | ⚠️ `b769984bf6d0c5c7` **INVALIDATED** (ISSUE-015 — 3D time stop fix; re-run required) | — | — | — | — | — | — |
+| Breakout 4% | `f155489ee3422815` | +54.1% | 3.16% | 17.1 | 20.73 | 2,212 | 0 |
+| Breakout 2% | `8e219692ea67b157` | +121.9% | 2.73% | 44.7 | 16.49 | 7,082 | 0 |
+| Breakdown 4% | `f0cd849cf08f4fdc` | +3.1% | 0.74% | 4.2 | 5.51 | 258 | 2 |
+| Breakdown 2% | `1f910e9069a508d2` | +8.2% | 1.90% | 4.3 | 5.47 | 790 | 0 |
 
 Frozen reporting runset: `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-21.md`
 

@@ -46,6 +46,8 @@ class AlertType(StrEnum):
     TRAIL_STOP = "TRAIL_STOP"
     TARGET_HIT = "TARGET_HIT"
     SESSION_STARTED = "SESSION_STARTED"
+    SESSION_PAUSED = "SESSION_PAUSED"
+    SESSION_RESUMED = "SESSION_RESUMED"
     SESSION_COMPLETED = "SESSION_COMPLETED"
     SESSION_ERROR = "SESSION_ERROR"
     FEED_STALE = "FEED_STALE"
@@ -125,6 +127,8 @@ def _should_send(alert_type: AlertType | str, config: AlertConfig) -> bool:
         AlertType.TRAIL_STOP: config.trade_close,
         AlertType.TARGET_HIT: config.trade_close,
         AlertType.SESSION_STARTED: config.session_lifecycle,
+        AlertType.SESSION_PAUSED: config.session_lifecycle,
+        AlertType.SESSION_RESUMED: config.session_lifecycle,
         AlertType.SESSION_COMPLETED: config.session_lifecycle,
         AlertType.SESSION_ERROR: config.session_lifecycle,
         AlertType.FEED_STALE: config.session_lifecycle,
@@ -247,6 +251,75 @@ def format_risk_alert(
         f"Session: <code>{session_id[:16]}</code>\n"
         f"Net P&amp;L: <code>{net_pnl:+,.2f}</code> {pnl_emoji}\n"
         f"Trades closed: {total_trades if total_trades is not None else positions_closed}"
+    )
+    return subject, body
+
+
+def format_daily_pnl_summary(
+    *,
+    session_id: str,
+    strategy: str = "",
+    trade_date: str = "",
+    realized_pnl: float = 0.0,
+    unrealized_pnl: float = 0.0,
+    trades_closed_today: int = 0,
+    winners: int = 0,
+    losers: int = 0,
+    open_positions: list[dict[str, Any]] | None = None,
+    portfolio_value: float = 0.0,
+    max_dd_used_pct: float = 0.0,
+) -> tuple[str, str]:
+    """Return (subject, HTML body) for a swing-trading DAILY_PNL_SUMMARY.
+
+    Unlike CPR's FLATTEN_EOD (day trading, all positions closed), this shows
+    both realized and unrealized P&L with per-position breakdowns including
+    days_held — the daily scorecard for a multi-day swing system.
+    """
+    net_pnl = realized_pnl + unrealized_pnl
+    date_str = ""
+    if trade_date and len(trade_date) == 10:
+        try:
+            date_str = datetime.strptime(trade_date, "%Y-%m-%d").strftime("%d-%b-%Y")
+        except ValueError:
+            date_str = trade_date
+
+    realized_icon = "📈" if realized_pnl >= 0 else "📉"
+    unrealized_icon = "📈" if unrealized_pnl >= 0 else "📉"
+    net_icon = "📈" if net_pnl >= 0 else "📉"
+    realized_sign = "+" if realized_pnl >= 0 else "-"
+    unrealized_sign = "+" if unrealized_pnl >= 0 else "-"
+    net_sign = "+" if net_pnl >= 0 else "-"
+    realized_pct = (realized_pnl / portfolio_value * 100) if portfolio_value else 0.0
+    unrealized_pct = (unrealized_pnl / portfolio_value * 100) if portfolio_value else 0.0
+    net_pct = (net_pnl / portfolio_value * 100) if portfolio_value else 0.0
+
+    subject = f"📊 Daily Summary — {date_str}"
+    body = (
+        f"Session: <code>{session_id[:16]}</code>"
+        + (f" | {escape(strategy)}" if strategy else "")
+        + f"\n\n{realized_icon} Realized P&amp;L: <code>{realized_sign}₹{abs(realized_pnl):,.0f}</code>"
+        f" ({realized_pct:+.2f}%)"
+        f"\n  Trades closed today: {trades_closed_today} (✅{winners} ❌{losers})"
+        f"\n\n{unrealized_icon} Unrealized P&amp;L: <code>{unrealized_sign}₹{abs(unrealized_pnl):,.0f}</code>"
+        f" ({unrealized_pct:+.2f}%)"
+        f"\n  Open positions: {len(open_positions) if open_positions else 0}"
+    )
+
+    if open_positions:
+        pos_lines = []
+        for p in open_positions[:10]:  # cap at 10 to avoid message overflow
+            sym = p.get("symbol", "?")
+            pnl = p.get("unrealized_pnl", 0.0)
+            days = p.get("days_held", 0)
+            sign = "+" if pnl >= 0 else "-"
+            pos_lines.append(f"  {sym} {sign}₹{abs(pnl):,.0f} ({days}D)")
+        body += "\n" + "\n".join(pos_lines)
+        if len(open_positions) > 10:
+            body += f"\n  ... +{len(open_positions) - 10} more"
+
+    body += (
+        f"\n\n{net_icon} Net P&amp;L: <code>{net_sign}₹{abs(net_pnl):,.0f}</code> ({net_pct:+.2f}%)"
+        f"\nPortfolio: ₹{portfolio_value:,.0f} | DD used: {max_dd_used_pct:.1f}%"
     )
     return subject, body
 

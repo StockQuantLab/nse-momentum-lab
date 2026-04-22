@@ -17,6 +17,7 @@ import asyncio
 import logging
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertDispatcher,
     AlertEvent,
     AlertType,
+    format_daily_pnl_summary,
     get_alert_config,
 )
 from nse_momentum_lab.services.paper.scripts.paper_feed_audit import record_closed_candles
@@ -69,8 +71,16 @@ async def run_live_session(
     poll_interval: float = _POLL_INTERVAL,
     max_cycles: int | None = None,
     no_alerts: bool = False,
+    auto_flatten_on_error: bool = True,
+    alerts_sent: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Run a paper trading session — live or replay."""
+    """Run a paper trading session — live or replay.
+
+    Args:
+        auto_flatten_on_error: When True (default), flatten open positions on
+            unhandled exceptions. Set to False when wrapping in a retry loop
+            so positions survive across retries.
+    """
     paper_db = PaperDB(paper_db_path)
     market_db = MarketDataDB(Path(market_db_path))
     alert_dispatcher = _build_alert_dispatcher(paper_db, enabled=not no_alerts)
@@ -85,6 +95,7 @@ async def run_live_session(
 
     # Seed setup rows from market DB into runtime state.
     runtime_state = PaperRuntimeState()
+    runtime_state.alerts_sent = alerts_sent if alerts_sent is not None else set()
     tracker: SessionPositionTracker | None = None
     local_feed = False
     final_status = "COMPLETED"
@@ -121,15 +132,18 @@ async def run_live_session(
         # Start alert dispatcher.
         await alert_dispatcher.start()
 
-        # Dispatch session started alert.
-        alert_dispatcher.enqueue(
-            AlertEvent(
-                alert_type=AlertType.SESSION_STARTED,
-                session_id=session_id,
-                subject=f"Session {session_id} started",
-                body=f"Strategy: {strategy}\nSymbols: {len(symbols)}\nDate: {trade_date}",
+        # Dispatch session started alert (dedup-guarded for retry scenarios).
+        _started_key = f"SESSION_STARTED:{session_id}"
+        if _started_key not in runtime_state.alerts_sent:
+            runtime_state.alerts_sent.add(_started_key)
+            alert_dispatcher.enqueue(
+                AlertEvent(
+                    alert_type=AlertType.SESSION_STARTED,
+                    session_id=session_id,
+                    subject=f"Session {session_id} started",
+                    body=f"Strategy: {strategy}\nSymbols: {len(symbols)}\nDate: {trade_date}",
+                )
             )
-        )
 
         # Setup engine state.
         tracker = SessionPositionTracker(
@@ -200,6 +214,14 @@ async def run_live_session(
                 final_status = status
                 break
             if status == "PAUSED":
+                paper_db.upsert_feed_state(
+                    session_id=session_id,
+                    source="replay" if local_feed else "kite",
+                    mode="paper",
+                    status="PAUSED",
+                    is_stale=False,
+                    subscription_count=len(active_symbols),
+                )
                 await asyncio.sleep(poll_interval)
                 cycles += 1
                 continue
@@ -228,6 +250,14 @@ async def run_live_session(
                         )
                         if recovery["action"] == "recovered":
                             logger.info("WebSocket recovered")
+                            alert_dispatcher.enqueue(
+                                AlertEvent(
+                                    alert_type=AlertType.FEED_RECOVERED,
+                                    session_id=session_id,
+                                    subject=f"Feed recovered: {session_id}",
+                                    body="WebSocket reconnection successful",
+                                )
+                            )
                         elif recovery["action"] == "failed":
                             alert_dispatcher.enqueue(
                                 AlertEvent(
@@ -296,18 +326,37 @@ async def run_live_session(
                     replica.mark_dirty()
                     replica.maybe_sync(source_conn=paper_db.con)
 
+                    # Write feed heartbeat for dashboard visibility.
+                    paper_db.upsert_feed_state(
+                        session_id=session_id,
+                        source="replay" if local_feed else "kite",
+                        mode="paper",
+                        status="OK",
+                        is_stale=False,
+                        subscription_count=len(active_symbols),
+                        last_bar_ts=datetime.fromtimestamp(bar_end, tz=UTC)
+                        if isinstance(bar_end, (int, float))
+                        else None,
+                    )
+
                     if result["should_complete"]:
                         final_status = "COMPLETED"
                         break
 
                     if result["triggered"]:
                         final_status = "RISK_BREACH"
+                        risk_reasons = result.get("risk_reasons", [])
+                        # Dispatch the most specific risk alert type.
+                        is_drawdown = any("max_drawdown" in r for r in risk_reasons)
+                        alert_type = (
+                            AlertType.DRAWDOWN_LIMIT if is_drawdown else AlertType.DAILY_LOSS_LIMIT
+                        )
                         alert_dispatcher.enqueue(
                             AlertEvent(
-                                alert_type=AlertType.DAILY_LOSS_LIMIT,
+                                alert_type=alert_type,
                                 session_id=session_id,
                                 subject=f"Risk breach: {session_id}",
-                                body=f"Reasons: {result.get('risk_reasons', [])}",
+                                body=f"Reasons: {risk_reasons}",
                                 level="error",
                             )
                         )
@@ -320,6 +369,15 @@ async def run_live_session(
                 # Stale detection (live only).
                 if not local_feed:
                     no_snapshot_streak += 1
+                    # Write stale feed state for dashboard.
+                    paper_db.upsert_feed_state(
+                        session_id=session_id,
+                        source="kite",
+                        mode="paper",
+                        status="STALE",
+                        is_stale=True,
+                        subscription_count=len(active_symbols),
+                    )
                     if no_snapshot_streak >= 3:
                         alert_dispatcher.enqueue(
                             AlertEvent(
@@ -346,6 +404,18 @@ async def run_live_session(
 
         await complete_session(session_id=session_id, paper_db=paper_db, status=final_status)
         replica.force_sync(source_conn=paper_db.con)
+
+        # Dispatch DAILY_PNL_SUMMARY with realized + unrealized breakdown (swing-trading daily scorecard).
+        _dispatch_daily_pnl_summary(
+            alert_dispatcher=alert_dispatcher,
+            session_id=session_id,
+            paper_db=paper_db,
+            strategy=strategy,
+            trade_date=trade_date,
+            portfolio_value=session.get("risk_config", {}).get("portfolio_value", 1_000_000),
+            alerts_sent=runtime_state.alerts_sent,
+            mark_prices=last_close_prices,
+        )
 
         alert_dispatcher.enqueue(
             AlertEvent(
@@ -374,7 +444,7 @@ async def run_live_session(
 
     except Exception as e:
         logger.exception("Live session failed for %s", session_id)
-        if tracker is not None:
+        if auto_flatten_on_error and tracker is not None:
             # Persist flattened positions to DB before marking FAILED.
             paper_db.flatten_open_positions(session_id, mark_prices=last_close_prices)
             # Also update in-memory tracker.
@@ -409,6 +479,191 @@ async def run_live_session(
         market_db.close()
 
 
+# ---------------------------------------------------------------------------
+# Auto-retry wrapper — keeps swing positions alive across transient failures
+# ---------------------------------------------------------------------------
+
+_RETRY_MAX = 5
+_RETRY_WAIT_BASE_SEC = 10.0
+_RETRYABLE_STATUSES = {"FAILED", "STALE"}
+
+
+def _should_retry(result: dict[str, Any] | None, attempt: int, max_attempts: int) -> bool:
+    """Decide if a failed session should be retried.
+
+    Acceptance: this function never changes entry/exit/carry/stop logic.
+    It only decides whether to restart the session runner.
+    """
+    if attempt >= max_attempts:
+        return False
+    if result is None:
+        return True
+    status = result.get("status", "")
+    if status in _RETRYABLE_STATUSES:
+        return True
+    error = str(result.get("error", "")).strip().lower()
+    if error:
+        if any(
+            token in error
+            for token in ("not found", "no symbols", "invalid session", "permission denied")
+        ):
+            return False
+        return True
+    return False
+
+
+async def run_live_session_with_retry(
+    *,
+    session_id: str,
+    paper_db_path: str = "data/paper.duckdb",
+    market_db_path: str = "data/market.duckdb",
+    api_key: str | None = None,
+    access_token: str | None = None,
+    poll_interval: float = _POLL_INTERVAL,
+    max_cycles: int | None = None,
+    no_alerts: bool = False,
+    max_retries: int = _RETRY_MAX,
+) -> dict[str, Any]:
+    """Run a live session with automatic retry on transient failures.
+
+    KEY CONSTRAINT: Positions are NOT flattened between retries. The session
+    re-seeds from DB state on each restart, so carried positions survive.
+    Only the final exhaustion (all retries used) triggers flatten-on-error.
+    """
+    result: dict[str, Any] = {}
+    ticker_adapter: KiteTickerAdapter | None = None
+    alerts_sent: set[str] = set()
+
+    for attempt in range(1, max_retries + 1):
+        is_final_attempt = attempt == max_retries
+
+        try:
+            result = await run_live_session(
+                session_id=session_id,
+                paper_db_path=paper_db_path,
+                market_db_path=market_db_path,
+                ticker_adapter=ticker_adapter,
+                api_key=api_key,
+                access_token=access_token,
+                poll_interval=poll_interval,
+                max_cycles=max_cycles,
+                no_alerts=no_alerts,
+                # Only flatten on the final attempt — earlier retries keep positions alive.
+                auto_flatten_on_error=is_final_attempt,
+                alerts_sent=alerts_sent,
+            )
+        except Exception as e:
+            result = {"error": str(e), "session_id": session_id, "status": "FAILED"}
+
+        # Check if retry is warranted.
+        if not _should_retry(result, attempt, max_retries):
+            return result
+
+        wait_sec = _RETRY_WAIT_BASE_SEC * attempt
+        logger.warning(
+            "Session %s attempt %d/%d failed (status=%s), retrying in %.0fs — "
+            "positions NOT flattened, will re-seed from DB",
+            session_id,
+            attempt,
+            max_retries,
+            result.get("status", result.get("error", "unknown")),
+            wait_sec,
+        )
+        await asyncio.sleep(wait_sec)
+
+    return result
+
+
+def _dispatch_daily_pnl_summary(
+    *,
+    alert_dispatcher: AlertDispatcher,
+    session_id: str,
+    paper_db: PaperDB,
+    strategy: str,
+    trade_date: str,
+    portfolio_value: float,
+    mark_prices: dict[str, float] | None = None,
+    alerts_sent: set[str] | None = None,
+) -> None:
+    """Compute and enqueue DAILY_PNL_SUMMARY with realized + unrealized breakdown."""
+    if not alert_dispatcher._enabled:
+        return
+    # Dedup guard: only send once per session per invocation.
+    _summary_key = f"DAILY_PNL_SUMMARY:{session_id}"
+    if alerts_sent is not None and _summary_key in alerts_sent:
+        return
+    if alerts_sent is not None:
+        alerts_sent.add(_summary_key)
+    try:
+        realized_pnl = paper_db.get_session_realized_pnl(session_id)
+
+        # Compute unrealized from live marks first, then persisted metadata, then entry.
+        unrealized_pnl = 0.0
+        open_pos_details: list[dict] = []
+        for p in paper_db.list_open_positions(session_id):
+            meta = p.get("metadata_json") or {}
+            sym = p.get("symbol", "")
+            qty = int(p.get("qty", 0))
+            avg_entry = float(p.get("avg_entry", 0))
+            direction = str(p.get("direction", "LONG")).upper()
+            mark = (mark_prices or {}).get(sym)
+            if mark is None:
+                mark = float(meta.get("last_mark_price", avg_entry))
+            if direction == "LONG":
+                upnl = (mark - avg_entry) * qty
+            else:
+                upnl = (avg_entry - mark) * qty
+            unrealized_pnl += upnl
+            open_pos_details.append(
+                {
+                    "symbol": sym,
+                    "unrealized_pnl": upnl,
+                    "days_held": meta.get("days_held", 0),
+                }
+            )
+
+        # Count today's closed trades and winners/losers.
+        closed_positions = paper_db.list_positions(session_id)
+        trades_closed_today = 0
+        winners = 0
+        losers = 0
+        for p in closed_positions:
+            if p.get("state") == "CLOSED" and p.get("pnl") is not None:
+                trades_closed_today += 1
+                if p["pnl"] >= 0:
+                    winners += 1
+                else:
+                    losers += 1
+
+        max_dd_used_pct = (
+            abs(realized_pnl + unrealized_pnl) / portfolio_value * 100 if portfolio_value else 0.0
+        )
+
+        subject, body = format_daily_pnl_summary(
+            session_id=session_id,
+            strategy=strategy,
+            trade_date=trade_date,
+            realized_pnl=realized_pnl,
+            unrealized_pnl=unrealized_pnl,
+            trades_closed_today=trades_closed_today,
+            winners=winners,
+            losers=losers,
+            open_positions=open_pos_details,
+            portfolio_value=portfolio_value,
+            max_dd_used_pct=max_dd_used_pct,
+        )
+        alert_dispatcher.enqueue(
+            AlertEvent(
+                alert_type=AlertType.DAILY_PNL_SUMMARY,
+                session_id=session_id,
+                subject=subject,
+                body=body,
+            )
+        )
+    except Exception:
+        logger.exception("Failed to dispatch DAILY_PNL_SUMMARY session=%s", session_id)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Paper trading live session")
     parser.add_argument("--session-id", required=True, help="Paper session ID")
@@ -423,7 +678,7 @@ def main() -> None:
     )
 
     result = asyncio.run(
-        run_live_session(
+        run_live_session_with_retry(
             session_id=args.session_id,
             paper_db_path=args.paper_db,
             market_db_path=args.market_db,

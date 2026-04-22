@@ -493,6 +493,16 @@ def _dispatch_trade_opened(dispatcher: Any, session_id: str, result: dict[str, A
         logger.exception("Failed to dispatch TRADE_OPENED alert")
 
 
+def _classify_exit_alert_type(reason: str) -> AlertType:
+    """Map exit reason to the most specific AlertType available."""
+    reason_upper = reason.upper()
+    if "TRAIL" in reason_upper:
+        return AlertType.TRAIL_STOP
+    if any(kw in reason_upper for kw in ("STOP", "SL_", "BREAKEVEN")):
+        return AlertType.SL_HIT
+    return AlertType.TRADE_CLOSED
+
+
 def _dispatch_trade_closed(
     dispatcher: Any,
     session_id: str,
@@ -503,12 +513,13 @@ def _dispatch_trade_closed(
     try:
         exit_price = result.get("exit_price", 0.0)
         reason = result.get("reason", "")
+        alert_type = _classify_exit_alert_type(reason)
         event = AlertEvent(
-            alert_type=AlertType.TRADE_CLOSED,
+            alert_type=alert_type,
             session_id=session_id,
             subject=f"CLOSED {symbol} reason={reason}",
             body=(f"symbol={symbol} entry={entry_price:.2f} exit={exit_price:.2f} reason={reason}"),
         )
         dispatcher.enqueue(event)
     except Exception:
-        logger.exception("Failed to dispatch TRADE_CLOSED alert")
+        logger.exception("Failed to dispatch trade closed alert")

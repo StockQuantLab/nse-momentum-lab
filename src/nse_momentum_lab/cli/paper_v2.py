@@ -210,13 +210,13 @@ def _cmd_replay(args: argparse.Namespace) -> None:
 
 def _cmd_live(args: argparse.Namespace) -> None:
     """Run a live paper session."""
-    from nse_momentum_lab.services.paper.scripts.paper_live import run_live_session
+    from nse_momentum_lab.services.paper.scripts.paper_live import run_live_session_with_retry
 
     session_id = _resolve_session_id(
         args, args.paper_db, mode="live", trade_date=getattr(args, "trade_date", None)
     )
     result = _run_async(
-        run_live_session(
+        run_live_session_with_retry(
             session_id=session_id,
             paper_db_path=args.paper_db,
             market_db_path=args.market_db,
@@ -314,6 +314,13 @@ def _cmd_stop(args: argparse.Namespace) -> None:
 def _cmd_pause(args: argparse.Namespace) -> None:
     """Pause an active session."""
     from nse_momentum_lab.services.paper.db.paper_db import PaperDB
+    from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
+        AlertDispatcher,
+        AlertEvent,
+        AlertType,
+        format_session_alert,
+        get_alert_config,
+    )
 
     session_id = _resolve_session_id(
         args, args.paper_db, mode=getattr(args, "mode", "replay") or "replay"
@@ -321,6 +328,28 @@ def _cmd_pause(args: argparse.Namespace) -> None:
     db = PaperDB(args.paper_db)
     try:
         db.update_session(session_id, status="PAUSED")
+        # Dispatch session paused alert.
+        try:
+            config = get_alert_config()
+            dispatcher = AlertDispatcher(paper_db=db, config=config)
+            import asyncio
+
+            async def _send():
+                await dispatcher.start()
+                subject, body = format_session_alert(session_id=session_id, event="PAUSED")
+                dispatcher.enqueue(
+                    AlertEvent(
+                        alert_type=AlertType.SESSION_PAUSED,
+                        session_id=session_id,
+                        subject=subject,
+                        body=body,
+                    )
+                )
+                await dispatcher.shutdown()
+
+            asyncio.run(_send())
+        except Exception:
+            pass  # Alert is best-effort, don't block the command.
         print(json.dumps({"session_id": session_id, "status": "PAUSED"}))
     finally:
         db.close()
@@ -329,6 +358,13 @@ def _cmd_pause(args: argparse.Namespace) -> None:
 def _cmd_resume(args: argparse.Namespace) -> None:
     """Resume a paused session (mark ACTIVE)."""
     from nse_momentum_lab.services.paper.db.paper_db import PaperDB
+    from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
+        AlertDispatcher,
+        AlertEvent,
+        AlertType,
+        format_session_alert,
+        get_alert_config,
+    )
 
     session_id = _resolve_session_id(
         args, args.paper_db, mode=getattr(args, "mode", "replay") or "replay"
@@ -336,6 +372,28 @@ def _cmd_resume(args: argparse.Namespace) -> None:
     db = PaperDB(args.paper_db)
     try:
         db.update_session(session_id, status="ACTIVE")
+        # Dispatch session resumed alert.
+        try:
+            config = get_alert_config()
+            dispatcher = AlertDispatcher(paper_db=db, config=config)
+            import asyncio
+
+            async def _send():
+                await dispatcher.start()
+                subject, body = format_session_alert(session_id=session_id, event="RESUMED")
+                dispatcher.enqueue(
+                    AlertEvent(
+                        alert_type=AlertType.SESSION_RESUMED,
+                        session_id=session_id,
+                        subject=subject,
+                        body=body,
+                    )
+                )
+                await dispatcher.shutdown()
+
+            asyncio.run(_send())
+        except Exception:
+            pass  # Alert is best-effort, don't block the command.
         print(json.dumps({"session_id": session_id, "status": "ACTIVE"}))
     finally:
         db.close()
@@ -353,6 +411,66 @@ def _cmd_flatten(args: argparse.Namespace) -> None:
         flattened = db.flatten_open_positions(session_id)
         db.update_session(session_id, status="PAUSED")
         print(json.dumps({"session_id": session_id, "flattened": flattened, "status": "PAUSED"}))
+    finally:
+        db.close()
+
+
+def _cmd_flatten_all(args: argparse.Namespace) -> None:
+    """EMERGENCY KILL SWITCH — force-close all positions across all active sessions for a trade date.
+
+    This is NOT part of normal daily operations. Use only when you need to immediately
+    exit everything (system going offline, market event, etc.). Swing positions that would
+    normally carry overnight are force-closed.
+    """
+    from nse_momentum_lab.services.paper.db.paper_db import (
+        ACTIVE_SESSION_STATUSES,
+        PaperDB,
+    )
+
+    trade_date = args.trade_date
+    if trade_date is None:
+        trade_date = str(date.today())
+
+    db = PaperDB(args.paper_db)
+    try:
+        # Find all sessions in active statuses for the trade date.
+        active_statuses = ", ".join(f"'{s}'" for s in ACTIVE_SESSION_STATUSES)
+        rows = db._query_all(
+            f"SELECT session_id, strategy_name FROM paper_sessions "
+            f"WHERE status IN ({active_statuses}) AND trade_date = $1",
+            [trade_date],
+        )
+
+        if not rows:
+            print(
+                json.dumps(
+                    {
+                        "action": "flatten_all",
+                        "sessions_processed": 0,
+                        "message": "No active sessions found",
+                    }
+                )
+            )
+            return
+
+        total_flattened = 0
+        results = []
+        for row in rows:
+            sid = row["session_id"]
+            flattened = db.flatten_open_positions(sid)
+            db.update_session(sid, status="COMPLETED")
+            count = len(flattened) if isinstance(flattened, list) else 0
+            total_flattened += count
+            results.append({"session_id": sid, "positions_flattened": count})
+
+        summary = {
+            "action": "flatten_all",
+            "trade_date": trade_date,
+            "sessions_processed": len(results),
+            "total_positions_flattened": total_flattened,
+            "sessions": results,
+        }
+        print(json.dumps(summary, default=str))
     finally:
         db.close()
 
@@ -428,6 +546,7 @@ def _cmd_eod_carry(args: argparse.Namespace) -> None:
         trade_date=args.trade_date,
         paper_db_path=args.paper_db,
         market_db_path=args.market_db,
+        no_alerts=getattr(args, "no_alerts", False),
     )
     print(json.dumps(result, default=str))
     sys.exit(0 if "error" not in result else 1)
@@ -555,6 +674,14 @@ def build_parser() -> argparse.ArgumentParser:
     _flatten.add_argument("--mode", default="replay")
     _flatten.set_defaults(handler=_cmd_flatten)
 
+    # flatten-all (emergency kill switch)
+    _flatten_all = sub.add_parser(
+        "flatten-all",
+        help="EMERGENCY: force-close all positions across all sessions for a trade date",
+    )
+    _flatten_all.add_argument("--trade-date", default=None, help="YYYY-MM-DD (default: today)")
+    _flatten_all.set_defaults(handler=_cmd_flatten_all)
+
     # archive
     _archive = sub.add_parser("archive", help="Archive a session")
     _archive.add_argument("--session-id", default=None)
@@ -605,6 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eod_carry.add_argument("--strategy", default=None, help="Strategy key for auto-discovery")
     eod_carry.add_argument("--trade-date", required=True, help="YYYY-MM-DD")
+    eod_carry.add_argument("--no-alerts", action="store_true", help="Disable Telegram/email alerts")
     eod_carry.set_defaults(handler=_cmd_eod_carry)
 
     return parser
@@ -614,8 +742,22 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+
     parser = build_parser()
     args = parser.parse_args()
+
+    # Startup cleanup: cancel orphaned STOPPING sessions from previous runs.
+    try:
+        from nse_momentum_lab.services.paper.db.paper_db import PaperDB
+
+        db = PaperDB(args.paper_db)
+        stale = db.cleanup_stale_sessions()
+        if stale:
+            print(f"Cleaned up {stale} stale session(s) from previous run(s)", flush=True)
+        db.close()
+    except Exception:
+        pass  # Non-critical — don't block startup if DB is unavailable.
+
     handler = getattr(args, "handler", None)
     if handler is None:
         raise SystemExit("No command specified")

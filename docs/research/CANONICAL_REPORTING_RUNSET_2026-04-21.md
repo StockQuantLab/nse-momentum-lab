@@ -19,21 +19,21 @@ This document freezes the current default backtest IDs used for dashboard compar
 
 ## Active Runset
 
-Window: `2015-01-01 → 2026-04-17`, universe 2000, parallel workers 4.
+Window: `2015-01-01 → 2026-04-21`, universe 2000, parallel workers 4.
 
 | Leg | Strategy | Exp ID | Avg Annual | Max DD | Calmar | Profit Factor | Trades | Win% | Neg Years |
 |-----|----------|--------|-----------|--------|--------|---------------|--------|------|-----------|
-| Breakout 4% | `2LYNCHBreakout` | `0cd353d536dd6f91` | +54.1% | 3.16% | 17.1 | 22.98 | 2,211 | 39.3% | 0 |
-| Breakout 2% | `2LYNCHBreakout` | `f923e1a9517d9b2c` | +121.8% | 2.73% | 44.6 | 19.06 | 7,078 | 37.8% | 0 |
-| Breakdown 4% | `2LYNCHBreakdown` | `f6e7646ac932697d` | +3.1% | 0.74% | 4.2 | 6.65 | 258 | 30.5% | 2 |
-| Breakdown 2% | `2LYNCHBreakdown` | `b769984bf6d0c5c7` | +8.1% | 1.99% | 4.1 | 6.52 | 790 | 25.3% | 0 |
+| Breakout 4% | `2LYNCHBreakout` | `f155489ee3422815` | +54.1% | 3.16% | 17.1 | 20.73 | 2,212 | 40.6% | 0 |
+| Breakout 2% | `2LYNCHBreakout` | `8e219692ea67b157` | +121.9% | 2.73% | 44.7 | 16.49 | 7,082 | 38.7% | 0 |
+| Breakdown 4% | `2LYNCHBreakdown` | `f0cd849cf08f4fdc` | +3.1% | 0.74% | 4.2 | 5.51 | 258 | 36.0% | 2 |
+| Breakdown 2% | `2LYNCHBreakdown` | `1f910e9069a508d2` | +8.2% | 1.90% | 4.3 | 5.47 | 790 | 25.7% | 0 |
 
 ## Reproduction Command
 
 ```bash
 doppler run -- uv run python scripts/run_full_operating_point.py \
   --start-year 2015 --end-year 2026 \
-  --start-date 2015-01-01 --end-date 2026-04-17 \
+  --start-date 2015-01-01 --end-date 2026-04-21 \
   --universe-size 2000 --parallel-workers 4 --force
 ```
 
@@ -50,12 +50,12 @@ doppler run -- .venv\Scripts\python.exe -m nse_momentum_lab.cli.backtest_cleanup
 To prune future stale experiments (keeping new canonical IDs):
 ```bash
 doppler run -- .venv\Scripts\python.exe -m nse_momentum_lab.cli.backtest_cleanup \
-  --keep-only 0cd353d536dd6f91 f923e1a9517d9b2c f6e7646ac932697d b769984bf6d0c5c7 \
+  --keep-only f155489ee3422815 8e219692ea67b157 f0cd849cf08f4fdc 1f910e9069a508d2 \
   --dry-run
 ```
 
 ## Notes
 
-- Win rate for breakdowns dropped (48%→30% for 4%, similar for 2%) vs old runs. This is **expected**: the old code unconditionally exited H=false shorts at EOD (capturing many small wins). New code carries profitable shorts overnight with a breakeven stop — some of these stop at breakeven (0R, not a win) but the survivors produce larger R-multiples. The result is higher return, lower drawdown, and better profit factor despite lower win rate.
-- 4% breakdown has 2 negative years over 11 years; this is the primary risk for that leg.
-- 2% breakdown has 0 negative years over 11 years with Calmar 4.1 — statistically robust.
+- Win rate for breakdowns dropped (36.0% for 4%, 25.7% for 2%) vs breakout legs. This is **expected**: the old code unconditionally exited H=false shorts at EOD (capturing many small wins). New code carries profitable shorts overnight with a breakeven stop — some of these stop at breakeven (0R, not a win) but the survivors produce larger R-multiples. The result is higher return, lower drawdown, and better profit factor despite lower win rate.
+- 4% breakdown has 2 negative years over the 2015–2026 window; this is the primary risk for that leg.
+- 2% breakdown has 0 negative years over the 2015–2026 window with Calmar 4.3 — statistically robust.

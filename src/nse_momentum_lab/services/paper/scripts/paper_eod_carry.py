@@ -312,6 +312,7 @@ def run_eod_carry(
     paper_db_path: str = "data/paper.duckdb",
     market_db_path: str = "data/market.duckdb",
     strategy: str | None = None,
+    no_alerts: bool = False,
 ) -> dict[str, Any]:
     """Run EOD carry decisions for a session. Returns summary dict."""
     from nse_momentum_lab.db.market_db import MarketDataDB
@@ -356,8 +357,127 @@ def run_eod_carry(
             paper_db.update_session(session_id, status="COMPLETED")
             final_status = "COMPLETED"
 
+        # Dispatch DAILY_PNL_SUMMARY after carry decisions (swing daily scorecard).
+        if not no_alerts:
+            _dispatch_eod_carry_summary(
+                paper_db=paper_db,
+                session_id=session_id,
+                strategy=strategy_name,
+                trade_date=trade_date,
+                portfolio_value=session.get("risk_config", {}).get("portfolio_value", 1_000_000),
+                summary=summary,
+            )
+
         return {"session_id": session_id, "status": final_status, **summary}
 
     finally:
         paper_db.close()
         market_db.close()
+
+
+def _dispatch_eod_carry_summary(
+    *,
+    paper_db: Any,
+    session_id: str,
+    strategy: str,
+    trade_date: str,
+    portfolio_value: float,
+    summary: dict[str, Any],
+) -> None:
+    """Dispatch DAILY_PNL_SUMMARY after EOD carry decisions."""
+    try:
+        from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
+            AlertDispatcher,
+            AlertEvent,
+            AlertType,
+            format_daily_pnl_summary,
+            get_alert_config,
+        )
+
+        realized_pnl = paper_db.get_session_realized_pnl(session_id)
+
+        # Build per-position unrealized detail for carried positions.
+        remaining = paper_db.list_open_positions(session_id)
+        unrealized_pnl = 0.0
+        open_pos_details: list[dict] = []
+        for p in remaining:
+            avg_entry = float(p.get("avg_entry", 0))
+            close_price = float(p.get("metadata_json", {}).get("last_mark_price", avg_entry))
+            qty = int(p.get("qty", 0))
+            direction = str(p.get("direction", "LONG")).upper()
+            if direction == "LONG":
+                upnl = (close_price - avg_entry) * qty
+            else:
+                upnl = (avg_entry - close_price) * qty
+            unrealized_pnl += upnl
+            meta = p.get("metadata_json") or {}
+            open_pos_details.append(
+                {
+                    "symbol": p["symbol"],
+                    "unrealized_pnl": upnl,
+                    "days_held": meta.get("days_held", 0),
+                }
+            )
+
+        time_exit = summary.get("time_exit", 0)
+        weak_close = summary.get("weak_close_exit", 0)
+        carried = summary.get("carried", 0)
+        trades_closed_today = time_exit + weak_close
+
+        subject, body = format_daily_pnl_summary(
+            session_id=session_id,
+            strategy=strategy,
+            trade_date=trade_date,
+            realized_pnl=realized_pnl,
+            unrealized_pnl=unrealized_pnl,
+            trades_closed_today=trades_closed_today,
+            winners=0,  # EOD carry doesn't have winner/loser classification
+            losers=0,
+            open_positions=open_pos_details,
+            portfolio_value=portfolio_value,
+            max_dd_used_pct=abs(realized_pnl + unrealized_pnl) / portfolio_value * 100
+            if portfolio_value
+            else 0.0,
+        )
+        # Append carry summary to body.
+        body += (
+            f"\n\nEOD Carry: {carried} carried | {time_exit} time-exit | {weak_close} weak-close"
+        )
+
+        config = get_alert_config()
+        dispatcher = AlertDispatcher(paper_db=paper_db, config=config)
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+            has_loop = True
+        except RuntimeError:
+            has_loop = False
+
+        if has_loop:
+            dispatcher.enqueue(
+                AlertEvent(
+                    alert_type=AlertType.DAILY_PNL_SUMMARY,
+                    session_id=session_id,
+                    subject=subject,
+                    body=body,
+                )
+            )
+        else:
+            import asyncio as _aio
+
+            async def _send():
+                await dispatcher.start()
+                dispatcher.enqueue(
+                    AlertEvent(
+                        alert_type=AlertType.DAILY_PNL_SUMMARY,
+                        session_id=session_id,
+                        subject=subject,
+                        body=body,
+                    )
+                )
+                await dispatcher.shutdown()
+
+            _aio.run(_send())
+    except Exception:
+        logger.exception("eod-carry: failed to dispatch DAILY_PNL_SUMMARY session=%s", session_id)

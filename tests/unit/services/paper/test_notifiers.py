@@ -10,6 +10,7 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertEvent,
     AlertType,
     _redact_url,
+    _should_send,
 )
 from nse_momentum_lab.services.paper.notifiers.telegram import TelegramNotifier
 
@@ -129,3 +130,10 @@ async def test_dispatcher_queue_full_drops_alert():
     # Enqueuing one more must not raise — it should drop
     event = AlertEvent(AlertType.SESSION_STARTED, "s", "overflow", "body")
     dispatcher.enqueue(event)  # Must not raise
+
+
+def test_session_pause_resume_alerts_follow_session_lifecycle_toggle():
+    config = AlertConfig(telegram_bot_token=None, telegram_chat_ids=[], session_lifecycle=False)
+
+    assert not _should_send(AlertType.SESSION_PAUSED, config)
+    assert not _should_send(AlertType.SESSION_RESUMED, config)

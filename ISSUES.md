@@ -340,7 +340,7 @@ explicitly, but `BREAKDOWN_2PCT` did not.
 
 **Fix**: Added `"short_time_stop_days": 3` to `BREAKDOWN_2PCT` overrides dict in `backtest_presets.py`.
 
-**Required action**: Re-run `scripts/run_full_operating_point.py` to produce new BREAKDOWN_2PCT baseline.
+**Required action**: Completed. Re-run `scripts/run_full_operating_point.py` produced the new BREAKDOWN_2PCT baseline `1f910e9069a508d2`.
 
 ---
 
@@ -368,17 +368,35 @@ independently. Known divergences at time of fix:
 
 ---
 
+### ISSUE-017 — Live paper websocket launch gaps in ops layer
+
+**Status**: INVESTIGATING — live websocket test pass pending
+**Severity**: High (affects correctness and observability of live paper sessions)
+**Found**: 2026-04-22 (preflight review before Kite websocket launch)
+
+**Problem**: The new ops-layer live-launch code is partially wired but still has a few correctness gaps:
+- `_cmd_pause()` / `_cmd_resume()` emit `AlertType.SESSION_STARTED` instead of distinct pause/resume lifecycle alerts.
+- `paper_v2.py` still calls `run_live_session()` from the CLI, so `run_live_session_with_retry()` is not active.
+- `_RETRYABLE_STATUSES` includes `RISK_BREACH`, which should not auto-retry because it represents a real risk exit.
+- `_dispatch_daily_pnl_summary()` uses `tracked.entry_price` as the mark, so unrealized P&L is effectively zero unless a real last mark is supplied.
+- Startup stale cleanup in `paper_v2.py` hardcodes `data/paper.duckdb` before CLI args are parsed.
+- `_cmd_eod_carry()` does not pass `no_alerts` through to `run_eod_carry()`.
+
+**Notes**: Another session is already working on parts of this fix set. This issue tracks the remaining websocket-launch gaps for the 2% breakout/breakdown live test.
+
+---
+
 ## Canonical Experiment IDs (2026-04-21)
 
 Wave-1 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard.
-Full 11-year window: `2015-01-01 → 2026-04-17`, universe 2000.
+Full 11-year window: `2015-01-01 → 2026-04-21`, universe 2000.
 
 | Leg | Exp ID | Avg Annual | Max DD | Calmar | PF | Trades |
 |-----|--------|-----------|--------|--------|----|--------|
-| Breakout 4% | `0cd353d536dd6f91` | +54.1% | 3.16% | 17.1 | 22.98 | 2,211 |
-| Breakout 2% | `f923e1a9517d9b2c` | +121.8% | 2.73% | 44.6 | 19.06 | 7,078 |
-| Breakdown 4% | `f6e7646ac932697d` | +3.1% | 0.74% | 4.2 | 6.65 | 258 |
-| Breakdown 2% | `b769984bf6d0c5c7` | +8.1% | 1.99% | 4.1 | 6.52 | 790 |
+| Breakout 4% | `f155489ee3422815` | +54.1% | 3.16% | 17.1 | 20.73 | 2,212 |
+| Breakout 2% | `8e219692ea67b157` | +121.9% | 2.73% | 44.7 | 16.49 | 7,082 |
+| Breakdown 4% | `f0cd849cf08f4fdc` | +3.1% | 0.74% | 4.2 | 5.51 | 258 |
+| Breakdown 2% | `1f910e9069a508d2` | +8.2% | 1.90% | 4.3 | 5.47 | 790 |
 
 All prior experiment IDs have been pruned from DuckDB. These four are the only active baselines.
 See `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-21.md` for the frozen report.
