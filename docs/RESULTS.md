@@ -92,6 +92,13 @@
 
 ---
 
+## Current 2LYNCH Canonical Runset
+
+The current 2LYNCH breakout/breakdown canonical baselines are tracked separately in
+[`docs/research/CANONICAL_REPORTING_RUNSET_2026-04-22.md`](research/CANONICAL_REPORTING_RUNSET_2026-04-22.md).
+
+---
+
 ## Performance Highlights
 
 ### Best Years

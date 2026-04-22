@@ -1,6 +1,6 @@
 # NSE Momentum Lab — System Status
 
-> Last updated: 2026-04-21 (update manually after each data catch-up)
+> Last updated: 2026-04-22 (update manually after each data catch-up)
 
 ---
 
@@ -8,25 +8,25 @@
 
 | Source | Last Date | Files | Notes |
 |--------|-----------|-------|-------|
-| Kite daily OHLCV | 2026-04-17 | ~3,285 files | Catch-up to today before live session |
-| Kite 5-min OHLCV | 2026-04-17 | ~14,093 files | Use `--5min --resume` |
-| feat_daily | 2026-04-17 | 3,839,743 rows | `nseml-build-features --since` |
-| market_monitor | 2026-04-17 | — | `nseml-market-monitor --incremental --since` |
+| Kite daily OHLCV | 2026-04-22 | ~3,285 files | Catch-up to today before live session |
+| Kite 5-min OHLCV | 2026-04-22 | ~14,093 files | Use `--5min --resume` |
+| feat_daily | 2026-04-22 | 3,839,743 rows | `nseml-build-features --since` |
+| market_monitor | 2026-04-22 | — | `nseml-market-monitor --incremental --since` |
 
 ---
 
 ## Canonical Experiment Baselines
 
-Window: `2015-01-01 → 2026-04-21`, universe 2000. Wave-1 fixes applied (H-carry, entry gate 09:20, filter direction parity, pnl_r guard).
+Window: `2015-01-01 → 2026-04-22`, universe 2000. Wave-1 fixes applied (H-carry, entry gate 09:20, filter direction parity, pnl_r guard).
 
 | Strategy | Exp ID | Avg Annual | Max DD | Calmar | Profit Factor | Trades | Neg Years |
 |----------|--------|-----------|--------|--------|---------------|--------|-----------|
-| Breakout 4% | `f155489ee3422815` | +54.1% | 3.16% | 17.1 | 20.73 | 2,212 | 0 |
-| Breakout 2% | `8e219692ea67b157` | +121.9% | 2.73% | 44.7 | 16.49 | 7,082 | 0 |
-| Breakdown 4% | `f0cd849cf08f4fdc` | +3.1% | 0.74% | 4.2 | 5.51 | 258 | 2 |
-| Breakdown 2% | `1f910e9069a508d2` | +8.2% | 1.90% | 4.3 | 5.47 | 790 | 0 |
+| Breakout 4% | `d245816e1d89e196` | +54.2% | 3.16% | 17.2 | 20.75 | 2,213 | 0 |
+| Breakout 2% | `f5bf9a6836901550` | +122.0% | 2.73% | 44.7 | 16.50 | 7,086 | 0 |
+| Breakdown 4% | `f4a125fce62ddb24` | +3.1% | 0.74% | 4.2 | 5.51 | 258 | 2 |
+| Breakdown 2% | `be7958b0f79c3c1c` | +8.2% | 1.90% | 4.3 | 5.47 | 790 | 0 |
 
-Frozen reporting runset: `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-21.md`
+Frozen reporting runset: `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-22.md`
 
 ---
 

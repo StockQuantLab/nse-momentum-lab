@@ -340,7 +340,7 @@ explicitly, but `BREAKDOWN_2PCT` did not.
 
 **Fix**: Added `"short_time_stop_days": 3` to `BREAKDOWN_2PCT` overrides dict in `backtest_presets.py`.
 
-**Required action**: Completed. Re-run `scripts/run_full_operating_point.py` produced the new BREAKDOWN_2PCT baseline `1f910e9069a508d2`.
+**Required action**: Completed. Re-run `scripts/run_full_operating_point.py` produced the current full-history canonical baseline `be7958b0f79c3c1c`.
 
 ---
 
@@ -478,17 +478,17 @@ actually stale, not just because a 5-minute bar has not closed yet.
 
 ---
 
-## Canonical Experiment IDs (2026-04-21)
+## Canonical Experiment IDs (2026-04-22)
 
 Wave-1 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard.
-Full 11-year window: `2015-01-01 → 2026-04-21`, universe 2000.
+Full 11-year window: `2015-01-01 → 2026-04-22`, universe 2000.
 
 | Leg | Exp ID | Avg Annual | Max DD | Calmar | PF | Trades |
 |-----|--------|-----------|--------|--------|----|--------|
-| Breakout 4% | `f155489ee3422815` | +54.1% | 3.16% | 17.1 | 20.73 | 2,212 |
-| Breakout 2% | `8e219692ea67b157` | +121.9% | 2.73% | 44.7 | 16.49 | 7,082 |
-| Breakdown 4% | `f0cd849cf08f4fdc` | +3.1% | 0.74% | 4.2 | 5.51 | 258 |
-| Breakdown 2% | `1f910e9069a508d2` | +8.2% | 1.90% | 4.3 | 5.47 | 790 |
+| Breakout 4% | `d245816e1d89e196` | +54.2% | 3.16% | 17.2 | 20.75 | 2,213 |
+| Breakout 2% | `f5bf9a6836901550` | +122.0% | 2.73% | 44.7 | 16.50 | 7,086 |
+| Breakdown 4% | `f4a125fce62ddb24` | +3.1% | 0.74% | 4.2 | 5.51 | 258 |
+| Breakdown 2% | `be7958b0f79c3c1c` | +8.2% | 1.90% | 4.3 | 5.47 | 790 |
 
 All prior experiment IDs have been pruned from DuckDB. These four are the only active baselines.
-See `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-21.md` for the frozen report.
+See `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-22.md` for the frozen report.

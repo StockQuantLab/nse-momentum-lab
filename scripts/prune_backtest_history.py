@@ -33,10 +33,10 @@ BACKTEST_DB_DEFAULT = PROJECT_ROOT / "data" / "backtest.duckdb"
 # Full-preset canonical runs — never delete.
 CANONICAL_EXP_IDS: frozenset[str] = frozenset(
     {
-        "1716b78c208a90f3",  # breakout 4%
-        "87577645e9c99961",  # breakout 2%
-        "84d9a58f3ad105be",  # breakdown 4% Option-B
-        "c52e19a02db552d1",  # breakdown 2% canonical
+        "d245816e1d89e196",  # breakout 4%
+        "f5bf9a6836901550",  # breakout 2%
+        "f4a125fce62ddb24",  # breakdown 4%
+        "be7958b0f79c3c1c",  # breakdown 2%
     }
 )
 
