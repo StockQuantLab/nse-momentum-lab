@@ -626,6 +626,7 @@ def seed_candidates_from_market_db(
     symbols: list[str],
     trade_date: str,
     direction: str = "LONG",
+    strategy_config: Any | None = None,
     paper_db: Any = None,
     session_id: str | None = None,
 ) -> int:
@@ -642,7 +643,13 @@ def seed_candidates_from_market_db(
 
     Returns the count of symbols successfully seeded from feat_daily.
     """
+    from datetime import date as _date
+
     import polars as pl
+
+    from nse_momentum_lab.services.backtest.strategy_registry import (
+        resolve_strategy as resolve_backtest_strategy,
+    )
 
     if not symbols:
         return 0
@@ -651,23 +658,43 @@ def seed_candidates_from_market_db(
     ranked_rows: dict[str, dict[str, Any]] = {}
 
     try:
-        # Load feat_daily as a Polars DataFrame using DuckDB's native .pl() API.
-        df: pl.DataFrame = market_db.con.execute(
-            "SELECT * FROM feat_daily WHERE date = CAST(? AS DATE)",
-            [trade_date],
-        ).pl()
+        trade_day = _date.fromisoformat(trade_date)
+        # Use the same candidate SQL as the backtest so the live seed path
+        # sees the prior-day columns required by ranking and filter parity.
+        strategy_key = getattr(strategy_config, "strategy_key", None) or (
+            "2lynchbreakdown" if direction.upper() == "SHORT" else "2lynchbreakout"
+        )
+        strategy_def = resolve_backtest_strategy(strategy_key)
+        extra_params = getattr(strategy_config, "extra_params", {}) or {}
+        params = BacktestParams(
+            breakout_threshold=float(getattr(strategy_config, "breakout_threshold", 0.04)),
+            min_price=int(extra_params.get("min_price", 10)),
+            min_value_traded_inr=float(extra_params.get("min_value_traded_inr", 3_000_000)),
+            min_volume=int(extra_params.get("min_volume", 50_000)),
+            breakout_daily_candidate_budget=0,
+            breakdown_daily_candidate_budget=0,
+        )
+        query_start = trade_day - timedelta(days=30)
+        if strategy_def.build_candidate_query is None:
+            raise RuntimeError(f"Strategy {strategy_key} does not define a candidate query")
+        query, query_params = strategy_def.build_candidate_query(
+            params,
+            list(symbols),
+            query_start,
+            trade_day,
+        )
+        df: pl.DataFrame = market_db.con.execute(query, query_params).pl()
 
         if not df.is_empty():
             # Run through the same ranking pipeline as the backtest.
             # budget=0 → no budget cap, all candidates accepted.
-            params = BacktestParams(
-                breakout_daily_candidate_budget=0,
-                breakdown_daily_candidate_budget=0,
-            )
             if direction.upper() == "SHORT":
                 ranked, _ = apply_breakdown_selection_ranking(df, params)
             else:
                 ranked, _ = apply_breakout_selection_ranking(df, params)
+
+            # Only keep the current trade_date rows for live seeding.
+            ranked = ranked.filter(pl.col("trading_date") == pl.lit(trade_day))
 
             # Convert ranked DataFrame rows to dicts keyed by symbol.
             for row in ranked.to_dicts():

@@ -22,6 +22,7 @@ from apps.nicegui.components import (
     divider,
     primary_action_card,
     safe_timer,
+    paginated_table,
     SPACE_SECTION,
     SPACE_GRID_DEFAULT,
     SPACE_MD,
@@ -122,6 +123,13 @@ async def home_page() -> None:
                         "compare_arrows",
                         "/compare",
                         color_primary(),
+                    )
+                    nav_card(
+                        "Symbol Performance",
+                        "Per-symbol P/L breakdown and ranking",
+                        "leaderboard",
+                        "/symbols",
+                        color_warning(),
                     )
 
         with ui.expansion("Research Tools", icon="science").classes("w-full"):
@@ -268,6 +276,43 @@ async def home_page() -> None:
                     columns=4,
                     hero_index=0,
                 )
+
+        # Recent Experiments — collapsed by default
+        if not experiments_df.is_empty():
+            with ui.expansion("Recent Experiments", icon="science").classes("w-full"):
+                recent = experiments_df.head(20)
+                rows = []
+                for r in recent.iter_rows(named=True):
+                    ret = float(r.get("total_return_pct", 0) or 0)
+                    rows.append(
+                        {
+                            "exp_id": str(r.get("exp_id", "-"))[:12],
+                            "strategy": str(r.get("strategy_name", "-")),
+                            "period": f"{r.get('start_year', '?')}-{r.get('end_year', '?')}",
+                            "trades": int(r.get("total_trades", 0) or 0),
+                            "win_rate": f"{float(r.get('win_rate_pct', 0) or 0):.1f}%",
+                            "return": f"{ret:.1f}%",
+                        }
+                    )
+                cols = [
+                    {"name": "exp_id", "label": "Exp ID", "field": "exp_id", "sortable": True},
+                    {
+                        "name": "strategy",
+                        "label": "Strategy",
+                        "field": "strategy",
+                        "sortable": True,
+                    },
+                    {"name": "period", "label": "Period", "field": "period"},
+                    {"name": "trades", "label": "Trades", "field": "trades", "sortable": True},
+                    {
+                        "name": "win_rate",
+                        "label": "Win Rate",
+                        "field": "win_rate",
+                        "sortable": True,
+                    },
+                    {"name": "return", "label": "Return %", "field": "return", "sortable": True},
+                ]
+                paginated_table(rows, cols, page_size=10)
 
         # Quick Start Commands — collapsed by default, developer-only reference
         with ui.expansion("Quick Start Commands", icon="terminal").classes("w-full"):

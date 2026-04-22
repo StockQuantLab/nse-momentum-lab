@@ -81,10 +81,7 @@ class _DashboardDBProxy:
         current_db = object.__getattribute__(self, "_db")
         last_version = object.__getattribute__(self, "_last_version")
 
-        # Read the pointer version.
-        version = consumer._read_pointer_version()
-        if version is None:
-            version = consumer._scan_latest_version()
+        version = consumer.get_latest_version()
 
         # Version changed — rebuild the DB wrapper.
         if version is not None and version != last_version:
@@ -94,8 +91,8 @@ class _DashboardDBProxy:
                 except Exception:
                     pass
 
-            path = consumer._version_path(version)
-            if path.exists():
+            path = consumer.get_replica_path()
+            if path is not None:
                 new_db = db_factory(path)
                 object.__setattr__(self, "_db", new_db)
                 object.__setattr__(self, "_last_version", version)

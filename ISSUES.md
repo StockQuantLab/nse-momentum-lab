@@ -370,19 +370,20 @@ independently. Known divergences at time of fix:
 
 ### ISSUE-017 — Live paper websocket launch gaps in ops layer
 
-**Status**: INVESTIGATING — live websocket test pass pending
+**Status**: ✅ FIXED — durable session lifecycle + feed transition dedup added
 **Severity**: High (affects correctness and observability of live paper sessions)
 **Found**: 2026-04-22 (preflight review before Kite websocket launch)
 
-**Problem**: The new ops-layer live-launch code is partially wired but still has a few correctness gaps:
-- `_cmd_pause()` / `_cmd_resume()` emit `AlertType.SESSION_STARTED` instead of distinct pause/resume lifecycle alerts.
-- `paper_v2.py` still calls `run_live_session()` from the CLI, so `run_live_session_with_retry()` is not active.
-- `_RETRYABLE_STATUSES` includes `RISK_BREACH`, which should not auto-retry because it represents a real risk exit.
-- `_dispatch_daily_pnl_summary()` uses `tracked.entry_price` as the mark, so unrealized P&L is effectively zero unless a real last mark is supplied.
-- Startup stale cleanup in `paper_v2.py` hardcodes `data/paper.duckdb` before CLI args are parsed.
-- `_cmd_eod_carry()` does not pass `no_alerts` through to `run_eod_carry()`.
+**Problem**: The live paper runtime needed CPR-style durability for session-level alerts and feed transitions:
+- `SESSION_STARTED` / `SESSION_COMPLETED` / `SESSION_ERROR` needed DB-backed dedup so retries and restarts could not repeat lifecycle alerts.
+- `FEED_STALE` / `FEED_RECOVERED` needed a durable transition marker so the watchdog and quiet-bar paths could not flood Telegram.
+- `paper_v2.py` pause/resume commands needed to ignore no-op state transitions.
 
-**Notes**: Another session is already working on parts of this fix set. This issue tracks the remaining websocket-launch gaps for the 2% breakout/breakdown live test.
+**Fix**:
+- Added durable alert-log checks for session lifecycle alerts.
+- Persisted feed transition state in `paper_feed_state.raw_state.alert_state`.
+- Suppressed duplicate pause/resume alerts on no-op state transitions.
+- Added tests covering feed stale/recovered dedup and session alert lookups.
 
 ---
 
@@ -401,6 +402,79 @@ first pass with a DuckDB binder error, so the sessions did not reach normal live
 **Fix**: Switched the live seeding query to `WHERE date = CAST(? AS DATE)`.
 
 **Required action**: Restart the live sessions so they pick up the corrected seeding query.
+
+---
+
+### ISSUE-019 — Live monitor output was buffered and grep pattern was too broad
+
+**Status**: ✅ FIXED — monitoring docs updated (`CLAUDE.md`, `STATUS.md`)
+**Severity**: Low (operator workflow / observability only)
+**Found**: 2026-04-22 (during the background live paper test)
+
+**Problem**: The live monitor recipe was missing from the repo docs, which made it easy to launch
+long-running jobs without unbuffered output or a line-buffered log tail. The first grep pattern
+was also too broad and matched routine Telegram HTTP chatter instead of the actual trade / bar /
+error lines.
+
+**Fix**: Documented the background launch recipe:
+- `PYTHONUNBUFFERED=1`
+- append stdout/stderr to `.tmp_logs/<run>.log`
+- monitor with `tail -f ... | grep --line-buffered -E "<tight pattern>"`
+
+**Required action**: Use the documented background launch + monitor recipe for all future live
+paper tests.
+
+---
+
+### ISSUE-020 — Concurrent live sessions contend on the single DuckDB writer
+
+**Status**: FIXED — multi-live runs breakout + breakdown in one writer process
+**Severity**: High (prevents two independent live sessions from running concurrently)
+**Found**: 2026-04-22 (during fresh breakout/breakdown relaunch after cleanup)
+
+**Problem**: Starting `2lynchbreakout` and `2lynchbreakdown` as separate live processes on the
+same `paper.duckdb` caused the second runner to retry on the DuckDB writer lock. The first runner
+started cleanly, but the second cannot become healthy until the first releases the writer.
+
+**Impact**:
+- Only one live paper process can hold the writer cleanly at a time.
+- A second concurrent launch spins in retry loops and risks alert spam / stale dashboard state.
+
+**Resolution**: Use `nseml-paper multi-live` so breakout and breakdown share one `PaperDB`,
+one websocket/feed adapter, and one alert dispatcher inside the same process.
+
+**Operator usage**:
+```bash
+doppler run -- uv run nseml-paper multi-live \
+  --strategy 2lynchbreakout \
+  --strategy 2lynchbreakdown \
+  --trade-date 2026-04-22
+```
+
+The single-session `daily-live` path remains available for debugging one strategy at a time.
+
+---
+
+### ISSUE-021 — Live feed alerts were keyed off empty poll cycles instead of real market-data gaps
+
+**Status**: ✅ FIXED — tick-age stale detection + CPR-style feed alert policy
+**Severity**: High (operator-alert noise during live sessions)
+**Found**: 2026-04-22 (during live 2% breakout / breakdown dry runs)
+
+**Problem**: The NSE live loop treated “no closed bars for 3 poll cycles” as `FEED_STALE`.
+In a 5-minute bar engine that is wrong: during normal operation there can be several poll cycles
+with no closed bar, especially right after session start. The result was false `FEED_STALE`
+followed by `FEED_RECOVERED` chatter in Telegram.
+
+**Fix**:
+- Switched stale detection to tick age / heartbeat age instead of closed-bar cadence.
+- Added CPR-style stale cooldown so feed oscillation does not repeatedly re-page Telegram.
+- Kept `TICKER_HEALTH` in logs for agent monitoring instead of pushing that telemetry into chat.
+- Upgraded feed alert bodies to include operator-useful context, including manual SL guidance for
+  open positions on stale alerts.
+
+**Operator outcome**: Telegram now carries feed transitions only when the market-data stream is
+actually stale, not just because a 5-minute bar has not closed yet.
 
 ---
 

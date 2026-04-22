@@ -25,6 +25,7 @@ from typing import Any
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db.market_db import MarketDataDB
 from nse_momentum_lab.db.versioned_replica_sync import DEFAULT_PAPER_TABLES, VersionedReplicaSync
+from nse_momentum_lab.services.kite.auth import KiteAuth
 from nse_momentum_lab.services.paper.db.paper_db import PaperDB
 from nse_momentum_lab.services.paper.engine.shared_engine import (
     PaperRuntimeState,
@@ -52,6 +53,7 @@ _POLL_INTERVAL = 1.0
 _CANDLE_INTERVAL = 5  # minutes
 _STALE_TIMEOUT = 300  # seconds
 _WEBSOCKET_RECOVERY_AFTER_SEC = 20.0
+_FEED_STALE_ALERT_COOLDOWN_SEC = 300.0
 
 
 def _build_alert_dispatcher(
@@ -87,11 +89,306 @@ def _resolve_kite_credentials(
     return resolved_api_key, resolved_access_token
 
 
+def _resolve_kite_instrument_map(symbols: list[str]) -> dict[str, int]:
+    """Resolve NSE symbols to Kite instrument tokens."""
+    auth = KiteAuth()
+    symbol_to_token: dict[str, int] = {}
+    missing: list[str] = []
+    for symbol in sorted({s.strip().upper() for s in symbols if s.strip()}):
+        token = auth.get_instrument_token(symbol, exchange="NSE")
+        if token is None:
+            missing.append(symbol)
+            continue
+        symbol_to_token[symbol] = int(token)
+    if missing:
+        logger.warning(
+            "Missing Kite instrument token(s) for %d/%d symbol(s): %s",
+            len(missing),
+            len(symbol_to_token) + len(missing),
+            ", ".join(sorted(missing)[:25]),
+        )
+    if not symbol_to_token:
+        raise RuntimeError("No Kite instrument tokens found for live session symbols")
+    return symbol_to_token
+
+
+def _sync_replica_after_write(
+    replica: VersionedReplicaSync, paper_db: PaperDB, *, force: bool = False
+) -> None:
+    """Mark the paper replica dirty and sync it after a DB write."""
+    replica.mark_dirty()
+    if force:
+        replica.force_sync(source_conn=paper_db.con)
+    else:
+        replica.maybe_sync(source_conn=paper_db.con)
+
+
+def _terminal_session_status(final_status: str, tracker: SessionPositionTracker | None) -> str:
+    """Map loop exit states to the DB session status contract."""
+    normalized = str(final_status or "").upper()
+    open_count = tracker.open_count if tracker is not None else 0
+    if normalized in {"COMPLETED", "NO_SYMBOLS"}:
+        return "COMPLETED"
+    if normalized == "STOPPING" and open_count == 0:
+        return "COMPLETED"
+    if normalized in {"CANCELLED", "FAILED"}:
+        return normalized
+    if normalized == "RISK_BREACH":
+        return "FAILED"
+    if normalized == "MAX_CYCLES":
+        return "COMPLETED"
+    return normalized or "FAILED"
+
+
+def _session_alert_already_sent(paper_db: PaperDB, session_id: str, alert_type: AlertType) -> bool:
+    try:
+        return paper_db.has_alert_log(session_id, str(alert_type.value), status="sent")
+    except Exception:
+        logger.debug(
+            "Failed to query alert_log dedup state session=%s alert=%s",
+            session_id,
+            alert_type,
+            exc_info=True,
+        )
+        return False
+
+
+def _feed_alert_state(feed_state: dict[str, Any] | None) -> dict[str, Any]:
+    raw_state = {}
+    if isinstance(feed_state, dict):
+        raw_state = feed_state.get("raw_state") or {}
+    if not isinstance(raw_state, dict):
+        raw_state = {}
+    alert_state = raw_state.get("alert_state") or {}
+    if not isinstance(alert_state, dict):
+        alert_state = {}
+    last_emitted_state = str(alert_state.get("last_emitted_state") or "").upper()
+    if last_emitted_state not in {"OK", "STALE"}:
+        feed_status = str((feed_state or {}).get("status", "")).upper()
+        alert_state["last_emitted_state"] = "STALE" if feed_status == "STALE" else "OK"
+    return alert_state
+
+
+def _feed_raw_state(alert_state: dict[str, Any]) -> dict[str, Any]:
+    return {"alert_state": dict(alert_state)}
+
+
+def _live_tick_feed_status(
+    *,
+    now_ts: float,
+    last_tick_ts: float | None,
+    stale_timeout_sec: float = _STALE_TIMEOUT,
+) -> tuple[str, bool, float | None]:
+    """Classify live feed health from tick age, not from closed-bar cadence."""
+    if last_tick_ts is None:
+        return "OK", False, None
+    tick_age_sec = max(0.0, float(now_ts) - float(last_tick_ts))
+    if tick_age_sec >= stale_timeout_sec:
+        return "STALE", True, tick_age_sec
+    return "OK", False, tick_age_sec
+
+
+def _build_open_position_manual_lines(tracker: SessionPositionTracker | None) -> list[str]:
+    if tracker is None:
+        return []
+    lines: list[str] = []
+    for symbol in sorted(tracker.open_symbols()):
+        tracked = tracker.get_open_position(symbol)
+        if tracked is None:
+            continue
+        target = f"{tracked.target_price:.2f}" if tracked.target_price is not None else "-"
+        lines.append(
+            f"{symbol} {tracked.direction} entry={tracked.entry_price:.2f} "
+            f"SL={tracked.stop_loss:.2f} tgt={target} qty={int(tracked.current_qty)}"
+        )
+    return lines
+
+
+def _format_feed_stale_details(
+    *,
+    transport: str,
+    streak: int,
+    tick_age_sec: float | None,
+    last_tick_ts: float | None,
+    tracker: SessionPositionTracker | None,
+) -> str:
+    last_tick = (
+        datetime.fromtimestamp(last_tick_ts, tz=UTC).isoformat()
+        if last_tick_ts is not None
+        else "none"
+    )
+    detail = f"transport={transport} streak={streak} last_tick={last_tick}"
+    if tick_age_sec is not None:
+        detail += f" tick_age={tick_age_sec:.0f}s"
+    open_pos_lines = _build_open_position_manual_lines(tracker)
+    if open_pos_lines:
+        return detail + "\nOPEN POSITIONS — place manual SL orders:\n" + "\n".join(open_pos_lines)
+    return detail + "\nNo open positions."
+
+
+def _format_feed_recovered_details(
+    *,
+    stale_cycles: int,
+    tracker: SessionPositionTracker | None,
+    reconnect_count: int | None = None,
+    down_duration_sec: float | None = None,
+) -> str:
+    parts = [f"Recovered after {stale_cycles} stale cycles."]
+    if down_duration_sec is not None:
+        parts.append(f"WebSocket recovered after {down_duration_sec:.0f}s down.")
+    if reconnect_count is not None:
+        parts.append(f"reconnects={reconnect_count}")
+    open_count = tracker.open_count if tracker is not None else 0
+    parts.append(f"Monitoring {open_count} position(s).")
+    return " ".join(parts)
+
+
+def _log_ticker_health(
+    *,
+    session_id: str,
+    ticker_adapter: Any,
+    active_symbols: list[str],
+) -> dict[str, Any] | None:
+    """Emit one structured line of ticker health telemetry for logs."""
+    if ticker_adapter is None or not hasattr(ticker_adapter, "health_stats"):
+        return None
+    try:
+        stats = ticker_adapter.health_stats() or {}
+        coverage = ticker_adapter.symbol_coverage(active_symbols, within_sec=_STALE_TIMEOUT) or {}
+    except Exception:
+        logger.debug("ticker health_stats failed", exc_info=True)
+        return None
+    logger.info(
+        "TICKER_HEALTH session=%s connected=%s ticks=%d last_tick_age=%s reconnects=%d subs=%d coverage=%.0f%% (%d/%d) stale=%d missing=%d",
+        session_id,
+        stats.get("connected"),
+        int(stats.get("tick_count", 0) or 0),
+        (
+            f"{float(stats['last_tick_age_sec']):.0f}s"
+            if stats.get("last_tick_age_sec") is not None
+            else "none"
+        ),
+        int(stats.get("reconnect_count", 0) or 0),
+        int(stats.get("subscribed_tokens", 0) or 0),
+        float(coverage.get("coverage_pct", 100.0) or 100.0),
+        int(coverage.get("covered", 0) or 0),
+        int(coverage.get("total", len(active_symbols)) or len(active_symbols)),
+        int(coverage.get("stale", 0) or 0),
+        int(coverage.get("missing", 0) or 0),
+    )
+    return {"stats": stats, "coverage": coverage}
+
+
+def _write_feed_state(
+    paper_db: PaperDB,
+    *,
+    session_id: str,
+    source: str,
+    mode: str,
+    status: str,
+    is_stale: bool,
+    subscription_count: int,
+    alert_state: dict[str, Any],
+    heartbeat_at: datetime | None = None,
+    last_quote_at: datetime | None = None,
+    last_tick_at: datetime | None = None,
+    last_bar_at: datetime | None = None,
+) -> dict[str, Any]:
+    return paper_db.upsert_feed_state(
+        session_id=session_id,
+        source=source,
+        mode=mode,
+        status=status,
+        is_stale=is_stale,
+        subscription_count=subscription_count,
+        heartbeat_at=heartbeat_at,
+        last_quote_at=last_quote_at,
+        last_tick_at=last_tick_at,
+        last_bar_at=last_bar_at,
+        raw_state=_feed_raw_state(alert_state),
+    )
+
+
+def _maybe_emit_feed_transition(
+    *,
+    paper_db: PaperDB,
+    session_id: str,
+    alert_dispatcher: AlertDispatcher,
+    alert_state: dict[str, Any],
+    next_state: str,
+    details: str,
+    now_ts: datetime | None = None,
+) -> bool:
+    """Emit a FEED_STALE/FEED_RECOVERED alert once per transition episode."""
+    normalized = str(next_state or "").strip().upper()
+    if normalized not in {"OK", "STALE"}:
+        return False
+
+    now_dt = now_ts or datetime.now(UTC)
+    current_state = str(alert_state.get("last_emitted_state") or "OK").upper()
+    if current_state == normalized:
+        return False
+    if normalized == "STALE":
+        last_stale_alert_at_raw = alert_state.get("last_stale_alert_at")
+        last_stale_alert_at: datetime | None = None
+        if isinstance(last_stale_alert_at_raw, str):
+            try:
+                last_stale_alert_at = datetime.fromisoformat(last_stale_alert_at_raw)
+            except ValueError:
+                last_stale_alert_at = None
+        if last_stale_alert_at is not None:
+            cooldown_elapsed = (now_dt - last_stale_alert_at).total_seconds()
+            if cooldown_elapsed < _FEED_STALE_ALERT_COOLDOWN_SEC:
+                return False
+
+    alert_type = AlertType.FEED_STALE if normalized == "STALE" else AlertType.FEED_RECOVERED
+    alert_dispatcher.enqueue(
+        AlertEvent(
+            alert_type=alert_type,
+            session_id=session_id,
+            subject=f"{alert_type.value}: {session_id}",
+            body=details,
+            level="warning" if alert_type == AlertType.FEED_STALE else "info",
+        )
+    )
+    alert_state["last_emitted_state"] = normalized
+    alert_state["last_transition_at"] = now_dt.isoformat()
+    if normalized == "STALE":
+        alert_state["last_stale_alert_at"] = now_dt.isoformat()
+    # Keep the durable marker on the feed row so process restarts do not repeat
+    # the same lifecycle alert for the same stale/healthy episode.
+    try:
+        feed_state = paper_db.get_feed_state(session_id) or {}
+        _write_feed_state(
+            paper_db,
+            session_id=session_id,
+            source=str(feed_state.get("source", "kite")),
+            mode=str(feed_state.get("mode", "paper")),
+            status=normalized,
+            is_stale=(normalized == "STALE"),
+            subscription_count=int(feed_state.get("subscription_count", 0) or 0),
+            alert_state=alert_state,
+            heartbeat_at=now_dt if normalized == "OK" else None,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to persist feed transition marker session=%s state=%s",
+            session_id,
+            normalized,
+            exc_info=True,
+        )
+    return True
+
+
 async def run_live_session(
     *,
     session_id: str,
     paper_db_path: str = "data/paper.duckdb",
     market_db_path: str = "data/market.duckdb",
+    paper_db: PaperDB | None = None,
+    market_db: MarketDataDB | None = None,
+    alert_dispatcher: AlertDispatcher | None = None,
+    replica: VersionedReplicaSync | None = None,
     ticker_adapter: KiteTickerAdapter | LocalTickerAdapter | None = None,
     api_key: str | None = None,
     access_token: str | None = None,
@@ -108,17 +405,33 @@ async def run_live_session(
             unhandled exceptions. Set to False when wrapping in a retry loop
             so positions survive across retries.
     """
-    paper_db = PaperDB(paper_db_path)
-    market_db = MarketDataDB(Path(market_db_path))
-    alert_dispatcher = _build_alert_dispatcher(paper_db, enabled=not no_alerts)
+    if paper_db is None:
+        paper_db = PaperDB(paper_db_path)
+        own_paper_db = True
+    else:
+        own_paper_db = False
+    if market_db is None:
+        market_db = MarketDataDB(Path(market_db_path))
+        own_market_db = True
+    else:
+        own_market_db = False
+    if alert_dispatcher is None:
+        alert_dispatcher = _build_alert_dispatcher(paper_db, enabled=not no_alerts)
+        own_alert_dispatcher = True
+    else:
+        own_alert_dispatcher = False
     paper_path = Path(paper_db_path)
-    replica = VersionedReplicaSync(
-        source_path=paper_path,
-        replica_dir=paper_path.parent / "paper_replica",
-        prefix="paper_replica",
-        min_interval_sec=5.0,
-        tables=DEFAULT_PAPER_TABLES,
-    )
+    if replica is None:
+        replica = VersionedReplicaSync(
+            source_path=paper_path,
+            replica_dir=paper_path.parent / "paper_replica",
+            prefix="paper_replica",
+            min_interval_sec=5.0,
+            tables=DEFAULT_PAPER_TABLES,
+        )
+        own_replica = True
+    else:
+        own_replica = False
 
     # Seed setup rows from market DB into runtime state.
     runtime_state = PaperRuntimeState()
@@ -128,6 +441,8 @@ async def run_live_session(
     final_status = "COMPLETED"
     created_adapter = False
     api_key, access_token = _resolve_kite_credentials(api_key, access_token)
+    feed_state = None
+    feed_alert_state: dict[str, Any] = {}
 
     try:
         # Load session.
@@ -161,16 +476,33 @@ async def run_live_session(
         await alert_dispatcher.start()
 
         # Dispatch session started alert (dedup-guarded for retry scenarios).
-        _started_key = f"SESSION_STARTED:{session_id}"
-        if _started_key not in runtime_state.alerts_sent:
-            runtime_state.alerts_sent.add(_started_key)
-            alert_dispatcher.enqueue(
-                AlertEvent(
-                    alert_type=AlertType.SESSION_STARTED,
-                    session_id=session_id,
-                    subject=f"Session {session_id} started",
-                    body=f"Strategy: {strategy}\nSymbols: {len(symbols)}\nDate: {trade_date}",
+        if not _session_alert_already_sent(paper_db, session_id, AlertType.SESSION_STARTED):
+            _started_key = f"SESSION_STARTED:{session_id}"
+            if _started_key not in runtime_state.alerts_sent:
+                runtime_state.alerts_sent.add(_started_key)
+                alert_dispatcher.enqueue(
+                    AlertEvent(
+                        alert_type=AlertType.SESSION_STARTED,
+                        session_id=session_id,
+                        subject=f"Session {session_id} started",
+                        body=f"Strategy: {strategy}\nSymbols: {len(symbols)}\nDate: {trade_date}",
+                    )
                 )
+        # Seed durable feed-alert state so stale/recovered alerts survive restarts.
+        feed_state = paper_db.get_feed_state(session_id)
+        feed_alert_state = _feed_alert_state(feed_state)
+        if "last_emitted_state" not in feed_alert_state:
+            feed_alert_state["last_emitted_state"] = "OK"
+        if feed_state is None:
+            _write_feed_state(
+                paper_db,
+                session_id=session_id,
+                source="replay" if local_feed else "kite",
+                mode="paper",
+                status="OK",
+                is_stale=False,
+                subscription_count=len(symbols),
+                alert_state=feed_alert_state,
             )
 
         # Setup engine state.
@@ -199,6 +531,7 @@ async def run_live_session(
             list(symbols),
             trade_date,
             direction=strategy_config.direction,
+            strategy_config=strategy_config,
             paper_db=paper_db,
             session_id=session_id,
         )
@@ -214,6 +547,9 @@ async def run_live_session(
         builder = FiveMinuteCandleBuilder(interval_minutes=_CANDLE_INTERVAL)
 
         if isinstance(ticker_adapter, KiteTickerAdapter):
+            instrument_map = _resolve_kite_instrument_map(symbols)
+            if instrument_map:
+                ticker_adapter.set_instrument_map(instrument_map)
             ticker_adapter.register_session(session_id, symbols, builder)
         else:
             ticker_adapter.register_session(session_id, symbols, builder)
@@ -242,14 +578,17 @@ async def run_live_session(
                 final_status = status
                 break
             if status == "PAUSED":
-                paper_db.upsert_feed_state(
+                _write_feed_state(
+                    paper_db,
                     session_id=session_id,
                     source="replay" if local_feed else "kite",
                     mode="paper",
                     status="PAUSED",
                     is_stale=False,
                     subscription_count=len(active_symbols),
+                    alert_state=feed_alert_state,
                 )
+                _sync_replica_after_write(replica, paper_db)
                 await asyncio.sleep(poll_interval)
                 cycles += 1
                 continue
@@ -271,6 +610,13 @@ async def run_live_session(
                     closed_candles = ticker_adapter.drain_closed(session_id)
                     last_bucket_start = current_bucket
 
+                    if isinstance(ticker_adapter, KiteTickerAdapter):
+                        _log_ticker_health(
+                            session_id=session_id,
+                            ticker_adapter=ticker_adapter,
+                            active_symbols=active_symbols,
+                        )
+
                     # WebSocket recovery watchdog.
                     if isinstance(ticker_adapter, KiteTickerAdapter):
                         recovery = ticker_adapter.recover_connection(
@@ -278,24 +624,33 @@ async def run_live_session(
                         )
                         if recovery["action"] == "recovered":
                             logger.info("WebSocket recovered")
-                            alert_dispatcher.enqueue(
-                                AlertEvent(
-                                    alert_type=AlertType.FEED_RECOVERED,
-                                    session_id=session_id,
-                                    subject=f"Feed recovered: {session_id}",
-                                    body="WebSocket reconnection successful",
-                                )
+                            _maybe_emit_feed_transition(
+                                paper_db=paper_db,
+                                session_id=session_id,
+                                alert_dispatcher=alert_dispatcher,
+                                alert_state=feed_alert_state,
+                                next_state="OK",
+                                details=_format_feed_recovered_details(
+                                    stale_cycles=no_snapshot_streak,
+                                    tracker=tracker,
+                                    reconnect_count=int(ticker_adapter.reconnect_count),
+                                    down_duration_sec=float(recovery.get("down_sec", 0) or 0),
+                                ),
+                                now_ts=datetime.fromtimestamp(now, tz=UTC),
                             )
                         elif recovery["action"] == "failed":
-                            alert_dispatcher.enqueue(
-                                AlertEvent(
-                                    alert_type=AlertType.SESSION_ERROR,
-                                    session_id=session_id,
-                                    subject=f"WebSocket recovery failed: {session_id}",
-                                    body=f"Error: {recovery.get('error', 'unknown')}",
-                                    level="error",
+                            if not _session_alert_already_sent(
+                                paper_db, session_id, AlertType.SESSION_ERROR
+                            ):
+                                alert_dispatcher.enqueue(
+                                    AlertEvent(
+                                        alert_type=AlertType.SESSION_ERROR,
+                                        session_id=session_id,
+                                        subject=f"WebSocket recovery failed: {session_id}",
+                                        body=f"Error: {recovery.get('error', 'unknown')}",
+                                        level="error",
+                                    )
                                 )
-                            )
 
             # Group by bar_end and process.
             if closed_candles:
@@ -351,11 +706,30 @@ async def run_live_session(
                     active_symbols = result["active_symbols"]
                     last_bar_ts = bar_end
                     closed_bars += 1
-                    replica.mark_dirty()
-                    replica.maybe_sync(source_conn=paper_db.con)
+
+                    _maybe_emit_feed_transition(
+                        paper_db=paper_db,
+                        session_id=session_id,
+                        alert_dispatcher=alert_dispatcher,
+                        alert_state=feed_alert_state,
+                        next_state="OK",
+                        details=_format_feed_recovered_details(
+                            stale_cycles=no_snapshot_streak,
+                            tracker=tracker,
+                            reconnect_count=(
+                                int(ticker_adapter.reconnect_count)
+                                if isinstance(ticker_adapter, KiteTickerAdapter)
+                                else None
+                            ),
+                        ),
+                        now_ts=datetime.fromtimestamp(bar_end, tz=UTC)
+                        if isinstance(bar_end, (int, float))
+                        else datetime.now(UTC),
+                    )
 
                     # Write feed heartbeat for dashboard visibility.
-                    paper_db.upsert_feed_state(
+                    _write_feed_state(
+                        paper_db,
                         session_id=session_id,
                         source="replay" if local_feed else "kite",
                         mode="paper",
@@ -365,7 +739,9 @@ async def run_live_session(
                         last_bar_ts=datetime.fromtimestamp(bar_end, tz=UTC)
                         if isinstance(bar_end, (int, float))
                         else None,
+                        alert_state=feed_alert_state,
                     )
+                    _sync_replica_after_write(replica, paper_db)
 
                     if result["should_complete"]:
                         final_status = "COMPLETED"
@@ -396,25 +772,96 @@ async def run_live_session(
             else:
                 # Stale detection (live only).
                 if not local_feed:
-                    no_snapshot_streak += 1
-                    # Write stale feed state for dashboard.
-                    paper_db.upsert_feed_state(
-                        session_id=session_id,
-                        source="kite",
-                        mode="paper",
-                        status="STALE",
-                        is_stale=True,
-                        subscription_count=len(active_symbols),
-                    )
-                    if no_snapshot_streak >= 3:
-                        alert_dispatcher.enqueue(
-                            AlertEvent(
-                                alert_type=AlertType.FEED_STALE,
-                                session_id=session_id,
-                                subject=f"Feed stale: {session_id}",
-                                body=f"No data for {no_snapshot_streak} cycles",
-                                level="warning",
-                            )
+                    live_status = "STALE"
+                    tick_age_sec: float | None = None
+                    if isinstance(ticker_adapter, KiteTickerAdapter):
+                        live_status, is_stale, tick_age_sec = _live_tick_feed_status(
+                            now_ts=now,
+                            last_tick_ts=ticker_adapter.last_tick_ts,
+                            stale_timeout_sec=_STALE_TIMEOUT,
+                        )
+                    else:
+                        is_stale = True
+                    if is_stale:
+                        no_snapshot_streak += 1
+                        _write_feed_state(
+                            paper_db,
+                            session_id=session_id,
+                            source="kite",
+                            mode="paper",
+                            status=live_status,
+                            is_stale=True,
+                            subscription_count=len(active_symbols),
+                            last_tick_at=datetime.fromtimestamp(ticker_adapter.last_tick_ts, tz=UTC)
+                            if isinstance(ticker_adapter, KiteTickerAdapter)
+                            and ticker_adapter.last_tick_ts is not None
+                            else None,
+                            last_bar_at=datetime.fromtimestamp(last_bar_ts, tz=UTC)
+                            if isinstance(last_bar_ts, (int, float))
+                            else None,
+                            alert_state=feed_alert_state,
+                        )
+                        _sync_replica_after_write(replica, paper_db)
+                    else:
+                        no_snapshot_streak = 0
+                        _maybe_emit_feed_transition(
+                            paper_db=paper_db,
+                            session_id=session_id,
+                            alert_dispatcher=alert_dispatcher,
+                            alert_state=feed_alert_state,
+                            next_state="OK",
+                            details=_format_feed_recovered_details(
+                                stale_cycles=no_snapshot_streak,
+                                tracker=tracker,
+                                reconnect_count=(
+                                    int(ticker_adapter.reconnect_count)
+                                    if isinstance(ticker_adapter, KiteTickerAdapter)
+                                    else None
+                                ),
+                            ),
+                            now_ts=datetime.fromtimestamp(now, tz=UTC),
+                        )
+                        # Live heartbeat: keep the dashboard replica current even when
+                        # no 5-minute bar has closed yet.
+                        _write_feed_state(
+                            paper_db,
+                            session_id=session_id,
+                            source="kite",
+                            mode="paper",
+                            status="OK",
+                            is_stale=False,
+                            subscription_count=len(active_symbols),
+                            heartbeat_at=datetime.fromtimestamp(now, tz=UTC),
+                            last_tick_at=datetime.fromtimestamp(ticker_adapter.last_tick_ts, tz=UTC)
+                            if isinstance(ticker_adapter, KiteTickerAdapter)
+                            and ticker_adapter.last_tick_ts is not None
+                            else None,
+                            last_bar_at=datetime.fromtimestamp(last_bar_ts, tz=UTC)
+                            if isinstance(last_bar_ts, (int, float))
+                            else None,
+                            alert_state=feed_alert_state,
+                        )
+                        _sync_replica_after_write(replica, paper_db)
+                    if is_stale and no_snapshot_streak >= 3:
+                        details = _format_feed_stale_details(
+                            transport="websocket",
+                            streak=no_snapshot_streak,
+                            tick_age_sec=tick_age_sec,
+                            last_tick_ts=(
+                                ticker_adapter.last_tick_ts
+                                if isinstance(ticker_adapter, KiteTickerAdapter)
+                                else None
+                            ),
+                            tracker=tracker,
+                        )
+                        _maybe_emit_feed_transition(
+                            paper_db=paper_db,
+                            session_id=session_id,
+                            alert_dispatcher=alert_dispatcher,
+                            alert_state=feed_alert_state,
+                            next_state="STALE",
+                            details=details,
+                            now_ts=datetime.fromtimestamp(now, tz=UTC),
                         )
 
             await asyncio.sleep(poll_interval)
@@ -430,7 +877,8 @@ async def run_live_session(
                     if tracked:
                         tracker.record_close(symbol, tracked.entry_price * tracked.current_qty)
 
-        await complete_session(session_id=session_id, paper_db=paper_db, status=final_status)
+        db_status = _terminal_session_status(final_status, tracker)
+        await complete_session(session_id=session_id, paper_db=paper_db, status=db_status)
         replica.force_sync(source_conn=paper_db.con)
 
         # Dispatch DAILY_PNL_SUMMARY with realized + unrealized breakdown (swing-trading daily scorecard).
@@ -445,14 +893,15 @@ async def run_live_session(
             mark_prices=last_close_prices,
         )
 
-        alert_dispatcher.enqueue(
-            AlertEvent(
-                alert_type=AlertType.SESSION_COMPLETED,
-                session_id=session_id,
-                subject=f"Session {session_id} completed: {final_status}",
-                body=f"Bars: {closed_bars}\nCycles: {cycles}",
+        if not _session_alert_already_sent(paper_db, session_id, AlertType.SESSION_COMPLETED):
+            alert_dispatcher.enqueue(
+                AlertEvent(
+                    alert_type=AlertType.SESSION_COMPLETED,
+                    session_id=session_id,
+                    subject=f"Session {session_id} completed: {final_status}",
+                    body=f"Bars: {closed_bars}\nCycles: {cycles}",
+                )
             )
-        )
 
         logger.info(
             "Session complete id=%s status=%s bars=%d cycles=%d",
@@ -486,7 +935,8 @@ async def run_live_session(
     finally:
         # Final sync before teardown.
         try:
-            replica.force_sync(source_conn=paper_db.con)
+            if own_replica:
+                replica.force_sync(source_conn=paper_db.con)
         except Exception:
             logger.debug("Final replica sync failed — ignoring")
         # Teardown.
@@ -494,15 +944,19 @@ async def run_live_session(
             ticker_adapter.unregister_session(session_id)
             if created_adapter:
                 ticker_adapter.close()
-        await alert_dispatcher.shutdown()
+        if own_alert_dispatcher:
+            await alert_dispatcher.shutdown()
         # Purge old feed audit rows (retention housekeeping).
         try:
-            retention = get_settings().feed_audit_retention_days
-            paper_db.purge_old_feed_audit_rows(retention)
+            if own_paper_db:
+                retention = get_settings().feed_audit_retention_days
+                paper_db.purge_old_feed_audit_rows(retention)
         except Exception:
             logger.exception("feed_audit: purge failed session=%s", session_id)
-        paper_db.close()
-        market_db.close()
+        if own_paper_db:
+            paper_db.close()
+        if own_market_db:
+            market_db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -543,11 +997,16 @@ async def run_live_session_with_retry(
     session_id: str,
     paper_db_path: str = "data/paper.duckdb",
     market_db_path: str = "data/market.duckdb",
+    paper_db: PaperDB | None = None,
+    market_db: MarketDataDB | None = None,
+    alert_dispatcher: AlertDispatcher | None = None,
+    replica: VersionedReplicaSync | None = None,
     api_key: str | None = None,
     access_token: str | None = None,
     poll_interval: float = _POLL_INTERVAL,
     max_cycles: int | None = None,
     no_alerts: bool = False,
+    ticker_adapter: KiteTickerAdapter | None = None,
     max_retries: int = _RETRY_MAX,
 ) -> dict[str, Any]:
     """Run a live session with automatic retry on transient failures.
@@ -557,7 +1016,6 @@ async def run_live_session_with_retry(
     Only the final exhaustion (all retries used) triggers flatten-on-error.
     """
     result: dict[str, Any] = {}
-    ticker_adapter: KiteTickerAdapter | None = None
     alerts_sent: set[str] = set()
 
     for attempt in range(1, max_retries + 1):
@@ -568,6 +1026,10 @@ async def run_live_session_with_retry(
                 session_id=session_id,
                 paper_db_path=paper_db_path,
                 market_db_path=market_db_path,
+                paper_db=paper_db,
+                market_db=market_db,
+                alert_dispatcher=alert_dispatcher,
+                replica=replica,
                 ticker_adapter=ticker_adapter,
                 api_key=api_key,
                 access_token=access_token,
@@ -600,6 +1062,126 @@ async def run_live_session_with_retry(
     return result
 
 
+async def run_live_session_group(
+    *,
+    session_ids: list[str],
+    paper_db_path: str = "data/paper.duckdb",
+    market_db_path: str = "data/market.duckdb",
+    api_key: str | None = None,
+    access_token: str | None = None,
+    poll_interval: float = _POLL_INTERVAL,
+    max_cycles: int | None = None,
+    no_alerts: bool = False,
+    max_retries: int = _RETRY_MAX,
+) -> dict[str, dict[str, Any]]:
+    """Run multiple live sessions in one process with shared DB/feed resources.
+
+    This is the CPR-style orchestration path: one writer process, one websocket,
+    one alert dispatcher, many session contexts.
+    """
+    if not session_ids:
+        return {}
+
+    paper_db = PaperDB(paper_db_path)
+    market_db = MarketDataDB(Path(market_db_path))
+    alert_dispatcher = _build_alert_dispatcher(paper_db, enabled=not no_alerts)
+    paper_path = Path(paper_db_path)
+    resolved_api_key, resolved_access_token = _resolve_kite_credentials(api_key, access_token)
+    replica = VersionedReplicaSync(
+        source_path=paper_path,
+        replica_dir=paper_path.parent / "paper_replica",
+        prefix="paper_replica",
+        min_interval_sec=5.0,
+        tables=DEFAULT_PAPER_TABLES,
+    )
+    shared_adapter = KiteTickerAdapter(api_key=resolved_api_key, access_token=resolved_access_token)
+    initial_results: dict[str, dict[str, Any]] = {}
+    valid_session_ids: list[str] = []
+    all_symbols: list[str] = []
+    for session_id in session_ids:
+        session = paper_db.get_session(session_id)
+        if session is None:
+            initial_results[session_id] = {
+                "error": f"Session {session_id} not found",
+                "session_id": session_id,
+            }
+            continue
+        valid_session_ids.append(session_id)
+        all_symbols.extend(list(session.get("symbols") or []))
+
+    if not valid_session_ids:
+        try:
+            await alert_dispatcher.start()
+        finally:
+            await alert_dispatcher.shutdown()
+            paper_db.close()
+            market_db.close()
+        return initial_results
+
+    instrument_map = _resolve_kite_instrument_map(all_symbols)
+    if instrument_map:
+        shared_adapter.set_instrument_map(instrument_map)
+    try:
+        shared_adapter.connect()
+    except Exception:
+        logger.exception("Failed to connect shared Kite websocket for multi-session run")
+        raise
+
+    tasks: list[asyncio.Task[dict[str, Any]]] = []
+    try:
+        await alert_dispatcher.start()
+        for session_id in valid_session_ids:
+            tasks.append(
+                asyncio.create_task(
+                    run_live_session_with_retry(
+                        session_id=session_id,
+                        paper_db_path=paper_db_path,
+                        market_db_path=market_db_path,
+                        paper_db=paper_db,
+                        market_db=market_db,
+                        alert_dispatcher=alert_dispatcher,
+                        replica=replica,
+                        ticker_adapter=shared_adapter,
+                        api_key=api_key,
+                        access_token=access_token,
+                        poll_interval=poll_interval,
+                        max_cycles=max_cycles,
+                        no_alerts=no_alerts,
+                        max_retries=max_retries,
+                    )
+                )
+            )
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        grouped: dict[str, dict[str, Any]] = dict(initial_results)
+        for session_id, result in zip(valid_session_ids, results, strict=True):
+            if isinstance(result, Exception):
+                grouped[session_id] = {"error": str(result), "session_id": session_id}
+            else:
+                grouped[session_id] = result
+        return grouped
+    finally:
+        try:
+            replica.force_sync(source_conn=paper_db.con)
+        except Exception:
+            logger.debug("Multi-session replica sync failed — ignoring")
+        try:
+            await alert_dispatcher.shutdown()
+        except Exception:
+            logger.debug("Multi-session alert dispatcher shutdown failed", exc_info=True)
+        try:
+            shared_adapter.close()
+        except Exception:
+            logger.debug("Multi-session adapter close failed", exc_info=True)
+        try:
+            retention = get_settings().feed_audit_retention_days
+            paper_db.purge_old_feed_audit_rows(retention)
+        except Exception:
+            logger.exception("feed_audit: purge failed for multi-session run")
+        paper_db.close()
+        market_db.close()
+
+
 def _dispatch_daily_pnl_summary(
     *,
     alert_dispatcher: AlertDispatcher,
@@ -613,6 +1195,8 @@ def _dispatch_daily_pnl_summary(
 ) -> None:
     """Compute and enqueue DAILY_PNL_SUMMARY with realized + unrealized breakdown."""
     if not alert_dispatcher._enabled:
+        return
+    if paper_db.has_alert_log(session_id, AlertType.DAILY_PNL_SUMMARY.value, status="sent"):
         return
     # Dedup guard: only send once per session per invocation.
     _summary_key = f"DAILY_PNL_SUMMARY:{session_id}"

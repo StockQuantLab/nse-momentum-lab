@@ -69,6 +69,25 @@ class VersionedReplicaConsumer:
             self._reconnect_if_stale()
             return self._conn
 
+    def get_latest_version(self) -> int | None:
+        """Return the newest replica version visible from the pointer or disk scan."""
+        with self._lock:
+            latest_version = self._read_pointer_version()
+            if latest_version is None:
+                latest_version = self._scan_latest_version()
+            return latest_version
+
+    def get_replica_path(self) -> Path | None:
+        """Return the latest replica file path visible to the dashboard, if any."""
+        with self._lock:
+            latest_version = self._read_pointer_version()
+            if latest_version is None:
+                latest_version = self._scan_latest_version()
+            if latest_version is None:
+                return None
+            path = self._version_path(latest_version)
+            return path if path.exists() else None
+
     def execute(self, sql: str, parameters: list[Any] | None = None) -> list[dict[str, Any]] | None:
         """Execute SQL against the replica; returns rows as list of dicts.
 
@@ -92,7 +111,9 @@ class VersionedReplicaConsumer:
 
     def get_stale_seconds(self) -> float:
         """Return seconds since the current replica file was last modified."""
-        path = self._current_version_path()
+        path = self.get_replica_path()
+        if path is None:
+            path = self._current_version_path()
         if path is None:
             return float("inf")
         try:

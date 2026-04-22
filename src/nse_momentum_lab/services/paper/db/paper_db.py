@@ -2039,6 +2039,34 @@ class PaperDB:
         )
         return [_serialize_alert_log(r) for r in rows]
 
+    def has_alert_log(
+        self,
+        session_id: str,
+        alert_type: str,
+        *,
+        status: str | None = None,
+        channel: str | None = None,
+    ) -> bool:
+        """Return True if an alert of this type was already logged for the session.
+
+        This is used as a durable dedup guard for session lifecycle notifications
+        so restarts/retries do not re-emit the same transition.
+        """
+        sql = "SELECT 1 FROM alert_log WHERE session_id = $1 AND alert_type = $2"
+        params: list[Any] = [session_id, alert_type]
+        idx = 3
+        if status is not None:
+            sql += f" AND status = ${idx}"
+            params.append(status)
+            idx += 1
+        if channel is not None:
+            sql += f" AND channel = ${idx}"
+            params.append(channel)
+            idx += 1
+        sql += " LIMIT 1"
+        row = self._query_one(sql, params)
+        return row is not None
+
     # ===================================================================
     # Signal state transitions: QUALIFY / ALERT
     # ===================================================================

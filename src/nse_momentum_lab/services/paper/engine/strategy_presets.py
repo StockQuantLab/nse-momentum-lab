@@ -161,7 +161,10 @@ def get_paper_strategy_config(
     }
     for k, v in overrides.items():
         if k in fields:
-            fields[k] = type(fields[k])(v) if fields[k] is not None else v
+            if v is None:
+                fields[k] = None
+            else:
+                fields[k] = type(fields[k])(v) if fields[k] is not None else v
         else:
             params[k] = v
 

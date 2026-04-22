@@ -7,6 +7,7 @@ Commands:
     nseml-paper-v2 prepare       — Create/resume a paper session in DuckDB
     nseml-paper-v2 replay        — Replay historical candles through the engine
     nseml-paper-v2 live          — Run a live paper session with Kite WebSocket
+    nseml-paper-v2 multi-live    — Run multiple live sessions in one writer process
     nseml-paper-v2 plan          — Plan multi-variant sessions
     nseml-paper-v2 status        — Show session status
     nseml-paper-v2 stop          — Stop (mark COMPLETED) a running session
@@ -25,10 +26,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import json
 import logging
 import sys
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,78 @@ def _run_async(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _serialize_strategy_params(
+    config: Any,
+    *,
+    preset_name: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist a paper strategy config in session.strategy_params."""
+    payload = dict(dataclasses.asdict(config))
+    extra = dict(payload.pop("extra_params", {}) or {})
+    if preset_name:
+        payload["preset_name"] = preset_name
+    for key, value in (metadata or {}).items():
+        if key not in payload:
+            extra[key] = value
+    if extra:
+        payload["extra_params"] = extra
+    return payload
+
+
+def _load_default_symbols(market_db_path: str, trade_date: date) -> list[str]:
+    """Default to the latest available full daily universe at or before trade_date."""
+    from nse_momentum_lab.db.market_db import MarketDataDB
+
+    market_db = MarketDataDB(Path(market_db_path), read_only=True)
+    try:
+        rows = market_db.con.execute(
+            """
+            WITH ref_day AS (
+                SELECT max(date) AS ref_date
+                FROM v_daily
+                WHERE date <= $1
+            )
+            SELECT DISTINCT symbol
+            FROM v_daily
+            WHERE date = (SELECT ref_date FROM ref_day)
+            ORDER BY symbol
+            """,
+            [trade_date],
+        ).fetchall()
+        return [str(row[0]) for row in rows if row and row[0]]
+    finally:
+        market_db.close()
+
+
+def _find_matching_resumable_session(
+    db: Any,
+    *,
+    strategy_name: str,
+    trade_date: date,
+    mode: str,
+    preset_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Find a resumable session, matching preset identity when provided."""
+    resumable = {"PLANNED", "ACTIVE", "PAUSED", "RUNNING"}
+    sessions = db.list_sessions(limit=200)
+    for session in sessions:
+        if str(session.get("status", "")).upper() not in resumable:
+            continue
+        if session.get("strategy_name") != strategy_name:
+            continue
+        if session.get("mode") != mode:
+            continue
+        if session.get("trade_date") != trade_date.isoformat():
+            continue
+        if preset_name is not None:
+            strategy_params = session.get("strategy_params") or {}
+            if strategy_params.get("preset_name") != preset_name:
+                continue
+        return session
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
@@ -66,17 +141,19 @@ def _run_async(coro: Any) -> Any:
 
 def _cmd_prepare(args: argparse.Namespace) -> None:
     """Create a new paper session in DuckDB, or return an existing resumable one."""
+    from nse_momentum_lab.services.backtest.backtest_presets import build_params_from_preset
+    from nse_momentum_lab.services.backtest.engine import PositionSide
     from nse_momentum_lab.services.paper.db.paper_db import PaperDB
     from nse_momentum_lab.services.paper.engine.shared_engine import resolve_strategy_key
+    from nse_momentum_lab.services.paper.paper_backtest_bridge import build_paper_config_from_preset
 
-    strategy = resolve_strategy_key(args.strategy)
     mode = getattr(args, "mode", "replay") or "replay"
     trade_date = (
         args.trade_date
         if isinstance(args.trade_date, date)
         else (date.fromisoformat(args.trade_date) if args.trade_date else date.today())
     )
-    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()] if args.symbols else []
+    raw_symbols = [s.strip() for s in args.symbols.split(",") if s.strip()] if args.symbols else []
     risk_config = _parse_json(args.risk_config) or {
         "portfolio_value": args.portfolio_value,
         "max_daily_loss_pct": 0.05,
@@ -85,12 +162,35 @@ def _cmd_prepare(args: argparse.Namespace) -> None:
         "slippage_bps": 5.0,
     }
     metadata = _parse_json(args.metadata)
+    preset_name = getattr(args, "preset", None)
+
+    if preset_name:
+        params = build_params_from_preset(preset_name)
+        direction = (
+            PositionSide.SHORT if "breakdown" in str(params.strategy).lower() else PositionSide.LONG
+        )
+        strategy_config = build_paper_config_from_preset(preset_name, direction)
+        strategy = strategy_config.strategy_key
+        strategy_params = _serialize_strategy_params(
+            strategy_config,
+            preset_name=preset_name,
+            metadata=metadata,
+        )
+    else:
+        strategy = resolve_strategy_key(args.strategy)
+        strategy_params = metadata
+
+    symbols = raw_symbols or _load_default_symbols(args.market_db, trade_date)
 
     db = PaperDB(args.paper_db)
     try:
         # Idempotent: return existing resumable session rather than creating a duplicate.
-        existing = db.find_resumable_session(
-            strategy_name=strategy, trade_date=trade_date, mode=mode
+        existing = _find_matching_resumable_session(
+            db,
+            strategy_name=strategy,
+            trade_date=trade_date,
+            mode=mode,
+            preset_name=preset_name,
         )
         if existing is not None:
             session_id = existing["session_id"]
@@ -108,6 +208,7 @@ def _cmd_prepare(args: argparse.Namespace) -> None:
                         "session_id": session_id,
                         "strategy": strategy,
                         "symbols": len(existing.get("symbols") or []),
+                        "preset": preset_name,
                         "resumed": True,
                         "status": existing.get("status"),
                     }
@@ -122,7 +223,7 @@ def _cmd_prepare(args: argparse.Namespace) -> None:
             status="PLANNED",
             symbols=symbols,
             risk_config=risk_config,
-            strategy_params=metadata,
+            strategy_params=strategy_params,
             notes=None,
         )
         session_id = session["session_id"]
@@ -131,6 +232,7 @@ def _cmd_prepare(args: argparse.Namespace) -> None:
                 {
                     "session_id": session_id,
                     "strategy": strategy,
+                    "preset": preset_name,
                     "symbols": len(symbols),
                     "resumed": False,
                 }
@@ -227,6 +329,57 @@ def _cmd_live(args: argparse.Namespace) -> None:
     )
     print(json.dumps(result, default=str))
     sys.exit(0 if "error" not in result else 1)
+
+
+def _resolve_session_ids(
+    args: argparse.Namespace,
+    db_path: str,
+    *,
+    mode: str,
+    trade_date: str | None = None,
+) -> list[str]:
+    """Resolve explicit session_ids or auto-discover one session per strategy."""
+    session_ids = list(getattr(args, "session_ids", None) or [])
+    if session_ids:
+        return session_ids
+
+    strategies = list(getattr(args, "strategies", None) or [])
+    if not strategies:
+        strategies = ["2lynchbreakout", "2lynchbreakdown"]
+
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for strategy_raw in strategies:
+        session_id = _resolve_session_id(
+            argparse.Namespace(session_id=None, strategy=strategy_raw, trade_date=trade_date),
+            db_path,
+            mode=mode,
+            trade_date=trade_date,
+        )
+        if session_id not in seen:
+            resolved.append(session_id)
+            seen.add(session_id)
+    return resolved
+
+
+def _cmd_multi_live(args: argparse.Namespace) -> None:
+    """Run multiple live sessions inside one process and one DuckDB writer."""
+    from nse_momentum_lab.services.paper.scripts.paper_live import run_live_session_group
+
+    trade_date = getattr(args, "trade_date", None) or str(date.today())
+    session_ids = _resolve_session_ids(args, args.paper_db, mode="live", trade_date=trade_date)
+    result = _run_async(
+        run_live_session_group(
+            session_ids=session_ids,
+            paper_db_path=args.paper_db,
+            market_db_path=args.market_db,
+            poll_interval=args.poll_interval,
+            max_cycles=args.max_cycles,
+            no_alerts=getattr(args, "no_alerts", False),
+        )
+    )
+    print(json.dumps(result, default=str))
+    sys.exit(0 if all("error" not in v for v in result.values()) else 1)
 
 
 def _cmd_plan(args: argparse.Namespace) -> None:
@@ -327,29 +480,35 @@ def _cmd_pause(args: argparse.Namespace) -> None:
     )
     db = PaperDB(args.paper_db)
     try:
-        db.update_session(session_id, status="PAUSED")
-        # Dispatch session paused alert.
-        try:
-            config = get_alert_config()
-            dispatcher = AlertDispatcher(paper_db=db, config=config)
-            import asyncio
+        current = db.get_session(session_id)
+        if current is None:
+            print("{}")
+            return
+        status_before = str(current.get("status", "")).upper()
+        if status_before != "PAUSED":
+            db.update_session(session_id, status="PAUSED")
+            # Dispatch session paused alert.
+            try:
+                config = get_alert_config()
+                dispatcher = AlertDispatcher(paper_db=db, config=config)
+                import asyncio
 
-            async def _send():
-                await dispatcher.start()
-                subject, body = format_session_alert(session_id=session_id, event="PAUSED")
-                dispatcher.enqueue(
-                    AlertEvent(
-                        alert_type=AlertType.SESSION_PAUSED,
-                        session_id=session_id,
-                        subject=subject,
-                        body=body,
+                async def _send():
+                    await dispatcher.start()
+                    subject, body = format_session_alert(session_id=session_id, event="PAUSED")
+                    dispatcher.enqueue(
+                        AlertEvent(
+                            alert_type=AlertType.SESSION_PAUSED,
+                            session_id=session_id,
+                            subject=subject,
+                            body=body,
+                        )
                     )
-                )
-                await dispatcher.shutdown()
+                    await dispatcher.shutdown()
 
-            asyncio.run(_send())
-        except Exception:
-            pass  # Alert is best-effort, don't block the command.
+                asyncio.run(_send())
+            except Exception:
+                pass  # Alert is best-effort, don't block the command.
         print(json.dumps({"session_id": session_id, "status": "PAUSED"}))
     finally:
         db.close()
@@ -371,29 +530,35 @@ def _cmd_resume(args: argparse.Namespace) -> None:
     )
     db = PaperDB(args.paper_db)
     try:
-        db.update_session(session_id, status="ACTIVE")
-        # Dispatch session resumed alert.
-        try:
-            config = get_alert_config()
-            dispatcher = AlertDispatcher(paper_db=db, config=config)
-            import asyncio
+        current = db.get_session(session_id)
+        if current is None:
+            print("{}")
+            return
+        status_before = str(current.get("status", "")).upper()
+        if status_before != "ACTIVE":
+            db.update_session(session_id, status="ACTIVE")
+            # Dispatch session resumed alert.
+            try:
+                config = get_alert_config()
+                dispatcher = AlertDispatcher(paper_db=db, config=config)
+                import asyncio
 
-            async def _send():
-                await dispatcher.start()
-                subject, body = format_session_alert(session_id=session_id, event="RESUMED")
-                dispatcher.enqueue(
-                    AlertEvent(
-                        alert_type=AlertType.SESSION_RESUMED,
-                        session_id=session_id,
-                        subject=subject,
-                        body=body,
+                async def _send():
+                    await dispatcher.start()
+                    subject, body = format_session_alert(session_id=session_id, event="RESUMED")
+                    dispatcher.enqueue(
+                        AlertEvent(
+                            alert_type=AlertType.SESSION_RESUMED,
+                            session_id=session_id,
+                            subject=subject,
+                            body=body,
+                        )
                     )
-                )
-                await dispatcher.shutdown()
+                    await dispatcher.shutdown()
 
-            asyncio.run(_send())
-        except Exception:
-            pass  # Alert is best-effort, don't block the command.
+                asyncio.run(_send())
+            except Exception:
+                pass  # Alert is best-effort, don't block the command.
         print(json.dumps({"session_id": session_id, "status": "ACTIVE"}))
     finally:
         db.close()
@@ -571,6 +736,9 @@ def build_parser() -> argparse.ArgumentParser:
     prepare = sub.add_parser("prepare", help="Create a new paper session")
     prepare.add_argument("--strategy", default="2lynchbreakout")
     prepare.add_argument(
+        "--preset", default=None, help="Canonical backtest preset, e.g. BREAKOUT_2PCT"
+    )
+    prepare.add_argument(
         "--mode", default="replay", choices=["replay", "live"], help="Session mode"
     )
     prepare.add_argument("--trade-date", default=None, help="YYYY-MM-DD")
@@ -617,6 +785,37 @@ def build_parser() -> argparse.ArgumentParser:
     live.add_argument("--max-cycles", type=int, default=None)
     live.add_argument("--no-alerts", action="store_true", help="Disable Telegram/email alerts")
     live.set_defaults(handler=_cmd_live)
+
+    # multi-live
+    multi_live = sub.add_parser(
+        "multi-live",
+        help="Run multiple live sessions in one writer process",
+    )
+    multi_live.add_argument(
+        "--session-id",
+        dest="session_ids",
+        action="append",
+        default=[],
+        help="Explicit session ID (repeatable)",
+    )
+    multi_live.add_argument(
+        "--strategy",
+        dest="strategies",
+        action="append",
+        default=[],
+        help="Strategy key to auto-discover (repeatable)",
+    )
+    multi_live.add_argument(
+        "--trade-date",
+        default=None,
+        help="YYYY-MM-DD used to auto-discover live sessions (default: today)",
+    )
+    multi_live.add_argument("--poll-interval", type=float, default=1.0)
+    multi_live.add_argument("--max-cycles", type=int, default=None)
+    multi_live.add_argument(
+        "--no-alerts", action="store_true", help="Disable Telegram/email alerts"
+    )
+    multi_live.set_defaults(handler=_cmd_multi_live)
 
     # plan
     plan = sub.add_parser("plan", help="Plan multi-variant sessions")
@@ -693,6 +892,9 @@ def build_parser() -> argparse.ArgumentParser:
     # daily-prepare
     daily_prepare = sub.add_parser("daily-prepare", help="Prepare today's paper session")
     daily_prepare.add_argument("--strategy", default="2lynchbreakout")
+    daily_prepare.add_argument(
+        "--preset", default=None, help="Canonical backtest preset, e.g. BREAKOUT_2PCT"
+    )
     daily_prepare.add_argument("--mode", default="replay", choices=["replay", "live"])
     daily_prepare.add_argument("--symbols", default="", help="Comma-separated symbols")
     daily_prepare.add_argument("--portfolio-value", type=float, default=1_000_000)

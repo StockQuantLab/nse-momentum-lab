@@ -573,6 +573,275 @@ async def compare_page() -> None:
 
                 divider()
 
+            # ── Direction Performance ────────────────────────────────────
+            def _derive_direction(exp: dict) -> str:
+                sn = (exp.get("strategy_name") or "").lower()
+                if "breakout" in sn:
+                    return "LONG"
+                if "breakdown" in sn:
+                    return "SHORT"
+                return "MIXED"
+
+            dir_a = _derive_direction(exp1)
+            dir_b = _derive_direction(exp2)
+
+            ui.label("Direction Performance").classes("text-base font-semibold mb-3").style(
+                f"color: {theme_text_primary()};"
+            )
+
+            # Color-coded direction badges
+            with ui.row().classes("items-center gap-4 mb-3"):
+                dir_a_color = color_success() if dir_a == "LONG" else color_error()
+                dir_b_color = color_success() if dir_b == "LONG" else color_error()
+                ui.label(f"Exp A ({s1}):").classes("text-sm").style(
+                    f"color: {theme_text_secondary()};"
+                )
+                ui.badge(dir_a, color=dir_a_color).props("outline")
+                ui.label(f"Exp B ({s2}):").classes("text-sm ml-4").style(
+                    f"color: {theme_text_secondary()};"
+                )
+                ui.badge(dir_b, color=dir_b_color).props("outline")
+
+            if dir_a != dir_b:
+                ui.label(
+                    "These strategies trade in opposite directions — direct comparison "
+                    "shows how each side of the market performs independently."
+                ).classes("text-sm mb-3").style(f"color: {theme_text_secondary()};")
+
+            # Per-direction trade stats
+            def _direction_stats(df: pl.DataFrame, direction: str) -> dict:
+                if df.is_empty() or "net_pnl" not in df.columns:
+                    return {}
+                total = df.height
+                wins = int((df["net_pnl"] > 0).sum())
+                return {
+                    "direction": direction,
+                    "trades": total,
+                    "wins": wins,
+                    "losses": total - wins,
+                    "win_rate": wins / max(total, 1) * 100,
+                    "avg_pnl": float(df["pnl_pct"].mean()) if "pnl_pct" in df.columns else 0,
+                    "avg_r": float(df["pnl_r"].mean()) if "pnl_r" in df.columns else 0,
+                    "total_pnl": float(df["net_pnl"].sum()),
+                }
+
+            ds1 = _direction_stats(trades1, dir_a)
+            ds2 = _direction_stats(trades2, dir_b)
+
+            dir_rows = [
+                {
+                    "metric": "Direction",
+                    "run_a": ds1.get("direction", "-"),
+                    "run_b": ds2.get("direction", "-"),
+                    "delta": "",
+                },
+                {
+                    "metric": "Trades",
+                    "run_a": f"{ds1.get('trades', 0):,}",
+                    "run_b": f"{ds2.get('trades', 0):,}",
+                    "delta": f"{ds2.get('trades', 0) - ds1.get('trades', 0):+,}",
+                },
+                {
+                    "metric": "Win Rate",
+                    "run_a": f"{ds1.get('win_rate', 0):.1f}%",
+                    "run_b": f"{ds2.get('win_rate', 0):.1f}%",
+                    "delta": f"{ds2.get('win_rate', 0) - ds1.get('win_rate', 0):+.1f}%",
+                },
+                {
+                    "metric": "Avg P/L %",
+                    "run_a": f"{ds1.get('avg_pnl', 0):.2f}%",
+                    "run_b": f"{ds2.get('avg_pnl', 0):.2f}%",
+                    "delta": f"{ds2.get('avg_pnl', 0) - ds1.get('avg_pnl', 0):+.2f}%",
+                },
+                {
+                    "metric": "Avg R",
+                    "run_a": f"{ds1.get('avg_r', 0):.2f}",
+                    "run_b": f"{ds2.get('avg_r', 0):.2f}",
+                    "delta": f"{ds2.get('avg_r', 0) - ds1.get('avg_r', 0):+.2f}",
+                },
+                {
+                    "metric": "Total P/L",
+                    "run_a": f"₹{ds1.get('total_pnl', 0):,.0f}",
+                    "run_b": f"₹{ds2.get('total_pnl', 0):,.0f}",
+                    "delta": f"₹{ds2.get('total_pnl', 0) - ds1.get('total_pnl', 0):+,.0f}",
+                },
+            ]
+            dir_columns = [
+                {"name": "metric", "label": "Metric", "field": "metric", "align": "left"},
+                {"name": "run_a", "label": f"Exp A ({s1})", "field": "run_a", "align": "right"},
+                {"name": "run_b", "label": f"Exp B ({s2})", "field": "run_b", "align": "right"},
+                {"name": "delta", "label": "Delta (B-A)", "field": "delta", "align": "right"},
+            ]
+            ui.table(columns=dir_columns, rows=dir_rows, row_key="metric").classes("w-full")
+
+            divider()
+
+            # ── R-Multiple Analysis ───────────────────────────────────────
+            def _r_stats(df: pl.DataFrame) -> dict:
+                if df.is_empty() or "pnl_r" not in df.columns:
+                    return {}
+                r = df["pnl_r"].drop_nulls()
+                if r.is_empty():
+                    return {}
+                total = len(r)
+                return {
+                    "mean_r": float(r.mean()),
+                    "median_r": float(r.median()),
+                    "std_r": float(r.std()) if len(r) > 1 else 0,
+                    "pct_1r": float((r >= 1.0).sum() / total * 100),
+                    "pct_2r": float((r >= 2.0).sum() / total * 100),
+                    "pct_3r": float((r >= 3.0).sum() / total * 100),
+                    "pct_minus_1r": float((r <= -1.0).sum() / total * 100),
+                    "best_r": float(r.max()),
+                    "worst_r": float(r.min()),
+                    "positive_pct": float((r > 0).sum() / total * 100),
+                    "negative_pct": float((r < 0).sum() / total * 100),
+                }
+
+            rs1 = _r_stats(trades1)
+            rs2 = _r_stats(trades2)
+
+            if rs1 or rs2:
+                ui.label("R-Multiple Analysis").classes("text-base font-semibold mb-3").style(
+                    f"color: {theme_text_primary()};"
+                )
+
+                def _r_delta(a: float, b: float, fmt: str = ".2f", suffix: str = "") -> str:
+                    return f"{b - a:+{fmt}}{suffix}"
+
+                r_rows = [
+                    {
+                        "metric": "Mean R",
+                        "run_a": f"{rs1.get('mean_r', 0):.2f}",
+                        "run_b": f"{rs2.get('mean_r', 0):.2f}",
+                        "delta": _r_delta(rs1.get("mean_r", 0), rs2.get("mean_r", 0)),
+                    },
+                    {
+                        "metric": "Median R",
+                        "run_a": f"{rs1.get('median_r', 0):.2f}",
+                        "run_b": f"{rs2.get('median_r', 0):.2f}",
+                        "delta": _r_delta(rs1.get("median_r", 0), rs2.get("median_r", 0)),
+                    },
+                    {
+                        "metric": "Std Dev R",
+                        "run_a": f"{rs1.get('std_r', 0):.2f}",
+                        "run_b": f"{rs2.get('std_r', 0):.2f}",
+                        "delta": _r_delta(rs1.get("std_r", 0), rs2.get("std_r", 0)),
+                    },
+                    {
+                        "metric": "% reaching 1R",
+                        "run_a": f"{rs1.get('pct_1r', 0):.1f}%",
+                        "run_b": f"{rs2.get('pct_1r', 0):.1f}%",
+                        "delta": _r_delta(rs1.get("pct_1r", 0), rs2.get("pct_1r", 0), ".1f", "%"),
+                    },
+                    {
+                        "metric": "% reaching 2R",
+                        "run_a": f"{rs1.get('pct_2r', 0):.1f}%",
+                        "run_b": f"{rs2.get('pct_2r', 0):.1f}%",
+                        "delta": _r_delta(rs1.get("pct_2r", 0), rs2.get("pct_2r", 0), ".1f", "%"),
+                    },
+                    {
+                        "metric": "% reaching 3R",
+                        "run_a": f"{rs1.get('pct_3r', 0):.1f}%",
+                        "run_b": f"{rs2.get('pct_3r', 0):.1f}%",
+                        "delta": _r_delta(rs1.get("pct_3r", 0), rs2.get("pct_3r", 0), ".1f", "%"),
+                    },
+                    {
+                        "metric": "% stopped at -1R",
+                        "run_a": f"{rs1.get('pct_minus_1r', 0):.1f}%",
+                        "run_b": f"{rs2.get('pct_minus_1r', 0):.1f}%",
+                        "delta": _r_delta(
+                            rs1.get("pct_minus_1r", 0),
+                            rs2.get("pct_minus_1r", 0),
+                            ".1f",
+                            "%",
+                        ),
+                    },
+                    {
+                        "metric": "Best R",
+                        "run_a": f"{rs1.get('best_r', 0):.2f}",
+                        "run_b": f"{rs2.get('best_r', 0):.2f}",
+                        "delta": _r_delta(rs1.get("best_r", 0), rs2.get("best_r", 0)),
+                    },
+                    {
+                        "metric": "Worst R",
+                        "run_a": f"{rs1.get('worst_r', 0):.2f}",
+                        "run_b": f"{rs2.get('worst_r', 0):.2f}",
+                        "delta": _r_delta(rs1.get("worst_r", 0), rs2.get("worst_r", 0)),
+                    },
+                    {
+                        "metric": "Positive R %",
+                        "run_a": f"{rs1.get('positive_pct', 0):.1f}%",
+                        "run_b": f"{rs2.get('positive_pct', 0):.1f}%",
+                        "delta": _r_delta(
+                            rs1.get("positive_pct", 0),
+                            rs2.get("positive_pct", 0),
+                            ".1f",
+                            "%",
+                        ),
+                    },
+                ]
+                r_columns = [
+                    {"name": "metric", "label": "Metric", "field": "metric", "align": "left"},
+                    {
+                        "name": "run_a",
+                        "label": f"Exp A ({s1})",
+                        "field": "run_a",
+                        "align": "right",
+                    },
+                    {
+                        "name": "run_b",
+                        "label": f"Exp B ({s2})",
+                        "field": "run_b",
+                        "align": "right",
+                    },
+                    {"name": "delta", "label": "Delta (B-A)", "field": "delta", "align": "right"},
+                ]
+                ui.table(columns=r_columns, rows=r_rows, row_key="metric").classes("w-full")
+
+                # R-Multiple distribution overlay chart
+                if (
+                    "pnl_r" in trades1.columns
+                    and not trades1.is_empty()
+                    and "pnl_r" in trades2.columns
+                    and not trades2.is_empty()
+                ):
+                    r1 = trades1["pnl_r"].drop_nulls().to_list()
+                    r2 = trades2["pnl_r"].drop_nulls().to_list()
+                    clip_lo, clip_hi = -5, 10
+
+                    r_fig = go.Figure()
+                    r_fig.add_trace(
+                        go.Histogram(
+                            x=[max(clip_lo, min(clip_hi, v)) for v in r1],
+                            name=s1,
+                            opacity=0.6,
+                            marker_color=color_primary(),
+                            xbins=dict(start=clip_lo, end=clip_hi, size=0.5),
+                        )
+                    )
+                    r_fig.add_trace(
+                        go.Histogram(
+                            x=[max(clip_lo, min(clip_hi, v)) for v in r2],
+                            name=s2,
+                            opacity=0.6,
+                            marker_color=color_info(),
+                            xbins=dict(start=clip_lo, end=clip_hi, size=0.5),
+                        )
+                    )
+                    r_fig.update_layout(
+                        barmode="overlay",
+                        title="R-Multiple Distribution Overlay",
+                        xaxis_title="R-Multiple (clipped -5 to 10)",
+                        yaxis_title="Trade Count",
+                        height=300,
+                        margin=dict(l=50, r=20, t=40, b=40),
+                    )
+                    apply_chart_theme(r_fig)
+                    ui.plotly(r_fig).classes("w-full")
+
+                divider()
+
             # ── Detailed Metrics table with delta ─────────────────────────
             ui.label("Detailed Metrics").classes("text-base font-semibold mb-3").style(
                 f"color: {theme_text_primary()};"

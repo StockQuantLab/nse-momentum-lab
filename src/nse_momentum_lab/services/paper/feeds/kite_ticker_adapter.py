@@ -218,10 +218,15 @@ class KiteTickerAdapter:
 
     def health_stats(self) -> dict[str, Any]:
         """Return telemetry snapshot."""
+        now = time.time()
+        last_tick_age_sec = None
+        if self._last_tick_ts is not None:
+            last_tick_age_sec = max(0.0, now - self._last_tick_ts)
         return {
             "connected": self._connected.is_set(),
             "tick_count": self._tick_count,
             "last_tick_ts": self._last_tick_ts,
+            "last_tick_age_sec": last_tick_age_sec,
             "reconnect_count": self._reconnect_count,
             "sessions": len(self._sessions),
             "subscribed_tokens": len(self._subscribed_tokens),
@@ -241,7 +246,17 @@ class KiteTickerAdapter:
                 fresh += 1
             else:
                 stale += 1
-        return {"fresh": fresh, "stale": stale, "missing": missing}
+        total = len(symbols)
+        covered = fresh + stale
+        coverage_pct = (covered / total * 100.0) if total > 0 else 100.0
+        return {
+            "fresh": fresh,
+            "stale": stale,
+            "missing": missing,
+            "covered": covered,
+            "total": total,
+            "coverage_pct": coverage_pct,
+        }
 
     def set_instrument_map(self, symbol_to_token: dict[str, int]) -> None:
         """Set the symbol -> instrument_token mapping for subscription."""

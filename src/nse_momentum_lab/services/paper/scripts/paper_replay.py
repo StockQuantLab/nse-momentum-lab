@@ -120,6 +120,7 @@ async def run_replay(
             list(symbols),
             trade_date,
             direction=strategy_config.direction,
+            strategy_config=strategy_config,
             paper_db=paper_db,
             session_id=session_id,
         )
