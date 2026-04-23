@@ -29,6 +29,8 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -60,6 +62,170 @@ def _run_async(coro: Any) -> Any:
         with asyncio.Runner(loop_factory=selector_loop_cls) as runner:
             return runner.run(coro)
     return asyncio.run(coro)
+
+
+def _kill_stale_paper_writer_processes() -> list[int]:
+    """Best-effort cleanup for orphaned Windows paper-writer processes."""
+    if os.name != "nt":
+        return []
+
+    current_pid = os.getpid()
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-Command",
+        (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { "
+            f"$_.ProcessId -ne {current_pid} -and ("
+            "$_.CommandLine -match 'nseml-paper' -or "
+            "$_.CommandLine -match 'paper_live' -or "
+            "$_.CommandLine -match 'multi-live' -or "
+            "$_.CommandLine -match 'daily-live'"
+            ") } | "
+            "Select-Object ProcessId | ConvertTo-Json -Depth 2"
+        ),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10, check=False)
+    except Exception:
+        logger.exception("Failed to inspect orphaned paper writer processes")
+        return []
+
+    payload = (result.stdout or "").strip()
+    if not payload or payload == "null":
+        return []
+
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError:
+        logger.debug("Unexpected process query output: %s", payload[:500])
+        return []
+
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+
+    killed: list[int] = []
+    for item in parsed:
+        try:
+            pid = int(item.get("ProcessId"))
+        except Exception:
+            continue
+        if pid == current_pid:
+            continue
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            killed.append(pid)
+        except Exception:
+            logger.exception("Failed to terminate stale writer pid=%s", pid)
+    return killed
+
+
+def _open_paper_db_with_orphan_cleanup(paper_db_path: str):
+    from nse_momentum_lab.services.paper.db.paper_db import PaperDB
+
+    try:
+        return PaperDB(paper_db_path)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "being used by another process" not in message and "cannot open file" not in message:
+            raise
+        killed = _kill_stale_paper_writer_processes()
+        if not killed:
+            raise
+        logger.warning("Killed stale paper writer processes: %s", killed)
+        return PaperDB(paper_db_path)
+
+
+def _build_paper_replica_sync(paper_db_path: str) -> Any:
+    from nse_momentum_lab.db.versioned_replica_sync import (
+        DEFAULT_PAPER_TABLES,
+        VersionedReplicaSync,
+    )
+
+    source_path = Path(paper_db_path)
+    prefix = f"{source_path.stem}_replica"
+    replica_dir = source_path.parent / prefix
+    return VersionedReplicaSync(
+        source_path=source_path,
+        replica_dir=replica_dir,
+        prefix=prefix,
+        tables=DEFAULT_PAPER_TABLES,
+    )
+
+
+def _sync_paper_replica_after_cli_write(paper_db_path: str, db: Any) -> None:
+    try:
+        replica = _build_paper_replica_sync(paper_db_path)
+        replica.force_sync(source_conn=db.con)
+    except Exception:
+        logger.exception("Failed to sync paper replica after CLI write db=%s", paper_db_path)
+
+
+def _dispatch_manual_flatten_notifications(
+    *,
+    db: Any,
+    session_id: str,
+    flattened_count: int,
+    session_status: str,
+) -> None:
+    if flattened_count <= 0:
+        return
+
+    from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
+        AlertDispatcher,
+        AlertEvent,
+        AlertType,
+        enqueue_daily_pnl_summary,
+        format_manual_flatten_alert,
+        get_alert_config,
+        summarize_session_pnl,
+    )
+
+    session = db.get_session(session_id) or {}
+    strategy = str(session.get("strategy_name", "") or "")
+    trade_date = str(session.get("trade_date", "") or "")
+    risk_config = session.get("risk_config") or {}
+    portfolio_value = float(risk_config.get("portfolio_value") or 0.0)
+    summary = summarize_session_pnl(paper_db=db, session_id=session_id)
+    net_pnl = float(summary["realized_pnl"]) + float(summary["unrealized_pnl"])
+
+    async def _send() -> None:
+        dispatcher = AlertDispatcher(paper_db=db, config=get_alert_config())
+        await dispatcher.start()
+        subject, body = format_manual_flatten_alert(
+            session_id=session_id,
+            strategy=strategy,
+            trade_date=trade_date,
+            flattened_positions=flattened_count,
+            net_pnl=net_pnl,
+            session_status=session_status,
+        )
+        dispatcher.enqueue(
+            AlertEvent(
+                alert_type=AlertType.FLATTEN_EOD,
+                session_id=session_id,
+                subject=subject,
+                body=body,
+            )
+        )
+        enqueue_daily_pnl_summary(
+            alert_dispatcher=dispatcher,
+            session_id=session_id,
+            paper_db=db,
+            strategy=strategy,
+            trade_date=trade_date,
+            portfolio_value=portfolio_value,
+        )
+        await dispatcher.shutdown()
+
+    _run_async(_send())
 
 
 def _serialize_strategy_params(
@@ -97,6 +263,12 @@ def _load_default_symbols(market_db_path: str, trade_date: date) -> list[str]:
             SELECT DISTINCT symbol
             FROM v_daily
             WHERE date = (SELECT ref_date FROM ref_day)
+              AND symbol NOT IN (
+                  SELECT symbol
+                  FROM data_quality_issues
+                  WHERE is_active = TRUE
+                    AND severity IN ('CRITICAL', 'HIGH')
+              )
             ORDER BY symbol
             """,
             [trade_date],
@@ -575,6 +747,17 @@ def _cmd_flatten(args: argparse.Namespace) -> None:
     try:
         flattened = db.flatten_open_positions(session_id)
         db.update_session(session_id, status="PAUSED")
+        flattened_count = len(flattened) if isinstance(flattened, list) else 0
+        try:
+            _dispatch_manual_flatten_notifications(
+                db=db,
+                session_id=session_id,
+                flattened_count=flattened_count,
+                session_status="PAUSED",
+            )
+        except Exception:
+            logger.exception("Failed to dispatch manual flatten alerts session=%s", session_id)
+        _sync_paper_replica_after_cli_write(args.paper_db, db)
         print(json.dumps({"session_id": session_id, "flattened": flattened, "status": "PAUSED"}))
     finally:
         db.close()
@@ -626,8 +809,18 @@ def _cmd_flatten_all(args: argparse.Namespace) -> None:
             db.update_session(sid, status="COMPLETED")
             count = len(flattened) if isinstance(flattened, list) else 0
             total_flattened += count
+            try:
+                _dispatch_manual_flatten_notifications(
+                    db=db,
+                    session_id=sid,
+                    flattened_count=count,
+                    session_status="COMPLETED",
+                )
+            except Exception:
+                logger.exception("Failed to dispatch flatten-all alerts session=%s", sid)
             results.append({"session_id": sid, "positions_flattened": count})
 
+        _sync_paper_replica_after_cli_write(args.paper_db, db)
         summary = {
             "action": "flatten_all",
             "trade_date": trade_date,
@@ -950,9 +1143,7 @@ def main() -> None:
 
     # Startup cleanup: cancel orphaned STOPPING sessions from previous runs.
     try:
-        from nse_momentum_lab.services.paper.db.paper_db import PaperDB
-
-        db = PaperDB(args.paper_db)
+        db = _open_paper_db_with_orphan_cleanup(args.paper_db)
         stale = db.cleanup_stale_sessions()
         if stale:
             print(f"Cleaned up {stale} stale session(s) from previous run(s)", flush=True)

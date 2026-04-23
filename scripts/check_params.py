@@ -14,7 +14,13 @@ rows = con.execute(
     FROM bt_trade WHERE exp_id='cb4c9b7abc289048' AND exit_reason='STOP_INITIAL'
     """
 ).fetchone()
-print(f"STOP_INITIAL dist: normal={rows[0]} large={rows[1]} extreme={rows[2]} median={rows[3]}%")
+if rows is None:
+    raise SystemExit("Experiment stats not found")
+normal, large_loss, extreme_loss, median_pct = rows
+print(
+    f"STOP_INITIAL dist: normal={normal} large={large_loss} "
+    f"extreme={extreme_loss} median={median_pct}%"
+)
 
 print("\nExtreme outliers (pnl < -50%, STOP_INITIAL):")
 rows2 = con.execute(
@@ -30,6 +36,8 @@ for r in rows2:
 row = con.execute(
     "SELECT params_json FROM bt_experiment WHERE exp_id='cb4c9b7abc289048'"
 ).fetchone()
+if row is None:
+    raise SystemExit("Experiment params not found")
 p = json.loads(row[0])
 print("\nKey params:")
 for k in [

@@ -1267,13 +1267,30 @@ class PaperDB:
         self.update_position(position_id, metadata_json=meta)
 
     def get_session_realized_pnl(self, session_id: str) -> float:
-        """Return cumulative realized P&L for a session (closed positions only)."""
+        """Return cumulative realized P&L for a session net of modeled entry/exit fees.
+
+        Raw trade history remains gross in `paper_positions.pnl`, but operator-facing session
+        accounting should reflect the same fee approximation used by alerts and summaries.
+        """
         rows = self._query_all(
-            "SELECT COALESCE(SUM(pnl), 0) AS total_pnl FROM paper_positions "
-            "WHERE session_id = $1 AND state = 'CLOSED'",
+            """
+            SELECT avg_entry, avg_exit, qty, pnl
+            FROM paper_positions
+            WHERE session_id = $1 AND state = 'CLOSED'
+            ORDER BY opened_at ASC
+            """,
             [session_id],
         )
-        return float(rows[0].get("total_pnl", 0) or 0) if rows else 0.0
+        total = 0.0
+        for row in rows:
+            avg_entry = float(row.get("avg_entry") or 0.0)
+            avg_exit = float(row.get("avg_exit") or avg_entry)
+            qty = int(row.get("qty") or 0)
+            gross_pnl = float(row.get("pnl") or 0.0)
+            entry_fee = round(avg_entry * qty * 0.001, 4) if avg_entry and qty else 0.0
+            exit_fee = round(avg_exit * qty * 0.001, 4) if avg_exit and qty else 0.0
+            total += gross_pnl - entry_fee - exit_fee
+        return total
 
     def list_open_positions(self, session_id: str) -> list[dict[str, Any]]:
         rows = self._query_all(

@@ -22,11 +22,13 @@ from enum import StrEnum
 from html import escape
 from typing import Any
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 MAX_QUEUE_SIZE = 100
-MAX_RETRIES = 3
-RETRY_BACKOFF = (1.0, 2.0, 4.0)
+MAX_RETRIES = 6
+RETRY_BACKOFF = (1.0, 2.0, 4.0, 30.0, 120.0, 300.0)
 
 # Redact Telegram bot-token URLs (https://api.telegram.org/bot<TOKEN>/...)
 _BOT_TOKEN_RE = re.compile(r"(https?://[^/]+/bot)[^/\s]+(/?)", re.IGNORECASE)
@@ -35,6 +37,30 @@ _BOT_TOKEN_RE = re.compile(r"(https?://[^/]+/bot)[^/\s]+(/?)", re.IGNORECASE)
 def _redact_url(text: str) -> str:
     """Replace bot token in Telegram API URLs with a placeholder."""
     return _BOT_TOKEN_RE.sub(r"\1<REDACTED>\2", text)
+
+
+def _is_transient_delivery_error(exc: Exception) -> bool:
+    """Return True when the failure is likely temporary and worth retrying."""
+    if isinstance(exc, httpx.RequestError):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = getattr(exc.response, "status_code", None)
+        if status in {429, 500, 502, 503, 504}:
+            return True
+    message = str(exc).lower()
+    transient_tokens = (
+        "getaddrinfo failed",
+        "temporary failure",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection aborted",
+        "too many requests",
+        "503 service unavailable",
+        "502 bad gateway",
+        "504 gateway timeout",
+    )
+    return any(token in message for token in transient_tokens)
 
 
 class AlertType(StrEnum):
@@ -155,6 +181,39 @@ def _format_event_time(event_time: datetime | None) -> str:
     return event_time.strftime("%H:%M %d-%b")
 
 
+def _format_session_context(strategy: str, session_id: str) -> str:
+    if not strategy and not session_id:
+        return ""
+    parts = []
+    if strategy:
+        parts.append(escape(strategy))
+    if session_id:
+        parts.append(session_id[:16])
+    return " · ".join(parts)
+
+
+def _friendly_exit_reason(reason: str) -> str:
+    value = str(reason or "").upper()
+    mapping = {
+        "STOP_BREAKEVEN": "BREAKEVEN_SL",
+        "STOP_TRAIL": "TRAIL_SL",
+        "STOP_INITIAL": "INITIAL_SL",
+        "GAP_THROUGH_STOP": "GAP_SL",
+    }
+    return mapping.get(value, value or "EXIT")
+
+
+def _estimate_fee(price: float, qty: int) -> float:
+    return round(float(price) * int(qty) * 0.001, 4) if price and qty else 0.0
+
+
+def _net_trade_return_pct(*, realized_pnl: float, entry_price: float, qty: int) -> float:
+    basis = float(entry_price) * int(qty)
+    if basis <= 0:
+        return 0.0
+    return (float(realized_pnl) / basis) * 100.0
+
+
 def format_trade_opened_alert(
     *,
     symbol: str,
@@ -164,23 +223,32 @@ def format_trade_opened_alert(
     qty: int,
     session_id: str,
     strategy: str = "",
+    target_price: float | None = None,
     event_time: datetime | None = None,
 ) -> tuple[str, str]:
     """Return (subject, HTML body) for a TRADE_OPENED alert."""
-    icon = "🟢" if direction == "LONG" else "🔴"
-    subject = f"{icon} {direction} OPENED: {symbol}"
+    subject = f"{direction} OPENED: {symbol}"
     risk_per_unit = abs(entry_price - initial_stop)
     risk_rupees = risk_per_unit * qty
+    reward_r = None
+    if target_price is not None and risk_per_unit > 0:
+        reward_r = abs(float(target_price) - entry_price) / risk_per_unit
     time_str = _format_event_time(event_time)
-    chart_link = (
-        f"📊 <a href='https://www.tradingview.com/chart/?symbol=NSE:{escape(symbol)}'>Chart</a>"
-    )
+    session_context = _format_session_context(strategy, session_id)
     body = (
         f"📥 Entry: <code>₹{entry_price:.2f}</code> | 🛡️ SL: <code>₹{initial_stop:.2f}</code>\n"
-        f"📏 Qty: <code>{qty}</code> | 💰 Risk: ₹{risk_rupees:,.0f}"
-        + (f" | 🕒 {time_str}" if time_str else "")
-        + f"\n{chart_link}"
-        + (f"\n<i>{escape(strategy)} · {session_id[:16]}</i>" if strategy else "")
+        + (
+            f"🎯 Target: <code>₹{float(target_price):.2f}</code> | "
+            if target_price is not None
+            else ""
+        )
+        + f"📏 Qty: <code>{qty}</code>\n"
+        + f"💰 Risk: <code>₹{risk_rupees:,.0f}</code>"
+        + (f" ({reward_r:.1f}R)" if reward_r is not None else "")
+        + (f"\n🕒 {time_str}" if time_str else "")
+        + "\n<a href='https://www.tradingview.com/chart/?symbol=NSE:"
+        + f"{escape(symbol)}'>Chart</a>"
+        + (f"\n<i>{session_context}</i>" if session_context else "")
     )
     return subject, body
 
@@ -199,32 +267,28 @@ def format_trade_closed_alert(
     event_time: datetime | None = None,
 ) -> tuple[str, str]:
     """Return (subject, HTML body) for a TRADE_CLOSED alert."""
-    pnl_pct = (
-        (
-            ((exit_price - entry_price) / entry_price * 100)
-            if direction == "LONG"
-            else ((entry_price - exit_price) / entry_price * 100)
-        )
-        if entry_price
-        else 0.0
+    pnl_pct = _net_trade_return_pct(
+        realized_pnl=realized_pnl,
+        entry_price=entry_price,
+        qty=qty,
     )
     is_win = realized_pnl >= 0
     result_tag = "WIN" if is_win else "LOSS"
     icon = "✅" if is_win else "❌"
-    trend_icon = "📈" if is_win else "📉"
-    subject = f"{icon} [{result_tag}] {symbol} {direction} {reason}"
+    friendly_reason = _friendly_exit_reason(reason)
+    subject = f"{icon} [{result_tag}] {symbol} {direction} {friendly_reason}"
     time_str = _format_event_time(event_time)
     pnl_display = f"{'+' if is_win else '-'}₹{abs(realized_pnl):,.0f}"
-    chart_link = (
-        f"📊 <a href='https://www.tradingview.com/chart/?symbol=NSE:{escape(symbol)}'>Chart</a>"
-    )
+    session_context = _format_session_context(strategy, session_id)
     body = (
         f"💰 P&amp;L: <code>{pnl_display}</code> ({pnl_pct:+.2f}%)\n"
-        f"🏁 Reason: {escape(reason)}\n"
-        f"{trend_icon} Exit: <code>{entry_price:.2f}</code> → <code>{exit_price:.2f}</code>"
+        + (f"📏 Qty: <code>{qty}</code>\n" if qty else "")
+        + f"🏁 Reason: {escape(friendly_reason)}\n"
+        + f"📤 Exit: <code>{entry_price:.2f}</code> → <code>{exit_price:.2f}</code>"
         + (f"\n🕒 {time_str}" if time_str else "")
-        + f"\n{chart_link}"
-        + (f"\n<i>{escape(strategy)} · {session_id[:16]}</i>" if strategy else "")
+        + "\n<a href='https://www.tradingview.com/chart/?symbol=NSE:"
+        + f"{escape(symbol)}'>Chart</a>"
+        + (f"\n<i>{session_context}</i>" if session_context else "")
     )
     return subject, body
 
@@ -324,6 +388,35 @@ def format_daily_pnl_summary(
     return subject, body
 
 
+def format_manual_flatten_alert(
+    *,
+    session_id: str,
+    strategy: str = "",
+    trade_date: str = "",
+    flattened_positions: int = 0,
+    net_pnl: float = 0.0,
+    session_status: str = "PAUSED",
+) -> tuple[str, str]:
+    """Return (subject, HTML body) for a manual flatten operator alert."""
+    date_str = ""
+    if trade_date and len(trade_date) == 10:
+        try:
+            date_str = datetime.strptime(trade_date, "%Y-%m-%d").strftime("%d-%b-%Y")
+        except ValueError:
+            date_str = trade_date
+    subject = "🛑 MANUAL FLATTEN" + (f" — {date_str}" if date_str else "")
+    session_context = _format_session_context(strategy, session_id)
+    body = (
+        f"Session: <code>{session_id[:16]}</code>\n"
+        f"Positions flattened: <code>{int(flattened_positions)}</code>\n"
+        f"Session status: <code>{escape(session_status)}</code>\n"
+        f"Net P&amp;L: <code>{net_pnl:+,.2f}</code>"
+    )
+    if session_context:
+        body += f"\n<i>{session_context}</i>"
+    return subject, body
+
+
 def format_session_alert(
     *,
     session_id: str,
@@ -339,6 +432,123 @@ def format_session_alert(
     if details:
         body += f"\n{escape(details)}"
     return subject, body
+
+
+def summarize_session_pnl(
+    *,
+    paper_db: Any,
+    session_id: str,
+    mark_prices: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Compute current session P&L using the paper engine's fee approximation."""
+    realized_pnl = float(paper_db.get_session_realized_pnl(session_id))
+    unrealized_pnl = 0.0
+    trades_closed_today = 0
+    winners = 0
+    losers = 0
+    open_pos_details: list[dict[str, Any]] = []
+
+    for position in paper_db.list_positions_by_session(session_id):
+        qty = int(position.get("qty", 0) or 0)
+        avg_entry = float(position.get("avg_entry", 0) or 0.0)
+        direction = str(position.get("direction", "LONG") or "LONG").upper()
+        meta = position.get("metadata_json") or {}
+        symbol = str(position.get("symbol", "") or "")
+
+        if str(position.get("state", "")).upper() == "CLOSED":
+            trades_closed_today += 1
+            avg_exit = float(position.get("avg_exit", avg_entry) or avg_entry)
+            gross_pnl = float(position.get("pnl", 0) or 0.0)
+            net_pnl = gross_pnl - _estimate_fee(avg_entry, qty) - _estimate_fee(avg_exit, qty)
+            if net_pnl >= 0:
+                winners += 1
+            else:
+                losers += 1
+            continue
+
+        mark = (mark_prices or {}).get(symbol)
+        if mark is None:
+            mark = float(meta.get("last_mark_price", avg_entry) or avg_entry)
+        if direction == "SHORT":
+            gross_upnl = (avg_entry - mark) * qty
+        else:
+            gross_upnl = (mark - avg_entry) * qty
+        entry_fee = _estimate_fee(avg_entry, qty)
+        net_upnl = gross_upnl - entry_fee - _estimate_fee(mark, qty)
+        unrealized_pnl += net_upnl
+        open_pos_details.append(
+            {
+                "symbol": symbol,
+                "unrealized_pnl": net_upnl,
+                "days_held": meta.get("days_held", 0),
+            }
+        )
+
+    return {
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+        "trades_closed_today": trades_closed_today,
+        "winners": winners,
+        "losers": losers,
+        "open_positions": open_pos_details,
+    }
+
+
+def enqueue_daily_pnl_summary(
+    *,
+    alert_dispatcher: AlertDispatcher,
+    session_id: str,
+    paper_db: Any,
+    strategy: str,
+    trade_date: str,
+    portfolio_value: float,
+    mark_prices: dict[str, float] | None = None,
+    alerts_sent: set[str] | None = None,
+) -> None:
+    """Compute and enqueue DAILY_PNL_SUMMARY with net-of-modeled-fees P&L."""
+    if not alert_dispatcher._enabled:
+        return
+    if paper_db.has_alert_log(session_id, AlertType.DAILY_PNL_SUMMARY.value, status="sent"):
+        return
+    summary_key = f"DAILY_PNL_SUMMARY:{session_id}"
+    if alerts_sent is not None and summary_key in alerts_sent:
+        return
+    if alerts_sent is not None:
+        alerts_sent.add(summary_key)
+    try:
+        summary = summarize_session_pnl(
+            paper_db=paper_db,
+            session_id=session_id,
+            mark_prices=mark_prices,
+        )
+        realized_pnl = float(summary["realized_pnl"])
+        unrealized_pnl = float(summary["unrealized_pnl"])
+        max_dd_used_pct = (
+            abs(realized_pnl + unrealized_pnl) / portfolio_value * 100 if portfolio_value else 0.0
+        )
+        subject, body = format_daily_pnl_summary(
+            session_id=session_id,
+            strategy=strategy,
+            trade_date=trade_date,
+            realized_pnl=realized_pnl,
+            unrealized_pnl=unrealized_pnl,
+            trades_closed_today=int(summary["trades_closed_today"]),
+            winners=int(summary["winners"]),
+            losers=int(summary["losers"]),
+            open_positions=list(summary["open_positions"]),
+            portfolio_value=portfolio_value,
+            max_dd_used_pct=max_dd_used_pct,
+        )
+        alert_dispatcher.enqueue(
+            AlertEvent(
+                alert_type=AlertType.DAILY_PNL_SUMMARY,
+                session_id=session_id,
+                subject=subject,
+                body=body,
+            )
+        )
+    except Exception:
+        logger.exception("Failed to dispatch DAILY_PNL_SUMMARY session=%s", session_id)
 
 
 # ---------------------------------------------------------------------------
@@ -473,10 +683,12 @@ class AlertDispatcher:
     async def _send_with_retry(self, event: AlertEvent) -> None:
         """Try each notifier with exponential backoff, skipping already-succeeded ones."""
         succeeded: set[int] = set()
+        terminal_failed: set[int] = set()
         for attempt in range(MAX_RETRIES):
             all_ok = True
+            any_transient_failure = False
             for i, notifier in enumerate(self._notifiers):
-                if i in succeeded:
+                if i in succeeded or i in terminal_failed:
                     continue
                 if not getattr(notifier, "enabled", True):
                     succeeded.add(i)
@@ -487,7 +699,10 @@ class AlertDispatcher:
                     succeeded.add(i)
                 except Exception as e:
                     all_ok = False
-                    if attempt == MAX_RETRIES - 1:
+                    if _is_transient_delivery_error(e):
+                        any_transient_failure = True
+                    else:
+                        terminal_failed.add(i)
                         self._log_alert(
                             event,
                             status="failed",
@@ -495,7 +710,10 @@ class AlertDispatcher:
                             channel=type(notifier).__name__,
                         )
 
-            if all_ok or len(succeeded) == len(self._notifiers):
+            if all_ok or len(succeeded) + len(terminal_failed) == len(self._notifiers):
+                return
+
+            if not any_transient_failure:
                 return
 
             if attempt < MAX_RETRIES - 1:

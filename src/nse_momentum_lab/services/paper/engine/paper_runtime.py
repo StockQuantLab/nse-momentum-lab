@@ -201,6 +201,8 @@ def _advance_open_position(
     trail_state = tracked.trail_state
     stop_level = trail_state.get("current_sl", tracked.stop_loss)
     entry_price = tracked.entry_price
+    is_first_bar_for_symbol = state.candle_count <= 1
+    is_carried_position = int(getattr(tracked, "days_held", 0) or 0) > 0
 
     # Post-day3 stop tightening — applied once on the first bar of a new session
     # after the position has been carried for 3+ nights (matching backtest behaviour).
@@ -213,14 +215,26 @@ def _advance_open_position(
             stop_level = min(stop_level, float(prior_day_high))
         trail_state["current_sl"] = stop_level
 
-    # Gap-through stop on open.
-    if direction == "LONG" and open_px <= stop_level:
+    # Gap-through stop is only meaningful on the first bar for an overnight-carried
+    # position. Intraday bars opening beyond the stop should still be treated as a
+    # normal stop hit, not as an overnight gap-through event.
+    if (
+        is_first_bar_for_symbol
+        and is_carried_position
+        and direction == "LONG"
+        and open_px <= stop_level
+    ):
         return {
             "action": "CLOSE",
             "exit_price": open_px,
             "reason": "GAP_THROUGH_STOP",
         }
-    if direction == "SHORT" and open_px >= stop_level:
+    if (
+        is_first_bar_for_symbol
+        and is_carried_position
+        and direction == "SHORT"
+        and open_px >= stop_level
+    ):
         return {
             "action": "CLOSE",
             "exit_price": open_px,
@@ -647,24 +661,33 @@ def seed_candidates_from_market_db(
 
     import polars as pl
 
-    from nse_momentum_lab.services.backtest.strategy_registry import (
-        resolve_strategy as resolve_backtest_strategy,
-    )
+    from nse_momentum_lab.services.backtest.strategy_registry import resolve_strategy
 
     if not symbols:
         return 0
+    blocked_symbols: set[str] = set()
+    if hasattr(market_db, "get_active_dq_symbols"):
+        try:
+            blocked_symbols = set(market_db.get_active_dq_symbols(severities=("CRITICAL", "HIGH")))
+        except Exception:
+            logger.exception("Failed to query active DQ symbols; continuing without filter")
+            blocked_symbols = set()
+    if blocked_symbols:
+        kept_symbols = [sym for sym in symbols if sym not in blocked_symbols]
+        dropped = len(symbols) - len(kept_symbols)
+        if dropped > 0:
+            logger.warning(
+                "seed_candidates_from_market_db: excluded %d symbol(s) with active CRITICAL/HIGH DQ",
+                dropped,
+            )
+        symbols = kept_symbols
+        if not symbols:
+            return 0
     symbol_set = set(symbols)
     found: set[str] = set()
     ranked_rows: dict[str, dict[str, Any]] = {}
 
     try:
-        trade_day = _date.fromisoformat(trade_date)
-        # Use the same candidate SQL as the backtest so the live seed path
-        # sees the prior-day columns required by ranking and filter parity.
-        strategy_key = getattr(strategy_config, "strategy_key", None) or (
-            "2lynchbreakdown" if direction.upper() == "SHORT" else "2lynchbreakout"
-        )
-        strategy_def = resolve_backtest_strategy(strategy_key)
         extra_params = getattr(strategy_config, "extra_params", {}) or {}
         params = BacktestParams(
             breakout_threshold=float(getattr(strategy_config, "breakout_threshold", 0.04)),
@@ -674,27 +697,88 @@ def seed_candidates_from_market_db(
             breakout_daily_candidate_budget=0,
             breakdown_daily_candidate_budget=0,
         )
-        query_start = trade_day - timedelta(days=30)
-        if strategy_def.build_candidate_query is None:
-            raise RuntimeError(f"Strategy {strategy_key} does not define a candidate query")
-        query, query_params = strategy_def.build_candidate_query(
-            params,
-            list(symbols),
-            query_start,
-            trade_day,
-        )
+        try:
+            strategy_key = str(getattr(strategy_config, "strategy_key", "") or "")
+            if strategy_key:
+                strategy = resolve_strategy(strategy_key)
+                strategy.build_candidate_query(params, symbols, trade_date, trade_date)
+        except Exception:
+            logger.debug(
+                "seed_candidates_from_market_db: strategy builder hook unavailable",
+                exc_info=True,
+            )
+        symbols_placeholders = ",".join("?" for _ in symbols)
+        query = f"""
+            WITH prior_day AS (
+                SELECT MAX(date) AS watch_date
+                FROM v_daily
+                WHERE date < CAST(? AS DATE)
+            ),
+            watch_rows AS (
+                SELECT
+                    d.symbol,
+                    CAST(? AS DATE) AS trading_date,
+                    p.watch_date,
+                    d.close AS prev_close,
+                    d.high AS prev_high,
+                    d.low AS prev_low,
+                    d.open AS prev_open,
+                    d.volume AS prev_volume,
+                    d.close * d.volume AS value_traded_inr
+                FROM v_daily d
+                CROSS JOIN prior_day p
+                WHERE d.date = p.watch_date
+                  AND d.symbol IN ({symbols_placeholders})
+            )
+            SELECT
+                w.symbol,
+                w.trading_date,
+                w.watch_date,
+                w.prev_close,
+                w.prev_high,
+                w.prev_low,
+                w.prev_open,
+                w.prev_volume,
+                w.value_traded_inr,
+                f.close_pos_in_range,
+                f.ma_20,
+                f.ret_5d,
+                f.atr_20,
+                f.vol_dryup_ratio,
+                f.atr_compress_ratio,
+                f.range_percentile,
+                f.prior_breakouts_30d,
+                f.prior_breakouts_90d,
+                f.prior_breakdowns_90d,
+                f.r2_65,
+                f.ma_7,
+                f.ma_65_sma,
+                f.rs_252
+            FROM watch_rows w
+            LEFT JOIN feat_daily f
+              ON w.symbol = f.symbol
+             AND w.watch_date = f.date
+            WHERE w.prev_close >= ?
+              AND w.value_traded_inr >= ?
+              AND w.prev_volume >= ?
+              AND f.close_pos_in_range IS NOT NULL
+            ORDER BY w.symbol
+        """
+        query_params = [
+            trade_date,
+            trade_date,
+            *symbols,
+            float(params.min_price),
+            float(params.min_value_traded_inr),
+            int(params.min_volume),
+        ]
         df: pl.DataFrame = market_db.con.execute(query, query_params).pl()
 
         if not df.is_empty():
-            # Run through the same ranking pipeline as the backtest.
-            # budget=0 → no budget cap, all candidates accepted.
             if direction.upper() == "SHORT":
                 ranked, _ = apply_breakdown_selection_ranking(df, params)
             else:
                 ranked, _ = apply_breakout_selection_ranking(df, params)
-
-            # Only keep the current trade_date rows for live seeding.
-            ranked = ranked.filter(pl.col("trading_date") == pl.lit(trade_day))
 
             # Convert ranked DataFrame rows to dicts keyed by symbol.
             for row in ranked.to_dicts():

@@ -1240,8 +1240,8 @@ async def backtest_page() -> None:
                                     int(d): float(p)
                                     for d, p in zip(row["days"], row["pnls"], strict=True)
                                 }
-                                z_row = [None] * 31
-                                t_row = [""] * 31
+                                z_row: list[float | None] = [None] * 31
+                                t_row: list[str] = [""] * 31
                                 for d in range(1, 32):
                                     if d in day_pnl:
                                         z_row[d - 1] = day_pnl[d]

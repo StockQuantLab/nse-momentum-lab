@@ -975,11 +975,18 @@ class DuckDBBacktestRunner:
         liquidity_end = date(effective_end_year, 12, 31)
 
         query = """
-        SELECT symbol, AVG(close * volume) AS avg_value_traded
-        FROM v_daily
-        WHERE date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
-          AND close >= ?
-        GROUP BY symbol
+        SELECT vd.symbol, AVG(vd.close * vd.volume) AS avg_value_traded
+        FROM v_daily vd
+        WHERE vd.date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
+          AND vd.close >= ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM data_quality_issues dq
+              WHERE dq.symbol = vd.symbol
+                AND dq.is_active = TRUE
+                AND dq.severity IN ('CRITICAL', 'HIGH')
+          )
+        GROUP BY vd.symbol
         ORDER BY avg_value_traded DESC
         LIMIT ?
         """

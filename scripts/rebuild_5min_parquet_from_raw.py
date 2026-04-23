@@ -155,6 +155,8 @@ def validate_5min_parquet(out_dir: Path) -> None:
         FROM read_parquet('{glob}', hive_partitioning=false)
         """
     ).fetchone()
+    if totals is None:
+        raise SystemExit("No parquet rows found")
     dow = con.execute(
         f"""
         SELECT strftime(date::DATE, '%w') AS dow, COUNT(*) AS rows

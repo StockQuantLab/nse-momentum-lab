@@ -88,12 +88,16 @@ def _strategy_label(strategy: str | None) -> str:
 
 
 def _direction_cell(direction: str) -> str:
-    d = (direction or "").upper()
-    if d == "LONG":
-        return f'<span style="background:{color_success()};color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600">LONG</span>'
-    if d == "SHORT":
-        return f'<span style="background:{color_error()};color:#fff;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600">SHORT</span>'
-    return direction or "-"
+    return str(direction or "-").upper()
+
+
+def _fmt_qty(value: Any) -> str:
+    if value in (None, ""):
+        return "-"
+    try:
+        return f"{int(value):,}"
+    except TypeError, ValueError:
+        return str(value)
 
 
 def _pnl_color(value: float | None) -> str:
@@ -106,6 +110,8 @@ def _parse_metadata(raw: Any) -> dict:
     if not raw or raw == "{}":
         return {}
     try:
+        if isinstance(raw, dict):
+            return raw
         return json.loads(str(raw)) if isinstance(raw, str) else {}
     except TypeError, ValueError:
         return {}
@@ -190,12 +196,23 @@ def _load_feed_state(consumer: VersionedReplicaConsumer, session_id: str) -> dic
 def _compute_pnl(positions: list[dict]) -> dict[str, float]:
     realized = unrealized = 0.0
     for p in positions:
-        pnl = float(p.get("pnl", 0) or 0)
         state = str(p.get("state", "")).upper()
         if state == "CLOSED":
+            pnl = float(p.get("pnl", 0) or 0)
             realized += pnl
         elif state == "OPEN":
-            unrealized += pnl
+            md = _parse_metadata(p.get("metadata_json"))
+            avg_entry = _to_float(p.get("avg_entry"))
+            qty = _to_float(p.get("qty"))
+            mark = _to_float(md.get("last_mark_price"))
+            direction = str(p.get("direction", "LONG")).upper()
+            if avg_entry is not None and qty is not None and mark is not None:
+                if direction == "SHORT":
+                    unrealized += (avg_entry - mark) * qty
+                else:
+                    unrealized += (mark - avg_entry) * qty
+            else:
+                unrealized += float(p.get("pnl", 0) or 0)
     return {"realized": realized, "unrealized": unrealized, "total": realized + unrealized}
 
 
@@ -213,13 +230,13 @@ def _position_rows(positions: list[dict]) -> list[dict]:
                 "symbol": p.get("symbol", "-"),
                 "direction": _direction_cell(p.get("direction", "-")),
                 "state": p.get("state", "-"),
-                "qty": p.get("qty", 0),
-                "avg_entry": _to_float(p.get("avg_entry")),
-                "avg_exit": _to_float(p.get("avg_exit")),
-                "current_price": _to_float(md.get("last_mark_price")),
-                "pnl": _to_float(p.get("pnl")),
-                "initial_sl": _to_float(md.get("initial_sl")),
-                "target": _to_float(md.get("target")),
+                "qty": _fmt_qty(p.get("qty")),
+                "avg_entry": _fmt(p.get("avg_entry")),
+                "avg_exit": _fmt(p.get("avg_exit")),
+                "current_price": _fmt(md.get("last_mark_price")),
+                "pnl": _fmt(p.get("pnl")),
+                "initial_sl": _fmt(md.get("initial_sl")),
+                "target": _fmt(md.get("target")),
                 "exit_reason": md.get("exit_reason", "-"),
                 "opened_at": str(p.get("opened_at", "-"))[:19],
                 "closed_at": str(p.get("closed_at", "-"))[:19] if p.get("closed_at") else "-",
@@ -236,8 +253,8 @@ def _order_rows(orders: list[dict]) -> list[dict]:
             "side": o.get("side", "-"),
             "status": o.get("status", "-"),
             "order_type": o.get("order_type", "-"),
-            "qty": o.get("qty", 0),
-            "limit_price": _to_float(o.get("limit_price")),
+            "qty": _fmt_qty(o.get("qty")),
+            "limit_price": _fmt(o.get("limit_price")),
             "created_at": str(o.get("created_at", "-"))[:19],
         }
         for o in orders
@@ -249,11 +266,11 @@ def _fill_rows(fills: list[dict]) -> list[dict]:
         {
             "symbol": f.get("symbol", "-"),
             "side": f.get("side", "-"),
-            "qty": f.get("qty", 0),
-            "price": _to_float(f.get("fill_price")),
-            "pnl": _to_float(f.get("pnl")),
-            "slippage": _to_float(f.get("slippage_bps")),
-            "fees": _to_float(f.get("fees")),
+            "qty": _fmt_qty(f.get("qty")),
+            "price": _fmt(f.get("fill_price")),
+            "pnl": _fmt(f.get("pnl")),
+            "slippage": _fmt(f.get("slippage_bps")),
+            "fees": _fmt(f.get("fees")),
             "fill_time": str(f.get("fill_time", "-"))[:19],
         }
         for f in fills
@@ -266,10 +283,10 @@ def _signal_rows(signals: list[dict]) -> list[dict]:
             "symbol": s.get("symbol", "-"),
             "asof_date": str(s.get("asof_date", "-")),
             "state": s.get("state", "-"),
-            "entry_mode": s.get("entry_mode", "-"),
-            "initial_stop": _to_float(s.get("initial_stop")),
+            "entry_mode": str(s.get("entry_mode", "-")).upper(),
+            "initial_stop": _fmt(s.get("initial_stop")),
             "rank": s.get("rank", "-"),
-            "score": _to_float(s.get("selection_score")),
+            "score": _fmt(s.get("selection_score")),
             "decision": s.get("decision_status", "-"),
         }
         for s in signals
@@ -344,11 +361,24 @@ async def paper_ledger_v2_page() -> None:
 
                     def render_active() -> None:
                         sid = select.value
+                        session = None
+                        fresh_sessions = _load_sessions(consumer, ACTIVE_STATUSES)
+                        if not fresh_sessions:
+                            return
+
+                        fresh_options = {
+                            s.get("session_id", ""): _session_label(s) for s in fresh_sessions
+                        }
+                        if select.options != fresh_options:
+                            select.options = fresh_options
+                            if sid not in fresh_options:
+                                sid = fresh_sessions[0].get("session_id", "")
+                                select.value = sid
+                            select.update()
+
                         if not sid:
                             return
 
-                        session = None
-                        fresh_sessions = _load_sessions(consumer, ACTIVE_STATUSES)
                         for s in fresh_sessions:
                             if s.get("session_id") == sid:
                                 session = s
@@ -695,11 +725,25 @@ async def paper_ledger_v2_page() -> None:
 
                     def render_archived() -> None:
                         sid = arch_select.value
+                        fresh_archived = _load_sessions(consumer, ARCHIVED_STATUSES)
+                        if not fresh_archived:
+                            return
+
+                        fresh_arch_options = {
+                            s.get("session_id", ""): _session_label(s) for s in fresh_archived
+                        }
+                        if arch_select.options != fresh_arch_options:
+                            arch_select.options = fresh_arch_options
+                            if sid not in fresh_arch_options:
+                                sid = fresh_archived[0].get("session_id", "")
+                                arch_select.value = sid
+                            arch_select.update()
+
                         if not sid:
                             return
 
                         session = None
-                        for s in archived_sessions:
+                        for s in fresh_archived:
                             if s.get("session_id") == sid:
                                 session = s
                                 break

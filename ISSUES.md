@@ -35,7 +35,7 @@ consolidation), 5-min and daily prices are now on different price scales.
 
 ### ISSUE-004 — Active DQ issues in market data
 
-**Status**: OPEN
+**Status**: PARTIALLY ADDRESSED — critical/high active DQ symbols are excluded from default backtest/live universe bootstrap
 **Severity**: Medium
 **Found**: 2026-04-19 (from DQ table scan)
 
@@ -46,7 +46,19 @@ consolidation), 5-min and daily prices are now on different price scales.
 - `OHLC_VIOLATION`: 218 rows
 
 These are pre-existing and were not introduced by recent re-ingest. Most affect illiquid symbols
-not in the trading universe. Investigate before expanding universe beyond 2000 symbols.
+not in the trading universe. Current universe check on latest `feat_daily` (`2026-04-22`) shows
+material overlap with the top-2000 liquid set:
+- 1,717 symbols have at least one active DQ flag in the top-2000 universe
+- 1,526 of those are `CRITICAL` / `HIGH`
+- `TIMESTAMP_INVALID` dominates the critical overlap
+
+This is not a code bug, but it is still a live/backtest data-quality risk. Investigate before
+expanding universe beyond 2000 symbols or treating the current active universe as fully clean.
+
+**Mitigation**:
+- default backtest universe loading now excludes active `CRITICAL` / `HIGH` DQ symbols
+- paper live/replay session bootstrap now applies the same exclusion before seeding candidates
+- the raw DQ rows remain in `data_quality_issues` for follow-up cleanup
 
 ---
 
@@ -319,7 +331,7 @@ the short-side override pattern. When set, override base param for LONG directio
 
 ---
 
-*Last updated: 2026-04-22*
+*Last updated: 2026-04-23*
 
 ---
 
@@ -475,6 +487,277 @@ followed by `FEED_RECOVERED` chatter in Telegram.
 
 **Operator outcome**: Telegram now carries feed transitions only when the market-data stream is
 actually stale, not just because a 5-minute bar has not closed yet.
+
+---
+
+### ISSUE-022 — Live writer crashed on first closed bar due to `last_bar_ts` / `last_bar_at` mismatch
+
+**Status**: ✅ FIXED — `paper_live.py` (2026-04-23)
+**Severity**: High (both live sessions failed and retried at the first 5-minute close)
+**Found**: 2026-04-23 09:20 IST during live breakout + breakdown monitoring
+
+**Problem**: `run_live_session()` called `_write_feed_state(..., last_bar_ts=...)` even though the
+helper signature had already been renamed to `last_bar_at`. The live process launched cleanly,
+connected to Kite, and only failed once the first closed bar tried to persist feed heartbeat state.
+
+**Observed symptom**:
+- `TypeError: _write_feed_state() got an unexpected keyword argument 'last_bar_ts'`
+- both sessions marked `FAILED`, then entered retry loops
+
+**Fix**: Switched the closed-bar heartbeat path in `paper_live.py` to pass `last_bar_at=...`.
+
+---
+
+### ISSUE-023 — Live seed path used same-day daily rows, producing empty intraday watchlists
+
+**Status**: ✅ FIXED — `paper_runtime.py` (2026-04-23)
+**Severity**: High (sessions stayed live but produced zero candidates / zero trades)
+**Found**: 2026-04-23 09:11–09:36 IST during live session bring-up
+
+**Problem**: `seed_candidates_from_market_db()` reused a backtest candidate-query shape and then
+filtered to `trading_date == trade_day`. Intraday, that effectively asked the live engine to seed
+from the breakout/breakdown day's own daily row instead of the prior-day watch-date features.
+
+**Observed symptom**:
+- `seed_candidates_from_market_db: 0/2034 symbols seeded from feat_daily`
+- sessions were connected and receiving ticks, but `_evaluate_entry()` skipped because `prev_close`
+  was missing from empty setup rows
+
+**Fix**: Replaced the live seed query with a prior-day watchlist bootstrap:
+- resolve the latest `watch_date < trade_date`
+- load `prev_close`, `prev_high`, `prev_low`, `prev_open`, volume/value-traded, and ranking inputs
+  from that watch date
+- run the existing breakout / breakdown ranking transforms on those watch-date rows
+
+**Result after fix**: both Apr 23 live sessions seeded `1079/2034` symbols and began trading at
+the next bar cycle.
+
+---
+
+### ISSUE-024 — Paper Ledger session selector labels could stay stale after status transitions
+
+**Status**: ✅ FIXED — `apps/nicegui/pages/paper_ledger_v2.py` (2026-04-23)
+**Severity**: Low (dashboard inconsistency only)
+**Found**: 2026-04-23 after live sessions moved `PLANNED → ACTIVE`
+
+**Problem**: The active-session dropdown options were populated once on page load, while the detail
+panel re-queried the latest replica rows on refresh. This allowed the card body to show `ACTIVE`
+while the selector label still displayed `PLANNED`.
+
+**Fix**: Refresh the select options from the latest replica snapshot on each render/auto-refresh and
+update the selected value if the available session set changes.
+
+---
+
+### ISSUE-025 — Paper Ledger positions view rendered raw HTML and underreported open P&L
+
+**Status**: ✅ FIXED — `apps/nicegui/pages/paper_ledger_v2.py` (2026-04-23)
+**Severity**: Medium (operator view scrambled; unrealized P&L / current mark visibility incorrect)
+**Found**: 2026-04-23 during live monitoring
+
+**Problems**:
+1. Direction cells returned raw `<span ...>` HTML strings, but the shared table component rendered
+   them as plain text.
+2. `_parse_metadata()` returned `{}` when `metadata_json` was already a dict, dropping
+   `last_mark_price`.
+3. `_compute_pnl()` used `paper_positions.pnl` for open positions, but open-trade unrealized P&L
+   must be derived from `last_mark_price`, `avg_entry`, `qty`, and `direction`.
+
+**Fix**:
+- render direction as clean text instead of raw HTML markup
+- accept both dict and JSON-string forms of `metadata_json`
+- compute unrealized P&L from mark price for `OPEN` positions
+- format table numerics as readable display strings instead of raw float internals
+
+---
+
+### ISSUE-026 — Live Telegram trade alerts bypassed the rich HTML formatter layer
+
+**Status**: ✅ FIXED — `alert_dispatcher.py`, `paper_session_driver.py` (2026-04-23)
+**Severity**: Medium (alerts delivered, but operator detail/scan quality was much worse than CPR)
+**Found**: 2026-04-23 after comparing NSE alerts with CPR `stockquantlab` alerts
+
+**Problem**: The notifier module already had richer `format_trade_opened_alert()` and
+`format_trade_closed_alert()` helpers, but `paper_session_driver.py` bypassed them and enqueued
+minimal plain-text bodies like `symbol=... direction=... entry=... qty=...`.
+
+**Fix**:
+- route `TRADE_OPENED` / `TRADE_CLOSED` through the HTML formatter helpers
+- include CPR-style details: entry, SL, qty, rupee risk / realized P&L, reason, time, session context
+- normalize close labels such as `STOP_BREAKEVEN → BREAKEVEN_SL`
+- keep the TradingView `NSE:<SYMBOL>` chart link in the Telegram body/button
+
+**Note**: The current 2LYNCH live engine does not populate a deterministic `target_price`, so the
+rich alert includes a target only if that field is present in the trade result.
+
+---
+
+### ISSUE-027 — Windows restart flow can leave orphaned Python child processes holding `paper.duckdb`
+
+**Status**: ✅ FIXED — CLI startup now clears stale writer processes on lock detection
+**Severity**: Medium (restart friction; patched writer cannot relaunch until lock is cleared)
+**Found**: 2026-04-23 during repeated live-writer restarts
+
+**Problem**: Stopping the background `pwsh` parent for `nseml-paper multi-live` can leave an
+orphaned `python.exe` child in `Not Responding` state. That child continues holding the DuckDB
+writer lock, so the next launch fails with:
+
+`IO Error: Cannot open file "data/paper.duckdb": The process cannot access the file because it is being used by another process.`
+
+**Fix**: On CLI startup, if the paper DB is locked by a stale previous writer, the entrypoint now
+uses a best-effort Windows process scan to terminate orphaned `nseml-paper` / `paper_live`
+processes before retrying the DB open once.
+
+**Tracking goal**: still worth replacing this with explicit writer ownership / PID-file semantics
+later, but the manual orphan-cleanup loop is no longer required for normal restarts.
+
+---
+
+### ISSUE-028 — Paper session P&L is gross, while operators expect net-of-costs and Zerodha-style charges
+
+**Status**: ✅ FIXED — session aggregates and alerts now use net-of-modeled-fees math
+**Severity**: Medium (operator interpretation and paper-vs-live economics gap)
+**Found**: 2026-04-23 after breakeven exits alerted as `₹0 / 0.00%`
+
+**Problem**:
+- `paper_positions.pnl` stores gross trade P&L for auditability.
+- Session realized P&L used by dashboards, summaries, and risk logic was previously computed from
+  gross price movement only.
+- The current fill fee model is a simple `0.1%` per side approximation, not a true Zerodha brokerage +
+  statutory charge model.
+
+**Observed symptom**:
+- breakeven exits alert as `₹0` gross even though the operator correctly expects a small rupee loss
+  after costs
+- dashboard/session P&L can overstate profitability relative to realistic broker net
+
+**Fix**:
+- `PaperDB.get_session_realized_pnl()` now returns net realized P&L using the modeled entry/exit
+  fee approximation
+- daily summary, risk controls, API session views, and EOD carry logic now inherit that net
+  realized value
+- trade-close alerts continue to display net rupee loss and net return percentage for fee-only exits
+
+**Tracking goal**:
+1. Decide on a canonical cost model for NSE paper/backtest (`flat approx` vs `Zerodha-equivalent`)
+2. Thread that cost model into backtest and any future brokerage-equivalent regression pass
+3. Keep gross move % and net rupee P&L distinct in operator messages
+
+---
+
+### ISSUE-029 — `GAP_THROUGH_STOP` could fire on same-day intraday bars instead of only overnight gaps
+
+**Status**: ✅ FIXED — `paper_runtime.py` (2026-04-23)
+**Severity**: Medium (exit-reason classification bug; can distort live diagnostics and alert semantics)
+**Found**: 2026-04-23 after same-day trades were marked `GAP_THROUGH_STOP`
+
+**Problem**: `_advance_open_position()` checked `open_px` vs stop on every processed 5-minute bar.
+That means a position opened earlier the same day could later be classified as `GAP_THROUGH_STOP`
+if a subsequent intraday candle opened beyond the stop. This is not an overnight gap; it is just
+an intraday stop event.
+
+**Why this is wrong**: For a position opened on the current trade date, a true gap-through-stop can
+only happen on the next trading session's opening bar after the position is carried overnight.
+
+**Fix**: Restrict `GAP_THROUGH_STOP` classification to:
+- overnight-carried positions (`days_held > 0`)
+- the first processed bar for that symbol in the current session
+
+All other stop breaches now fall through to the normal stop-hit path (`STOP_INITIAL`,
+`STOP_BREAKEVEN`, `STOP_TRAIL`) instead of being mislabeled as an overnight gap.
+
+---
+
+### ISSUE-030 — Manual `flatten` lacks CPR-style operator alerts and daily summary behavior
+
+**Status**: ✅ FIXED — CLI flatten path patched on 2026-04-23
+**Severity**: Medium (manual intervention works on DB state, but operator observability is incomplete)
+**Found**: 2026-04-23 while testing manual flatten on active live sessions
+
+**Problem**: `nseml-paper flatten` currently:
+- closes open positions using the latest persisted marks
+- marks the session `PAUSED`
+
+but it does **not**:
+- emit a CPR-style flatten/session alert
+- dispatch `DAILY_PNL_SUMMARY`
+- provide a clear operator message/contract that this is a manual liquidation event
+
+**Impact**: During manual intervention, the database state changes correctly, but Telegram/email
+operators do not get the same rich lifecycle/scorecard signals they would expect from CPR.
+
+**Fix**:
+1. `nseml-paper flatten` and `flatten-all` now dispatch a rich manual-flatten alert
+2. the CLI path now also enqueues `DAILY_PNL_SUMMARY`
+3. both paths force-sync the versioned paper replica after writes so the dashboard catches up
+
+---
+
+### ISSUE-031 — Manual `flatten` changed `paper.duckdb` but did not sync the versioned paper replica
+
+**Status**: ✅ FIXED — CLI replica sync added on 2026-04-23
+**Severity**: Medium (dashboard could remain stale immediately after manual intervention)
+**Found**: 2026-04-23 after flattening both live sessions and seeing replica/dashboard lag
+
+**Problem**: `nseml-paper flatten` updated `paper.duckdb` directly, but unlike the live/replay writers
+it did not force a `VersionedReplicaSync` refresh. That left `paper_replica_v*.duckdb` and the
+dashboard pointer stale until some later writer action happened.
+
+**Fix**: The CLI flatten commands now force-sync the paper replica after database writes and alert-log
+entries, so manual flatten state is visible in the dashboard immediately.
+
+---
+
+### ISSUE-032 — Live/session daily summary path depended on a non-existent `PaperDB.list_positions()` API
+
+**Status**: ✅ FIXED — shared summary helper introduced on 2026-04-23
+**Severity**: High (daily summary dispatch could fail at session finalization)
+**Found**: 2026-04-23 during manual-flatten and EOD-summary audit
+
+**Problem**: `paper_live.py`'s `_dispatch_daily_pnl_summary()` called `paper_db.list_positions(session_id)`,
+but `PaperDB` only exposes `list_positions_by_session()`. That means the summary path could raise
+at session finalization and silently suppress the operator's expected EOD summary.
+
+**Fix**: Daily summary computation now lives in shared notifier helper code and uses the correct
+session-position API for both live and CLI/manual-flatten flows.
+
+---
+
+### ISSUE-033 — Alert retries were too short for transient Telegram/network failures
+
+**Status**: ✅ FIXED — `alert_dispatcher.py` (2026-04-23)
+**Severity**: Medium (transient DNS / 429 / timeout issues could drop operator alerts)
+**Found**: 2026-04-23 while comparing CPR alert hardening against NSE paper live
+
+**Problem**: The alert dispatcher retried every failure only 3 times with a 1s/2s/4s backoff.
+That was enough for trivial hiccups, but not for short DNS or Telegram outages.
+
+**Fix**: The retry policy now:
+- recognizes transient delivery failures such as `httpx.RequestError`, Telegram 429/5xx, and
+  common network timeout / DNS messages
+- retries them on a longer schedule: `1s, 2s, 4s, 30s, 120s, 300s`
+- leaves permanent failures as terminal so misconfiguration does not spin for minutes
+
+---
+
+### ISSUE-034 — `FEED_STALE` / `FEED_RECOVERED` alerts were still plain text instead of CPR-style rich HTML
+
+**Status**: ✅ FIXED — `paper_live.py` (2026-04-23)
+**Severity**: Low-Medium (alerts were delivered, but operator scan quality was poor)
+**Found**: 2026-04-23 while checking CPR-style feed alert parity
+
+**Problem**: Trade open/close alerts already used the rich HTML formatter layer, but feed
+stale/recovered transitions still built a log-like body string:
+
+`transport=websocket streak=3 last_tick=...`
+
+That was readable, but it was not on the same operator-friendly level as the CPR alerts.
+
+**Fix**:
+- reworked the live feed transition body into HTML with clear headings and fields
+- added session context, last-tick age, IST timestamps, and open-position blocks
+- formatted open positions as CPR-style rows with entry, SL, target, qty, and risk
+- changed the Telegram subject to a richer `⚠️ Feed Stale — ...` / `✅ Feed Recovered — ...` form
 
 ---
 

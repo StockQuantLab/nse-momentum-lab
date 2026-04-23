@@ -724,8 +724,8 @@ class TestEvaluateCandle:
             strategy_config=cfg,
         )
         assert result["action"] == "CLOSE"
-        assert result["reason"] == "GAP_THROUGH_STOP"
-        assert result["exit_price"] == pytest.approx(785.0)
+        assert result["reason"] == "STOP_INITIAL"
+        assert result["exit_price"] == pytest.approx(790.0)
 
 
 class TestEnforceSessionRiskControls:

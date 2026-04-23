@@ -123,6 +123,8 @@ def validate_daily_parquet(out_dir: Path) -> None:
     total = con.execute(
         f"SELECT COUNT(*), COUNT(DISTINCT symbol), MIN(date)::VARCHAR, MAX(date)::VARCHAR FROM read_parquet('{glob}', hive_partitioning=false)"
     ).fetchone()
+    if total is None:
+        raise SystemExit("No parquet rows found")
     print("Parquet validation")
     print(f"  Rows: {int(total[0]):,}")
     print(f"  Symbols: {int(total[1]):,}")

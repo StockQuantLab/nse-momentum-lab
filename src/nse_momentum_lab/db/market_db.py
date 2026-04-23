@@ -592,6 +592,26 @@ class MarketDataDB:
             params,
         ).pl()
 
+    def get_active_dq_symbols(
+        self,
+        *,
+        severities: tuple[str, ...] = ("CRITICAL", "HIGH"),
+    ) -> set[str]:
+        """Return symbols with active DQ issues at or above the requested severities."""
+        if not severities:
+            return set()
+        placeholders = ",".join("?" for _ in severities)
+        rows = self.con.execute(
+            f"""
+            SELECT DISTINCT symbol
+            FROM data_quality_issues
+            WHERE is_active = TRUE
+              AND severity IN ({placeholders})
+            """,
+            list(severities),
+        ).fetchall()
+        return {str(row[0]) for row in rows if row and row[0]}
+
     def refresh_backtest_read_snapshot(self) -> None:
         """Refresh versioned replica of backtest tables for dashboard reads."""
         if self._read_only:

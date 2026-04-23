@@ -19,8 +19,10 @@ import os
 import sys
 import time
 from datetime import UTC, datetime
+from html import escape
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from nse_momentum_lab.config import get_settings
 from nse_momentum_lab.db.market_db import MarketDataDB
@@ -42,7 +44,7 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertDispatcher,
     AlertEvent,
     AlertType,
-    format_daily_pnl_summary,
+    enqueue_daily_pnl_summary,
     get_alert_config,
 )
 from nse_momentum_lab.services.paper.scripts.paper_feed_audit import record_closed_candles
@@ -54,6 +56,7 @@ _CANDLE_INTERVAL = 5  # minutes
 _STALE_TIMEOUT = 300  # seconds
 _WEBSOCKET_RECOVERY_AFTER_SEC = 20.0
 _FEED_STALE_ALERT_COOLDOWN_SEC = 300.0
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 def _build_alert_dispatcher(
@@ -196,51 +199,78 @@ def _build_open_position_manual_lines(tracker: SessionPositionTracker | None) ->
         tracked = tracker.get_open_position(symbol)
         if tracked is None:
             continue
-        target = f"{tracked.target_price:.2f}" if tracked.target_price is not None else "-"
+        target = f"₹{tracked.target_price:,.2f}" if tracked.target_price is not None else "-"
+        risk_rupees = abs(tracked.entry_price - tracked.stop_loss) * float(tracked.current_qty)
+        icon = "🟢" if str(tracked.direction).upper() == "LONG" else "🔴"
         lines.append(
-            f"{symbol} {tracked.direction} entry={tracked.entry_price:.2f} "
-            f"SL={tracked.stop_loss:.2f} tgt={target} qty={int(tracked.current_qty)}"
+            f"{icon} <code>{escape(symbol)}</code> {escape(str(tracked.direction))}\n"
+            f"   Entry: <code>₹{tracked.entry_price:,.2f}</code> | "
+            f"SL: <code>₹{tracked.stop_loss:,.2f}</code> | "
+            f"Target: <code>{target}</code> | Qty: <code>{int(tracked.current_qty):,}</code>\n"
+            f"   Risk: <code>₹{risk_rupees:,.0f}</code>"
         )
     return lines
 
 
+def _format_ist_ts(ts: float | None) -> str | None:
+    if ts is None:
+        return None
+    return datetime.fromtimestamp(ts, tz=UTC).astimezone(_IST).strftime("%H:%M:%S IST")
+
+
 def _format_feed_stale_details(
     *,
+    session_id: str = "",
     transport: str,
     streak: int,
     tick_age_sec: float | None,
     last_tick_ts: float | None,
     tracker: SessionPositionTracker | None,
 ) -> str:
-    last_tick = (
-        datetime.fromtimestamp(last_tick_ts, tz=UTC).isoformat()
-        if last_tick_ts is not None
-        else "none"
-    )
-    detail = f"transport={transport} streak={streak} last_tick={last_tick}"
+    body_lines = [
+        "📡 <b>Feed stale</b>",
+        f"Session: <code>{escape(session_id[:16])}</code>",
+        f"Transport: <code>{escape(transport)}</code>",
+        f"Streak: <code>{int(streak)}</code>",
+    ]
     if tick_age_sec is not None:
-        detail += f" tick_age={tick_age_sec:.0f}s"
+        body_lines.append(f"Last tick age: <code>{tick_age_sec:.0f}s</code>")
+    last_tick = _format_ist_ts(last_tick_ts)
+    if last_tick is not None:
+        body_lines.append(f"Last tick: <code>{last_tick}</code>")
     open_pos_lines = _build_open_position_manual_lines(tracker)
     if open_pos_lines:
-        return detail + "\nOPEN POSITIONS — place manual SL orders:\n" + "\n".join(open_pos_lines)
-    return detail + "\nNo open positions."
+        body_lines.append("")
+        body_lines.append("⚡ <b>Open positions</b> — place manual SL orders now:")
+        body_lines.extend(open_pos_lines)
+    else:
+        body_lines.append("")
+        body_lines.append("No open positions.")
+    return "\n".join(body_lines)
 
 
 def _format_feed_recovered_details(
     *,
+    session_id: str = "",
     stale_cycles: int,
     tracker: SessionPositionTracker | None,
     reconnect_count: int | None = None,
     down_duration_sec: float | None = None,
 ) -> str:
-    parts = [f"Recovered after {stale_cycles} stale cycles."]
-    if down_duration_sec is not None:
-        parts.append(f"WebSocket recovered after {down_duration_sec:.0f}s down.")
-    if reconnect_count is not None:
-        parts.append(f"reconnects={reconnect_count}")
     open_count = tracker.open_count if tracker is not None else 0
-    parts.append(f"Monitoring {open_count} position(s).")
-    return " ".join(parts)
+    body_lines = [
+        "✅ <b>Feed recovered</b>",
+        f"Session: <code>{escape(session_id[:16])}</code>",
+        f"Stale cycles: <code>{int(stale_cycles)}</code>",
+        f"Monitoring: <code>{int(open_count)}</code> open position(s)",
+    ]
+    if down_duration_sec is not None:
+        body_lines.append(f"WebSocket down: <code>{down_duration_sec:.0f}s</code>")
+    if reconnect_count is not None:
+        body_lines.append(f"Reconnects: <code>{int(reconnect_count)}</code>")
+    body_lines.append("")
+    body_lines.append("Market data is live again.")
+    return "\n".join(body_lines)
 
 
 def _log_ticker_health(
@@ -342,11 +372,17 @@ def _maybe_emit_feed_transition(
                 return False
 
     alert_type = AlertType.FEED_STALE if normalized == "STALE" else AlertType.FEED_RECOVERED
+    short_session = session_id[:16]
+    subject = (
+        f"⚠️ Feed Stale — {short_session}"
+        if alert_type == AlertType.FEED_STALE
+        else f"✅ Feed Recovered — {short_session}"
+    )
     alert_dispatcher.enqueue(
         AlertEvent(
             alert_type=alert_type,
             session_id=session_id,
-            subject=f"{alert_type.value}: {session_id}",
+            subject=subject,
             body=details,
             level="warning" if alert_type == AlertType.FEED_STALE else "info",
         )
@@ -631,6 +667,7 @@ async def run_live_session(
                                 alert_state=feed_alert_state,
                                 next_state="OK",
                                 details=_format_feed_recovered_details(
+                                    session_id=session_id,
                                     stale_cycles=no_snapshot_streak,
                                     tracker=tracker,
                                     reconnect_count=int(ticker_adapter.reconnect_count),
@@ -714,6 +751,7 @@ async def run_live_session(
                         alert_state=feed_alert_state,
                         next_state="OK",
                         details=_format_feed_recovered_details(
+                            session_id=session_id,
                             stale_cycles=no_snapshot_streak,
                             tracker=tracker,
                             reconnect_count=(
@@ -736,7 +774,7 @@ async def run_live_session(
                         status="OK",
                         is_stale=False,
                         subscription_count=len(active_symbols),
-                        last_bar_ts=datetime.fromtimestamp(bar_end, tz=UTC)
+                        last_bar_at=datetime.fromtimestamp(bar_end, tz=UTC)
                         if isinstance(bar_end, (int, float))
                         else None,
                         alert_state=feed_alert_state,
@@ -811,6 +849,7 @@ async def run_live_session(
                             alert_state=feed_alert_state,
                             next_state="OK",
                             details=_format_feed_recovered_details(
+                                session_id=session_id,
                                 stale_cycles=no_snapshot_streak,
                                 tracker=tracker,
                                 reconnect_count=(
@@ -844,6 +883,7 @@ async def run_live_session(
                         _sync_replica_after_write(replica, paper_db)
                     if is_stale and no_snapshot_streak >= 3:
                         details = _format_feed_stale_details(
+                            session_id=session_id,
                             transport="websocket",
                             streak=no_snapshot_streak,
                             tick_age_sec=tick_age_sec,
@@ -1193,85 +1233,17 @@ def _dispatch_daily_pnl_summary(
     mark_prices: dict[str, float] | None = None,
     alerts_sent: set[str] | None = None,
 ) -> None:
-    """Compute and enqueue DAILY_PNL_SUMMARY with realized + unrealized breakdown."""
-    if not alert_dispatcher._enabled:
-        return
-    if paper_db.has_alert_log(session_id, AlertType.DAILY_PNL_SUMMARY.value, status="sent"):
-        return
-    # Dedup guard: only send once per session per invocation.
-    _summary_key = f"DAILY_PNL_SUMMARY:{session_id}"
-    if alerts_sent is not None and _summary_key in alerts_sent:
-        return
-    if alerts_sent is not None:
-        alerts_sent.add(_summary_key)
-    try:
-        realized_pnl = paper_db.get_session_realized_pnl(session_id)
-
-        # Compute unrealized from live marks first, then persisted metadata, then entry.
-        unrealized_pnl = 0.0
-        open_pos_details: list[dict] = []
-        for p in paper_db.list_open_positions(session_id):
-            meta = p.get("metadata_json") or {}
-            sym = p.get("symbol", "")
-            qty = int(p.get("qty", 0))
-            avg_entry = float(p.get("avg_entry", 0))
-            direction = str(p.get("direction", "LONG")).upper()
-            mark = (mark_prices or {}).get(sym)
-            if mark is None:
-                mark = float(meta.get("last_mark_price", avg_entry))
-            if direction == "LONG":
-                upnl = (mark - avg_entry) * qty
-            else:
-                upnl = (avg_entry - mark) * qty
-            unrealized_pnl += upnl
-            open_pos_details.append(
-                {
-                    "symbol": sym,
-                    "unrealized_pnl": upnl,
-                    "days_held": meta.get("days_held", 0),
-                }
-            )
-
-        # Count today's closed trades and winners/losers.
-        closed_positions = paper_db.list_positions(session_id)
-        trades_closed_today = 0
-        winners = 0
-        losers = 0
-        for p in closed_positions:
-            if p.get("state") == "CLOSED" and p.get("pnl") is not None:
-                trades_closed_today += 1
-                if p["pnl"] >= 0:
-                    winners += 1
-                else:
-                    losers += 1
-
-        max_dd_used_pct = (
-            abs(realized_pnl + unrealized_pnl) / portfolio_value * 100 if portfolio_value else 0.0
-        )
-
-        subject, body = format_daily_pnl_summary(
-            session_id=session_id,
-            strategy=strategy,
-            trade_date=trade_date,
-            realized_pnl=realized_pnl,
-            unrealized_pnl=unrealized_pnl,
-            trades_closed_today=trades_closed_today,
-            winners=winners,
-            losers=losers,
-            open_positions=open_pos_details,
-            portfolio_value=portfolio_value,
-            max_dd_used_pct=max_dd_used_pct,
-        )
-        alert_dispatcher.enqueue(
-            AlertEvent(
-                alert_type=AlertType.DAILY_PNL_SUMMARY,
-                session_id=session_id,
-                subject=subject,
-                body=body,
-            )
-        )
-    except Exception:
-        logger.exception("Failed to dispatch DAILY_PNL_SUMMARY session=%s", session_id)
+    """Compute and enqueue DAILY_PNL_SUMMARY with shared notifier logic."""
+    enqueue_daily_pnl_summary(
+        alert_dispatcher=alert_dispatcher,
+        session_id=session_id,
+        paper_db=paper_db,
+        strategy=strategy,
+        trade_date=trade_date,
+        portfolio_value=portfolio_value,
+        mark_prices=mark_prices,
+        alerts_sent=alerts_sent,
+    )
 
 
 def main() -> None:

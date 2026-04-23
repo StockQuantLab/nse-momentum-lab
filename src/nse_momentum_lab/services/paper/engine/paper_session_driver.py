@@ -25,7 +25,12 @@ from nse_momentum_lab.services.paper.engine.paper_runtime import (
     evaluate_candle,
     execute_entry,
 )
-from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import AlertEvent, AlertType
+from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
+    AlertEvent,
+    AlertType,
+    format_trade_closed_alert,
+    format_trade_opened_alert,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,9 +119,6 @@ async def process_closed_bar_group(
                 exit_price = result["exit_price"]
                 # Capture position data BEFORE record_close() pops it from the tracker.
                 tracked_before_close = tracker.get_open_position(symbol)
-                entry_price_for_alert = (
-                    tracked_before_close.entry_price if tracked_before_close else 0.0
-                )
                 exit_value = _compute_exit_value(tracker, symbol, exit_price)
                 tracker.record_close(symbol, exit_value)
                 state = runtime_state.for_symbol(symbol)
@@ -131,7 +133,12 @@ async def process_closed_bar_group(
                 # Alert.
                 if alert_dispatcher is not None:
                     _dispatch_trade_closed(
-                        alert_dispatcher, session_id, symbol, result, entry_price_for_alert
+                        alert_dispatcher,
+                        session_id,
+                        symbol,
+                        result,
+                        session,
+                        tracked_before_close,
                     )
 
             elif result.get("action") == "HOLD":
@@ -201,7 +208,7 @@ async def process_closed_bar_group(
                 strategy_config=strategy_config,
             )
             if result and result.get("status") == "opened" and alert_dispatcher is not None:
-                _dispatch_trade_opened(alert_dispatcher, session_id, result)
+                _dispatch_trade_opened(alert_dispatcher, session_id, session, result)
 
         # ------------------------------------------------------------------
         # Step 4: NSEML-specific filtering (placeholder for strategy filters)
@@ -477,16 +484,31 @@ def _log_close(symbol: str, reason: str, exit_price: float, tracked: Any) -> Non
         )
 
 
-def _dispatch_trade_opened(dispatcher: Any, session_id: str, result: dict[str, Any]) -> None:
+def _dispatch_trade_opened(
+    dispatcher: Any,
+    session_id: str,
+    session: dict[str, Any],
+    result: dict[str, Any],
+) -> None:
     try:
+        subject, body = format_trade_opened_alert(
+            symbol=str(result.get("symbol", "")),
+            direction=str(result.get("direction", "LONG")).upper(),
+            entry_price=float(result.get("entry_price", 0.0) or 0.0),
+            initial_stop=float(result.get("initial_stop", 0.0) or 0.0),
+            qty=int(result.get("qty", 0) or 0),
+            target_price=(
+                float(result["target_price"]) if result.get("target_price") is not None else None
+            ),
+            session_id=session_id,
+            strategy=str(session.get("strategy_name", "")),
+            event_time=datetime.now(tz=UTC),
+        )
         event = AlertEvent(
             alert_type=AlertType.TRADE_OPENED,
             session_id=session_id,
-            subject=f"ENTERED {result.get('direction', 'LONG')} {result.get('symbol', '')}",
-            body=(
-                f"symbol={result.get('symbol')} direction={result.get('direction')} "
-                f"entry={result.get('entry_price', 0):.2f} qty={result.get('qty', 0)}"
-            ),
+            subject=subject,
+            body=body,
         )
         dispatcher.enqueue(event)
     except Exception:
@@ -508,17 +530,43 @@ def _dispatch_trade_closed(
     session_id: str,
     symbol: str,
     result: dict[str, Any],
-    entry_price: float,
+    session: dict[str, Any],
+    tracked_before_close: Any,
 ) -> None:
     try:
-        exit_price = result.get("exit_price", 0.0)
-        reason = result.get("reason", "")
+        exit_price = float(result.get("exit_price", 0.0) or 0.0)
+        reason = str(result.get("reason", ""))
         alert_type = _classify_exit_alert_type(reason)
+        entry_price = float(getattr(tracked_before_close, "entry_price", 0.0) or 0.0)
+        direction = str(getattr(tracked_before_close, "direction", "LONG")).upper()
+        qty = int(getattr(tracked_before_close, "current_qty", 0) or 0)
+        gross_pnl = (
+            qty * (exit_price - entry_price)
+            if direction == "LONG"
+            else qty * (entry_price - exit_price)
+        )
+        # Match the current paper-engine fee model used in entry/exit fills so
+        # breakeven stops still show the expected small rupee loss in alerts.
+        entry_fees = round(entry_price * qty * 0.001, 4)
+        exit_fees = round(exit_price * qty * 0.001, 4)
+        realized_pnl = gross_pnl - entry_fees - exit_fees
+        subject, body = format_trade_closed_alert(
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            reason=reason,
+            realized_pnl=realized_pnl,
+            qty=qty,
+            session_id=session_id,
+            strategy=str(session.get("strategy_name", "")),
+            event_time=datetime.now(tz=UTC),
+        )
         event = AlertEvent(
             alert_type=alert_type,
             session_id=session_id,
-            subject=f"CLOSED {symbol} reason={reason}",
-            body=(f"symbol={symbol} entry={entry_price:.2f} exit={exit_price:.2f} reason={reason}"),
+            subject=subject,
+            body=body,
         )
         dispatcher.enqueue(event)
     except Exception:

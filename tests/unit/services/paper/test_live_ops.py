@@ -310,9 +310,14 @@ def test_format_feed_stale_details_includes_manual_position_lines():
         tracker=tracker,
     )
 
-    assert "transport=websocket" in details
-    assert "OPEN POSITIONS — place manual SL orders:" in details
-    assert "GTPL SHORT entry=68.36 SL=68.45 tgt=67.94 qty=1462" in details
+    assert "Feed stale" in details
+    assert "Transport: <code>websocket</code>" in details
+    assert "⚡ <b>Open positions</b> — place manual SL orders now:" in details
+    assert "GTPL" in details
+    assert "Entry: <code>₹68.36</code>" in details
+    assert "SL: <code>₹68.45</code>" in details
+    assert "Target: <code>₹67.94</code>" in details
+    assert "Qty: <code>1,462</code>" in details
 
 
 def test_format_feed_recovered_details_matches_operator_summary():
@@ -327,10 +332,11 @@ def test_format_feed_recovered_details_matches_operator_summary():
         down_duration_sec=52,
     )
 
-    assert "Recovered after 1 stale cycles." in details
-    assert "WebSocket recovered after 52s down." in details
-    assert "reconnects=0" in details
-    assert "Monitoring 0 position(s)." in details
+    assert "Feed recovered" in details
+    assert "Stale cycles: <code>1</code>" in details
+    assert "WebSocket down: <code>52s</code>" in details
+    assert "Reconnects: <code>0</code>" in details
+    assert "Monitoring: <code>0</code> open position(s)" in details
 
 
 def test_cmd_live_uses_retry_wrapper_and_forwards_no_alerts(monkeypatch):

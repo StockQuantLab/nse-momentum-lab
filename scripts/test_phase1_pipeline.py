@@ -272,7 +272,7 @@ async def run_backtest(
             test_signals = []
             for symbol_id, symbol in symbols_with_data:
                 # Get the price data
-                price_data = await session.execute(
+                price_rows = await session.execute(
                     select(MdOhlcvAdj)
                     .where(MdOhlcvAdj.symbol_id == symbol_id)
                     .where(MdOhlcvAdj.trading_date <= asof_date)
@@ -280,7 +280,7 @@ async def run_backtest(
                     .limit(100)
                 )
 
-                prices = list(price_data.scalars().all())
+                prices = list(price_rows.scalars().all())
                 if prices:
                     latest = prices[0]
                     test_signals.append(
@@ -299,13 +299,13 @@ async def run_backtest(
             test_signals = []
             for sr, rs in results:
                 # Get price data to compute stop
-                price_data = await session.execute(
+                price_row_result = await session.execute(
                     select(MdOhlcvAdj)
                     .where(MdOhlcvAdj.symbol_id == sr.symbol_id)
                     .where(MdOhlcvAdj.trading_date == asof_date)
                 )
 
-                price = price_data.scalar_one_or_none()
+                price = price_row_result.scalar_one_or_none()
                 if price:
                     test_signals.append(
                         (
@@ -320,7 +320,7 @@ async def run_backtest(
         print_info(f"Total signals to backtest: {len(test_signals)}")
 
         # Load price data for backtest
-        price_data: dict[int, dict[date, dict[str, float]]] = {}
+        price_data_by_symbol: dict[int, dict[date, dict[str, float]]] = {}
         dollar_vol: dict[int, float] = {}
 
         for _, symbol_id, _, _, _ in test_signals:
@@ -333,9 +333,9 @@ async def run_backtest(
                 .limit(10)
             )
 
-            price_data[symbol_id] = {}
+            price_data_by_symbol[symbol_id] = {}
             for p in prices.scalars().all():
-                price_data[symbol_id][p.trading_date] = {
+                price_data_by_symbol[symbol_id][p.trading_date] = {
                     "open_adj": float(p.open_adj),
                     "high_adj": float(p.high_adj),
                     "low_adj": float(p.low_adj),
@@ -358,6 +358,7 @@ async def run_backtest(
 
     try:
         print_info("Starting backtest...")
+        price_data = price_data_by_symbol
 
         result = await registry.register_and_run(
             strategy_name="4P_2LYNCH",
