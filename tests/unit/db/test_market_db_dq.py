@@ -128,6 +128,19 @@ class TestQueryActiveDqIssues:
         assert len(issues) == 1
         assert issues["symbol"][0] == "AAA"
 
+    def test_filter_by_issue_codes(self):
+        db = _make_db()
+        db.upsert_data_quality_issues(symbols=["AAA"], issue_code="TIMESTAMP_INVALID")
+        db.upsert_data_quality_issues(symbols=["BBB"], issue_code="OHLC_VIOLATION")
+
+        blocked = db.get_active_dq_symbols(issue_codes=("OHLC_VIOLATION",))
+        assert blocked == {"BBB"}
+
+        mixed = db.get_active_dq_symbols(
+            issue_codes=("TIMESTAMP_INVALID", "OHLC_VIOLATION")
+        )
+        assert mixed == {"AAA", "BBB"}
+
     def test_returns_empty_when_no_matches(self):
         db = _make_db()
         issues = db.query_active_dq_issues(issue_code="NONEXISTENT")

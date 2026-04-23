@@ -35,30 +35,34 @@ consolidation), 5-min and daily prices are now on different price scales.
 
 ### ISSUE-004 — Active DQ issues in market data
 
-**Status**: PARTIALLY ADDRESSED — critical/high active DQ symbols are excluded from default backtest/live universe bootstrap
-**Severity**: Medium
+**Status**: PARTIALLY ADDRESSED — live/backtest gate narrowed to tradability blockers; raw DQ cleanup still pending
+**Severity**: Medium (was Critical during Apr-23 baseline regression)
 **Found**: 2026-04-19 (from DQ table scan)
+**Regression**: 2026-04-23 — commit `d68038a3` added a severity-only DQ filter to the backtest universe, excluding 1,626/2,097 symbols
 
 **Active issue counts in `data_quality_issues` (market.duckdb)**:
-- `TIMESTAMP_INVALID`: 1,628 rows
-- `ZERO_PRICE`: 718 rows
-- `DATE_GAP`: 319 rows
+- `TIMESTAMP_INVALID`: 1,628 rows (1,626 distinct symbols)
 - `OHLC_VIOLATION`: 218 rows
 
-These are pre-existing and were not introduced by recent re-ingest. Most affect illiquid symbols
-not in the trading universe. Current universe check on latest `feat_daily` (`2026-04-22`) shows
-material overlap with the top-2000 liquid set:
-- 1,717 symbols have at least one active DQ flag in the top-2000 universe
-- 1,526 of those are `CRITICAL` / `HIGH`
-- `TIMESTAMP_INVALID` dominates the critical overlap
+These are pre-existing and were not introduced by recent re-ingest. Most are minor timestamp
+formatting issues in older (2015-2019) data that don't materially affect backtest P&L.
 
-This is not a code bug, but it is still a live/backtest data-quality risk. Investigate before
-expanding universe beyond 2000 symbols or treating the current active universe as fully clean.
+**What happened**: Commit `d68038a3` ("Harden paper/live alert and parity paths") added a
+severity-based `NOT EXISTS` subquery on `data_quality_issues` to the backtest universe selection SQL
+in `duckdb_backtest_runner.py`. Because `TIMESTAMP_INVALID` is stored as `CRITICAL`, this excluded
+1,626/2,097 symbols (78%), reducing BREAKOUT_4PCT from 2,213 trades to just 167 (only 2025-2026
+data had trades). The backtest engine already has its own data quality guards (price continuity
+guard, `DATA_INVALIDATION` exit reason), so the broad severity filter was redundant at this layer.
+
+**Fix**: Replaced the severity filter with a live-tradability gate shared by backtest, paper, and
+live bootstrap. Only structural corruption codes are blocked:
+`OHLC_VIOLATION`, `NULL_PRICE`, `ZERO_PRICE`, and `DUPLICATE_CANDLE`.
 
 **Mitigation**:
-- default backtest universe loading now excludes active `CRITICAL` / `HIGH` DQ symbols
-- paper live/replay session bootstrap now applies the same exclusion before seeding candidates
+- paper live/replay session bootstrap applies the same tradability gate before seeding candidates
 - the raw DQ rows remain in `data_quality_issues` for follow-up cleanup
+- `TIMESTAMP_INVALID`, `DATE_GAP`, `EXTREME_CANDLE`, `EXTREME_MOVE_DAILY`, `SHORT_HISTORY`, and
+  `ZERO_VOLUME_DAY` remain advisory until their data windows are cleaned up
 
 ---
 
@@ -758,6 +762,30 @@ That was readable, but it was not on the same operator-friendly level as the CPR
 - added session context, last-tick age, IST timestamps, and open-position blocks
 - formatted open positions as CPR-style rows with entry, SL, target, qty, and risk
 - changed the Telegram subject to a richer `⚠️ Feed Stale — ...` / `✅ Feed Recovered — ...` form
+
+---
+
+### ISSUE-035 — DQ universe gate was overblocking `TIMESTAMP_INVALID` and shrinking the backtest universe
+
+**Status**: ✅ FIXED — `market_db.py`, `paper_v2.py`, `paper_runtime.py`, `duckdb_backtest_runner.py`, `data_hygiene.py` (2026-04-23)
+**Severity**: High (live/backtest parity regression; overfiltered universe changed run comparability)
+**Found**: 2026-04-23 after comparing DQ-filtered vs reverted canonical runs
+
+**Problem**: The universe gate used active `CRITICAL/HIGH` DQ severity as a hard block. That
+treated `TIMESTAMP_INVALID` as trade-blocking even though it is mostly an older timestamp hygiene
+signal, not a live tradability blocker. Because `TIMESTAMP_INVALID` covered most of the liquid
+universe, the gate excluded far too many symbols and made the backtest/live universe diverge.
+
+**Fix**:
+- changed the live/backtest universe gate to block only true live-tradability corruption codes:
+  `OHLC_VIOLATION`, `NULL_PRICE`, `ZERO_PRICE`, and `DUPLICATE_CANDLE`
+- corrected the paper bootstrap symbol query to interpolate the live-blocking code list properly
+- left `TIMESTAMP_INVALID`, `DATE_GAP`, `EXTREME_CANDLE`, `EXTREME_MOVE_DAILY`, `SHORT_HISTORY`,
+  and `ZERO_VOLUME_DAY` as advisory DQ signals for reporting and cleanup
+- updated the trade-date readiness gate to fail only on live-blocking DQ codes
+
+**Result**: live and backtest now share the same tradability filter instead of a severity-only
+filter, so DQ hygiene no longer removes most of the universe by accident.
 
 ---
 

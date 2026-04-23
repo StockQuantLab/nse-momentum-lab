@@ -20,7 +20,11 @@ import time
 from datetime import date
 
 from nse_momentum_lab.cli.rebuild_guards import require_full_rebuild_ack
-from nse_momentum_lab.db.market_db import close_market_db, get_market_db
+from nse_momentum_lab.db.market_db import (
+    close_market_db,
+    get_market_db,
+    get_market_replica_sync,
+)
 from nse_momentum_lab.features import get_feature_registry
 
 # Configure logging so feature-module logger.info() calls are visible
@@ -57,6 +61,16 @@ FEATURE_SET_ALIASES = {
     "derived": "feat_2lynch_derived",
     "all": None,  # Special case - build all
 }
+
+
+def _sync_market_replica(db) -> None:
+    """Force-sync the market replica so the dashboard sees updated data."""
+    try:
+        sync = get_market_replica_sync()
+        sync.force_sync(source_conn=db.con)
+        print("  Market replica synced")
+    except Exception as exc:
+        logger.warning("Market replica sync failed (non-fatal): %s", exc)
 
 
 def _detect_missing_per_table(db) -> dict[str, list[str]]:
@@ -225,6 +239,7 @@ def _run_smart_missing(db) -> int:
         print()
 
     create_legacy_feat_daily_view(db.con)
+    _sync_market_replica(db)
     total = time.monotonic() - t_start
     print("=" * 60)
     print(f"Done in {total:.1f}s.")
@@ -256,6 +271,7 @@ def _run_symbol_rebuild(db, symbols: list[str]) -> int:
     _timed("feat_2lynch_derived", lambda: db.build_2lynch_derived(symbols=symbols))
 
     create_legacy_feat_daily_view(db.con)
+    _sync_market_replica(db)
     total = time.monotonic() - t_start
     print(f"\n{'=' * 60}")
     print(f"Done in {total:.1f}s.")
@@ -561,6 +577,7 @@ def main():
                 print(f"  {key}: {value}")
         print("=" * 60)
 
+        _sync_market_replica(db)
         return 0
     finally:
         if db is not None:

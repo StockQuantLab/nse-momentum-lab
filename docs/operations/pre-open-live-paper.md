@@ -20,6 +20,7 @@ paper-trading readiness workflow for the v2 engine (`nseml-paper`).
    - Backfill / recovery: use `--from/--to` or `--backfill` only when repairing older gaps.
 4. Refresh features and runtime tables after ingest.
    - Normal daily launch: rebuild incrementally from today's date, not full history.
+   - `nseml-build-features` automatically force-syncs the market replica after every build, so the dashboard (market monitor, DQ) sees updated data without a manual step.
 5. Run the runtime verifier:
    ```bash
    doppler run -- uv run nseml-db-verify

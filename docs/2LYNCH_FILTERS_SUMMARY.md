@@ -1,7 +1,7 @@
 # 2LYNCH Filters — Implementation Summary
 
 **Date**: 2026-03-07
-**Status**: PRODUCTION (exp 429c79ac45b65086: Calmar 43.67, Ann Ret 193.9%, Max DD 4.4%)
+**Status**: PRODUCTION (exp d245816e1d89e196: Calmar 17.2, Ann Ret 54.2%, Max DD 3.16%)
 
 ---
 
@@ -152,4 +152,4 @@ Use this one fixed setup for future apples-to-apples comparisons. Only `breakout
 | `breakdown_breadth_threshold` | `None` |
 | `breakdown_require_atr_expansion` | `false` |
 
-*Production baseline (exp 429c79ac45b65086): 2015–2025, ~1,776 stocks, 60-min FEE, 5/6 filters required*
+*Production baseline (exp d245816e1d89e196): 2015–2026-04-22, universe 2000, 60-min FEE, 5/6 filters required*

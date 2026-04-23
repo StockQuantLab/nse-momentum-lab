@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, timezone
 from typing import Any
 
+from nse_momentum_lab.db.market_db import LIVE_BLOCKING_DQ_CODES
 from nse_momentum_lab.services.backtest.duckdb_backtest_runner import BacktestParams
 from nse_momentum_lab.services.paper.candidate_builder import (
     apply_breakdown_selection_ranking,
@@ -668,7 +669,9 @@ def seed_candidates_from_market_db(
     blocked_symbols: set[str] = set()
     if hasattr(market_db, "get_active_dq_symbols"):
         try:
-            blocked_symbols = set(market_db.get_active_dq_symbols(severities=("CRITICAL", "HIGH")))
+            blocked_symbols = set(
+                market_db.get_active_dq_symbols(issue_codes=LIVE_BLOCKING_DQ_CODES)
+            )
         except Exception:
             logger.exception("Failed to query active DQ symbols; continuing without filter")
             blocked_symbols = set()

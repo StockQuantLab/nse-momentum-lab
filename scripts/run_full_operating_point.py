@@ -38,10 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     # Infrastructure args only — strategy params come from presets.
-    parser.add_argument("--start-year", type=int, default=2025)
+    parser.add_argument("--start-year", type=int, default=2015)
     parser.add_argument("--end-year", type=int, default=2026)
-    parser.add_argument("--start-date", type=str, default="2025-01-01")
-    parser.add_argument("--end-date", type=str, default="2026-04-17")
+    parser.add_argument("--start-date", type=str, default="2015-01-01")
+    parser.add_argument("--end-date", type=str, default="2026-04-23")
     parser.add_argument("--universe-size", type=int, default=2000)
     parser.add_argument("--min-price", type=int, default=10)
     parser.add_argument("--min-filters", type=int, default=5)

@@ -59,11 +59,11 @@ Implemented in `VectorBTEngine._build_exit_signals()`:
 
 Stockbee-style "4% breakout / momentum burst" adapted for Indian (NSE) equities.
 
-**Production Results** (exp 429c79ac45b65086, 2015-2025):
-- Total Return: 1,939%
-- Annualized Return: 193.9%
-- Max Drawdown: 4.4%
-- Calmar Ratio: 43.67
+**Production Results** (exp d245816e1d89e196, 2015-2026-04-22):
+- Total Return: 650.3%
+- Annualized Return: 54.2%
+- Max Drawdown: 3.16%
+- Calmar Ratio: 17.2
 
 ### 2.2 Breakout Detection
 

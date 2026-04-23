@@ -1,7 +1,7 @@
 # Command Reference - nse-momentum-lab
 
 **Version**: Multi-Strategy Platform (Phase 1–7 complete) + Paper Trading v2 Engine
-**Last Updated**: 2026-04-21
+**Last Updated**: 2026-04-23
 
 ---
 
@@ -171,6 +171,7 @@ doppler run -- uv run nseml-kite-ingest --from LAST_DATE --to TODAY
 doppler run -- uv run nseml-kite-ingest --from LAST_DATE --to TODAY --5min --resume
 
 # 4. Incremental feature rebuild (WAIT for 5-min to finish — feat_intraday_core depends on it)
+#    This step also force-syncs the market replica so the dashboard sees updated data.
 doppler run -- uv run nseml-build-features --since LAST_DATE
 
 # 5. Market monitor refresh
@@ -186,6 +187,7 @@ doppler run -- uv run nseml-db-verify
 
 **Important**: Steps 2-3 are sequential. Step 4 must wait for step 3 to complete.
 Step 6 (DQ scan) is mandatory — never skip it after ingestion.
+The market replica is synced automatically by step 4 — the dashboard reads from the replica, not the source DB.
 
 ### Corporate Action Adjustment
 
@@ -247,15 +249,19 @@ doppler run -- uv run python -c "import asyncio; from datetime import date; from
 
 ### Backtesting
 
-#### Run production baseline (2LYNCHBreakout, 4%, 60-min FEE)
+#### Run canonical 4% breakout baseline
 ```bash
 doppler run -- uv run python -m nse_momentum_lab.cli.backtest \
+  --strategy thresholdbreakout \
+  --breakout-threshold 0.04 \
   --universe-size 2000 \
   --start-year 2015 \
-  --end-year 2025
+  --end-year 2026 \
+  --start-date 2015-01-01 \
+  --end-date 2026-04-22
 ```
-Expected: ~7,073 trades, 51.3% win rate, 193.9% annualized, 4.4% max DD, Calmar ~43.67
-Experiment ID: `429c79ac45b65086`
+Expected: matches the frozen canonical 4% breakout baseline in `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-22.md`
+Experiment ID: `d245816e1d89e196`
 
 #### Run 2LYNCHBreakout (configurable threshold, LONG)
 ```bash

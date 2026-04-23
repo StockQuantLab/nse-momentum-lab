@@ -87,6 +87,10 @@ doppler run -- uv run nseml-market-monitor --incremental --since 2026-03-27
 doppler run -- uv run nseml-db-verify
 ```
 
+Note: `nseml-build-features` automatically force-syncs the market replica after every build. The
+dashboard reads from the replica (`data/market_replica/`), not the source DB — so the market
+monitor, DQ, and other dashboard pages will reflect the latest data after this step.
+
 If you need to refresh data for only a small symbol list, the supported route is:
 
 1. Run `nseml-kite-ingest --symbols ... --update-features` for the affected date window.
@@ -200,6 +204,7 @@ When you need to correct a date window:
 1. Re-run the affected date range with `nseml-kite-ingest`.
 2. Use `--no-resume` only when you intentionally want to overwrite the same window from scratch.
 3. Refresh dependent tables with `nseml-build-features --since <YYYY-MM-DD>` and `nseml-market-monitor --incremental --since <YYYY-MM-DD>`.
+   The feature build step auto-syncs the market replica — the dashboard will see updated data.
 
 Example:
 

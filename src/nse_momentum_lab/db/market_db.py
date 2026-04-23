@@ -27,6 +27,13 @@ import polars as pl
 
 logger = logging.getLogger(__name__)
 
+LIVE_BLOCKING_DQ_CODES: tuple[str, ...] = (
+    "OHLC_VIOLATION",
+    "NULL_PRICE",
+    "ZERO_PRICE",
+    "DUPLICATE_CANDLE",
+)
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 PARQUET_DIR = DATA_DIR / "parquet"
@@ -596,8 +603,24 @@ class MarketDataDB:
         self,
         *,
         severities: tuple[str, ...] = ("CRITICAL", "HIGH"),
+        issue_codes: tuple[str, ...] | None = None,
     ) -> set[str]:
-        """Return symbols with active DQ issues at or above the requested severities."""
+        """Return symbols with active DQ issues filtered by severity or issue code."""
+        if issue_codes is not None:
+            if not issue_codes:
+                return set()
+            placeholders = ",".join("?" for _ in issue_codes)
+            rows = self.con.execute(
+                f"""
+                SELECT DISTINCT symbol
+                FROM data_quality_issues
+                WHERE is_active = TRUE
+                  AND issue_code IN ({placeholders})
+                """,
+                list(issue_codes),
+            ).fetchall()
+            return {str(row[0]) for row in rows if row and row[0]}
+
         if not severities:
             return set()
         placeholders = ",".join("?" for _ in severities)

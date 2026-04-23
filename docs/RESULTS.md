@@ -1,19 +1,19 @@
 # Backtest Results
 
-**Production Baseline** - Experiment ID: `429c79ac45b65086`
-<br>Strategy: thresholdbreakout | Period: 2015-2025 | Status: COMPLETED
+**Production Baseline** - Experiment ID: `d245816e1d89e196`
+<br>Strategy: thresholdbreakout | Period: 2015-2026-04-22 | Status: COMPLETED
 
 ---
 
-## All Strategy Results (2015–2025, ~1,820 stocks, 60-min FEE)
+## All Strategy Results (2015–2026-04-22, universe 2000, 60-min FEE)
 
 | Strategy | Threshold | Dir | Exp ID | Trades | Win% | Ann Ret | Max DD | Calmar | Total Ret |
 |----------|-----------|-----|--------|--------|------|---------|--------|--------|-----------|
-| **thresholdbreakout** | 4% | LONG | `429c79ac45b65086` | **7,073** | **51.3%** | **193.9%** | **4.44%** | **43.67** | **2,132%** |
-| 2LYNCHBreakout | 4% | LONG | `43c8990c27276576` | 7,073 | 51.3% | 193.9% | 4.44% | 43.67 | 2,132% |
-| 2LYNCHBreakout | 2% | LONG | `c002e35f6fc50934` | 18,657 | 45.8% | 338.7% | 5.75% | **58.94** | 3,725% |
-| 2LYNCHBreakdown | 4% | SHORT | `42e92fc9c0dd5f5d` | 4,717 | 38.9% | 61.4% | 36.69% | 1.67 | 675% |
-| 2LYNCHBreakdown | 2% | SHORT | `adc114dd40fa0289` | 23,252 | 39.5% | 286.2% | 23.15% | 12.36 | 3,148% |
+| **thresholdbreakout** | 4% | LONG | `d245816e1d89e196` | **2,213** | **40.6%** | **54.2%** | **3.16%** | **17.2** | **650.3%** |
+| 2LYNCHBreakout | 4% | LONG | `d245816e1d89e196` | 2,213 | 40.6% | 54.2% | 3.16% | 17.2 | 650.3% |
+| 2LYNCHBreakout | 2% | LONG | `f5bf9a6836901550` | 7,086 | 38.7% | 122.0% | 2.73% | **44.7** | 1,463.5% |
+| 2LYNCHBreakdown | 4% | SHORT | `f4a125fce62ddb24` | 258 | 36.0% | 3.1% | 0.74% | 4.2 | 37.7% |
+| 2LYNCHBreakdown | 2% | SHORT | `be7958b0f79c3c1c` | 790 | 25.7% | 8.2% | 1.90% | 4.3 | 98.9% |
 | EpisodicPivot | 5% gap | LONG | `8f7387ee18478ecb` | 6 | 66.7% | 0.3% | 0.41% | 0.67 | 3% |
 
 **Notes:**
@@ -28,12 +28,12 @@
 
 | Metric                | Value         |
 |-----------------------|---------------|
-| **Total Return**      | **2,132.4%**  |
-| **Annualized Return** | **193.9%**    |
-| **Win Rate**          | **51.3%**     |
-| **Max Drawdown**      | **4.4%**      |
-| **Calmar Ratio**      | **44.1**      |
-| **Total Trades**      | **7,073**     |
+| **Total Return**      | **650.3%**    |
+| **Annualized Return** | **54.2%**     |
+| **Win Rate**          | **40.6%**     |
+| **Max Drawdown**      | **3.16%**     |
+| **Calmar Ratio**      | **17.2**      |
+| **Total Trades**      | **2,213**     |
 
 **Key Configuration:**
 - **Universe**: Top 2,000 by liquidity → filtered to ~1,800 stocks

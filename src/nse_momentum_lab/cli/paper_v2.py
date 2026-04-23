@@ -249,12 +249,13 @@ def _serialize_strategy_params(
 
 def _load_default_symbols(market_db_path: str, trade_date: date) -> list[str]:
     """Default to the latest available full daily universe at or before trade_date."""
-    from nse_momentum_lab.db.market_db import MarketDataDB
+    from nse_momentum_lab.db.market_db import LIVE_BLOCKING_DQ_CODES, MarketDataDB
 
     market_db = MarketDataDB(Path(market_db_path), read_only=True)
     try:
+        dq_placeholders = ",".join("?" for _ in LIVE_BLOCKING_DQ_CODES)
         rows = market_db.con.execute(
-            """
+            f"""
             WITH ref_day AS (
                 SELECT max(date) AS ref_date
                 FROM v_daily
@@ -267,11 +268,11 @@ def _load_default_symbols(market_db_path: str, trade_date: date) -> list[str]:
                   SELECT symbol
                   FROM data_quality_issues
                   WHERE is_active = TRUE
-                    AND severity IN ('CRITICAL', 'HIGH')
+                    AND issue_code IN ({dq_placeholders})
               )
             ORDER BY symbol
             """,
-            [trade_date],
+            [trade_date, *LIVE_BLOCKING_DQ_CODES],
         ).fetchall()
         return [str(row[0]) for row in rows if row and row[0]]
     finally:

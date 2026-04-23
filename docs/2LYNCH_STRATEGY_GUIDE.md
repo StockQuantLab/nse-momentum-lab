@@ -1,8 +1,8 @@
 # NSE Momentum Lab — 2LYNCH Strategy Guide
 
 **Status**: PRODUCTION READY
-**Last Updated**: 2026-03-07
-**Baseline**: exp `429c79ac45b65086` — Calmar 43.67, Ann Ret 193.9%, Max DD 4.4%
+**Last Updated**: 2026-04-22
+**Baseline**: exp `d245816e1d89e196` — Calmar 17.2, Ann Ret 54.2%, Max DD 3.16%
 
 ---
 
@@ -27,19 +27,19 @@ Adapted from Stockbee's US-market approach for NSE equities. Full rationale: [LE
 
 ---
 
-## Production Performance (2015–2025)
+## Production Performance (2015–2026-04-22)
 
 Full NSE universe (~1,820 stocks), 60-min FEE window.
 
-### All Strategy Variants — Validated Results (2026-03-07)
+### All Strategy Variants — Validated Results (2026-04-22)
 
 | Strategy | Threshold | Dir | Trades | Win% | Ann Ret | Max DD | Calmar | Total Ret |
 |----------|-----------|-----|--------|------|---------|--------|--------|-----------|
-| **thresholdbreakout** | 4% | LONG | **7,073** | **51.3%** | **193.9%** | **4.44%** | **43.67** | **2132%** |
-| 2LYNCHBreakout | 4% | LONG | 7,073 | 51.3% | 193.9% | 4.44% | 43.67 | 2132% |
-| 2LYNCHBreakout | 2% | LONG | 18,657 | 45.8% | 338.7% | 5.75% | **58.94** | 3725% |
-| 2LYNCHBreakdown | 4% | SHORT | 4,717 | 38.9% | 61.4% | 36.69% | 1.67 | 675% |
-| 2LYNCHBreakdown | 2% | SHORT | 23,252 | 39.5% | 286.2% | 23.15% | 12.36 | 3148% |
+| **thresholdbreakout** | 4% | LONG | **2,213** | **40.6%** | **54.2%** | **3.16%** | **17.2** | **650.3%** |
+| 2LYNCHBreakout | 4% | LONG | 2,213 | 40.6% | 54.2% | 3.16% | 17.2 | 650.3% |
+| 2LYNCHBreakout | 2% | LONG | 7,086 | 38.7% | 122.0% | 2.73% | **44.7** | 1463.5% |
+| 2LYNCHBreakdown | 4% | SHORT | 258 | 36.0% | 3.1% | 0.74% | 4.2 | 37.7% |
+| 2LYNCHBreakdown | 2% | SHORT | 790 | 25.7% | 8.2% | 1.90% | 4.3 | 98.9% |
 
 **Key validation**: thresholdbreakout and 2LYNCHBreakout at 4% are **identical** — same trades, same year-by-year returns, same every metric. This confirms the 2LYNCH filter stack is correctly shared across all breakout variants.
 
@@ -51,14 +51,14 @@ Full NSE universe (~1,820 stocks), 60-min FEE window.
 
 | Metric | Value |
 |--------|-------|
-| Total Return | **2,132%** |
-| Annualized Return | **193.9%** |
-| Win Rate | 51.3% |
-| Max Drawdown | **4.4%** |
-| Calmar Ratio | **43.67** |
-| Total Trades | 7,073 |
+| Total Return | **650.3%** |
+| Annualized Return | **54.2%** |
+| Win Rate | 40.6% |
+| Max Drawdown | **3.16%** |
+| Calmar Ratio | **17.2** |
+| Total Trades | 2,213 |
 | FEE Window | 60 min (09:15–10:15 IST) |
-| Experiment ID | `429c79ac45b65086` |
+| Experiment ID | `d245816e1d89e196` |
 
 ---
 
@@ -464,5 +464,5 @@ The live scanning path (`services/scan/`) currently only supports the 2LYNCH fil
 
 ---
 
-*Last validated: 2026-03-07 (exp 429c79ac45b65086: Calmar 43.67, Ann Ret 193.9%, Max DD 4.4%)*
+*Last validated: 2026-04-22 (exp d245816e1d89e196: Calmar 17.2, Ann Ret 54.2%, Max DD 3.16%)*
 *Strategy families version: 1.1.0 (2LYNCHBreakout, 2LYNCHBreakdown with correct filter_2)*

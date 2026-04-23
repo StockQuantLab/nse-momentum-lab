@@ -45,7 +45,12 @@ from typing import Any
 
 import polars as pl
 
-from nse_momentum_lab.db.market_db import DUCKDB_FILE, PARQUET_DIR, get_market_db
+from nse_momentum_lab.db.market_db import (
+    DUCKDB_FILE,
+    LIVE_BLOCKING_DQ_CODES,
+    PARQUET_DIR,
+    get_market_db,
+)
 from nse_momentum_lab.services.dq_scanner import run_fast_scan, run_full_scan
 from nse_momentum_lab.services.kite.tradeable import (
     get_dead_symbol_stats,
@@ -539,15 +544,16 @@ def run_dq_date_gate(target_date: date) -> int:
     print(f"\nTrade-date readiness gate: {target_date}")
     print(f"{'=' * 50}")
 
-    has_critical = False
+    has_blocking = False
     total_issues = 0
     for result in results:
         if not result.symbols:
             continue
         total_issues += len(result.symbols)
-        marker = "[CRITICAL]" if result.severity == "CRITICAL" else "[WARN]"
-        if result.severity == "CRITICAL":
-            has_critical = True
+        is_blocking = result.issue_code in LIVE_BLOCKING_DQ_CODES
+        marker = "[BLOCK]" if is_blocking else "[ADVISORY]"
+        if is_blocking:
+            has_blocking = True
         print(f"  {marker} {result.issue_code}: {len(result.symbols)} symbols")
         for sym in result.symbols[:10]:
             print(f"    {sym}")
@@ -565,11 +571,11 @@ def run_dq_date_gate(target_date: date) -> int:
             keep_symbols=result.symbols,
         )
 
-    if has_critical:
-        print(f"\n[FAIL] {target_date} has critical DQ issues ({total_issues} total)")
+    if has_blocking:
+        print(f"\n[FAIL] {target_date} has live-blocking DQ issues ({total_issues} total)")
         return 1
     if total_issues > 0:
-        print(f"\n[WARN] {target_date} has warnings but no critical issues")
+        print(f"\n[WARN] {target_date} has advisory DQ issues but no live-blocking issues")
         return 0
     print(f"\n[OK] {target_date} passed all DQ checks")
     return 0

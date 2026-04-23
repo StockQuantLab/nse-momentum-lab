@@ -35,6 +35,7 @@ from tqdm.auto import tqdm
 
 from nse_momentum_lab.db.market_db import (
     BACKTEST_DUCKDB_FILE,
+    LIVE_BLOCKING_DQ_CODES,
     MarketDataDB,
     get_backtest_db,
     get_market_db,
@@ -975,7 +976,7 @@ class DuckDBBacktestRunner:
         liquidity_end = date(effective_end_year, 12, 31)
 
         query = """
-        SELECT vd.symbol, AVG(vd.close * vd.volume) AS avg_value_traded
+        SELECT symbol, AVG(close * volume) AS avg_value_traded
         FROM v_daily vd
         WHERE vd.date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
           AND vd.close >= ?
@@ -984,18 +985,19 @@ class DuckDBBacktestRunner:
               FROM data_quality_issues dq
               WHERE dq.symbol = vd.symbol
                 AND dq.is_active = TRUE
-                AND dq.severity IN ('CRITICAL', 'HIGH')
+                AND dq.issue_code IN ({dq_issue_codes})
           )
-        GROUP BY vd.symbol
+        GROUP BY symbol
         ORDER BY avg_value_traded DESC
         LIMIT ?
         """
         result = self.db.con.execute(
-            query,
+            query.format(dq_issue_codes=",".join("?" for _ in LIVE_BLOCKING_DQ_CODES)),
             [
                 liquidity_start.isoformat(),
                 liquidity_end.isoformat(),
                 params.min_price,
+                *LIVE_BLOCKING_DQ_CODES,
                 params.universe_size,
             ],
         ).fetchdf()
