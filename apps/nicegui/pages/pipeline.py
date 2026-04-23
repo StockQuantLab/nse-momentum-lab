@@ -91,29 +91,33 @@ async def pipeline_page() -> None:
 
         table_rows = []
 
-        # Market DB tables
+        # Market DB tables — (table, description, date_column, has_symbol)
         db = get_db()
         market_tables = [
-            ("feat_daily_core", "Daily features"),
-            ("feat_daily", "Daily features view"),
-            ("market_monitor_daily", "Market breadth"),
+            ("feat_daily_core", "Daily features", "trading_date", True),
+            ("feat_daily", "Daily features view", "date", True),
+            ("market_monitor_daily", "Market breadth", "trading_date", False),
         ]
-        for table_name, desc in market_tables:
-            rows = db.execute(f"SELECT COUNT(*) as cnt FROM {table_name}")
-            count = rows[0]["cnt"] if rows else 0
-            sym_rows = db.execute(f"SELECT COUNT(DISTINCT symbol) as cnt FROM {table_name}")
-            sym_count = sym_rows[0]["cnt"] if sym_rows else 0
-            date_rows = db.execute(
-                f"SELECT MIN(trading_date) as mn, MAX(trading_date) as mx FROM {table_name}"
-            )
-            dr = date_rows[0] if date_rows else {}
+        for table_name, desc, date_col, has_sym in market_tables:
+            rows = db.con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchall()
+            count = rows[0][0] if rows else 0
+            sym_count = "-"
+            if has_sym:
+                sym_rows = db.con.execute(
+                    f"SELECT COUNT(DISTINCT symbol) FROM {table_name}"
+                ).fetchall()
+                sym_count = _fmt_count(sym_rows[0][0]) if sym_rows else "0"
+            date_rows = db.con.execute(
+                f"SELECT MIN({date_col}), MAX({date_col}) FROM {table_name}"
+            ).fetchall()
+            mn, mx = (date_rows[0][0], date_rows[0][1]) if date_rows else ("-", "-")
             table_rows.append(
                 {
                     "table": table_name,
                     "description": desc,
                     "rows": _fmt_count(count),
-                    "symbols": _fmt_count(sym_count),
-                    "date_range": f"{dr.get('mn', '-')} → {dr.get('mx', '-')}",
+                    "symbols": sym_count,
+                    "date_range": f"{mn} → {mx}",
                     "status": "READY" if count > 0 else "EMPTY",
                 }
             )
@@ -127,8 +131,8 @@ async def pipeline_page() -> None:
             ("bt_execution_diagnostic", "Execution diagnostics"),
         ]
         for table_name, desc in bt_tables:
-            rows = bt_db.execute(f"SELECT COUNT(*) as cnt FROM {table_name}")
-            count = rows[0]["cnt"] if rows else 0
+            rows = bt_db.con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchall()
+            count = rows[0][0] if rows else 0
             table_rows.append(
                 {
                     "table": table_name,

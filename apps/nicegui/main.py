@@ -74,7 +74,7 @@ def main() -> None:
             )
             warnings.filterwarnings(
                 "ignore",
-                message="'asyncio.set_event_loop_policy' is deprecated and slated for removal in Python 3.16",
+                message="'asyncio.set_eventloop_policy' is deprecated and slated for removal in Python 3.16",
                 category=DeprecationWarning,
             )
             policy_cls = getattr(asyncio, "WindowsSelectorEventLoopPolicy", None)
@@ -92,6 +92,7 @@ def main() -> None:
             reload=False,
             show=False,
             dark=False,
+            root_path="/nse-momentum-lab",
         )
     except KeyboardInterrupt:
         print("Dashboard stopped.")
