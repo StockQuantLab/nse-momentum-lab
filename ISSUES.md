@@ -6,6 +6,106 @@ Format: `[STATUS]` = `OPEN` | `FIXED` | `DEFERRED` | `INVESTIGATING`
 
 ---
 
+## Replica Sync & Dashboard Lag (ported from cpr-pivot-lab 2026-04-24)
+
+### ISSUE-044 — CLI `stop`/`pause`/`resume`/`archive`/`prepare` left dashboard stale (no force_sync)
+
+**Status**: ✅ FIXED — `cli/paper_v2.py` (2026-04-24)
+**Severity**: Medium (dashboard showed wrong session status after every manual CLI operation)
+**Found**: 2026-04-24 — after `nseml-paper stop` + `nseml-paper archive`, dashboard still showed ACTIVE/PLANNED
+
+**Problem**: Only `flatten` and `flatten-all` called `_sync_paper_replica_after_cli_write()`.
+`stop`, `pause`, `resume`, `archive`, and `prepare` all wrote to DuckDB but never triggered
+a replica sync. Dashboard lagged until the next automatic maybe_sync cycle (≤5s when live,
+indefinite when no session is running).
+
+**Fix**: Added `_sync_paper_replica_after_cli_write()` after every status-changing write in:
+- `_cmd_stop` — COMPLETED transition
+- `_cmd_pause` — PAUSED transition
+- `_cmd_resume` — ACTIVE transition
+- `_cmd_archive` — ARCHIVED transition
+- `_cmd_prepare` — PLANNED creation (so both LONG and SHORT appear before live starts)
+
+---
+
+### ISSUE-045 — Replica debounce 5s too long; write bursts at bar-open lose final state write
+
+**Status**: ✅ FIXED — `paper_live.py` (2026-04-24)
+**Severity**: Low-Medium (dashboard showed stale P&L/status during high-frequency open bursts)
+**Found**: 2026-04-24 — observed via replica lag warning 8908s; ported from cpr-pivot-lab fix
+
+**Problem**: `min_interval_sec=5.0` in both `VersionedReplicaSync` constructors in `paper_live.py`.
+When 4–10 positions open/close in rapid succession at bar-close, the debounce window absorbs
+the final writes. Dashboard shows stale values until the next full 5s window.
+
+**Fix**: Reduced `min_interval_sec` from `5.0` to `2.0` in both replica constructors
+(single-session at line 465, multi-live at line 1142).
+
+---
+
+### ISSUE-046 — Sentinel file flatten mechanism not implemented (CPR pattern missing)
+
+**Status**: OPEN — deferred, operator convenience feature
+**Severity**: Low (workaround: use `nseml-paper flatten --session <id>`)
+**Found**: 2026-04-24 ported from cpr-pivot-lab
+
+**Problem**: CPR pivot lab has a sentinel file mechanism:
+`touch .tmp_logs/flatten_{session_id}.signal` triggers graceful flatten and session
+completion from the live process on its next polling cycle — no separate CLI call needed.
+In NSE lab, flatten must be done via a separate terminal.
+
+**Fix needed**: In `paper_live.py` main loop, after each bar cycle check for
+`Path(f".tmp_logs/flatten_{session_id}.signal")`. If present: flatten all positions,
+mark COMPLETED, delete the signal file, exit cleanly.
+
+---
+
+### ISSUE-047 — `paper_ledger_v2.py` crashes with UnboundLocalError when archived session has no closed positions
+
+**Status**: ✅ FIXED — `apps/nicegui/pages/paper_ledger_v2.py` (2026-04-24)
+**Severity**: High (dashboard crash on archived sessions tab)
+**Found**: 2026-04-24 live — `UnboundLocalError: cannot access local variable 'sorted_closed'`
+
+**Problem**: `sorted_closed` was defined inside `if closed_positions:` block but referenced
+outside it in the trade ledger loop (line 897) and equity curve loop (line 861). When an
+archived session has no closed positions (e.g. sessions stopped before any fills), the variable
+is never assigned and the page crashes.
+
+**Fix**: Moved `sorted_closed` assignment above the `if` block with an empty-list default:
+`sorted_closed = sorted(closed_positions, ...) if closed_positions else []`
+
+---
+
+### ISSUE-048 — Market Monitor regime classification lags single-day distribution events
+
+**Status**: OPEN — design improvement, deferred
+**Severity**: Low-Medium (regime says "aggressive long" on heavy distribution days; operator may over-commit)
+**Found**: 2026-04-24 — 29↑ / 139↓ 4% moves, yet regime showed Bullish / Long Favored / Aggressive (2.0)
+
+**Problem**: The regime classification (`_market_monitor_select_sql` in `market_db.py:1866-1906`)
+uses two inputs:
+1. `up_25q_count` vs `down_25q_count` (stocks 25% above 65-day low vs 25% below 65-day high) —
+   a cumulative position metric with a 1.1× dominance threshold
+2. `ratio_10d` — 10-day rolling sum of 4%↑ / 4%↓ stocks — with a 2.0 threshold for "long_favored"
+
+On April 24, the cumulative position was overwhelmingly bullish (MA40 at 84%, MA20 at 96%,
+10D BR at 3.76). Today's 139↓ vs 29↑ (0.21 ratio) was absorbed by the 10-day window without
+triggering `correction_watch` (which requires `ratio_10d < 2.0`).
+
+**Impact**: The regime is intentionally smooth (filters noise), but this means single-day
+distribution events are invisible until they persist for multiple sessions. On a day with 4.8×
+more stocks down 4% than up 4%, the "Aggressive" posture may mislead operators into taking
+full-sized positions.
+
+**Proposed fix** (deferred):
+1. Add a **distribution day alert** when daily 4%↓ count exceeds 4%↑ count by ≥3×, regardless
+   of regime — surfaced as a dashboard flag and Telegram alert (not a regime change)
+2. Consider adding a `daily_4pct_ratio` input to the tactical regime logic so that extreme
+   single-day imbalances trigger `correction_watch` even when `ratio_10d` is still above 2.0
+3. Add the daily 4% ratio as a visible column in the market monitor history table
+
+---
+
 ## Data Quality
 
 ### ISSUE-001 — Daily/5-min price scale mismatch (corporate actions)
@@ -153,24 +253,22 @@ already a float.
 
 ### ISSUE-005 — BREAKDOWN trade count too low for statistical significance
 
-**Status**: INVESTIGATING
+**Status**: ✅ RESOLVED — 2026-04-24 (full 11-year run completed)
 **Severity**: Medium
 **Found**: 2026-04-19
 
-**Current counts (Apr-19 run, 2025-01-01 → 2026-04-19)**:
+**Original counts (Apr-19 run, 2025-01-01 → 2026-04-19, ~15 months only)**:
 - BREAKDOWN_4%: 81 trades, +0.84% total return
 - BREAKDOWN_2%: 167 trades, +9.57% total return
 
-**Root causes**:
-1. Partial data contamination (ISSUE-001) may be excluding valid short candidates
-2. Window is only ~15 months; short-side needs broader history
-3. Short-side admission filters (N, Y, C, L) were adapted from long-side and may be too restrictive
-4. Some prior profitable runs (pre-Mar-31) used lookahead bias — causal fix correctly
-   reduced trade count but baseline comparison requires clean multi-year run
+**Resolution**: Full 11-year canonical backtest (2015-01-01 → 2026-04-23) completed with clean
+data (ISSUE-001 fixed, causal admission applied, tradability-only DQ gate):
+- BREAKDOWN_4%: **258 trades** — +3.1% avg annual, Calmar 4.2, PF 5.50
+- BREAKDOWN_2%: **790 trades** — +8.2% avg annual, Calmar 4.3, PF 5.46
 
-**Next steps**:
-- Re-ingest 276 symbols (ISSUE-001) then re-run BREAKDOWN with full history (2020–2026)
-- Investigate relaxing short-specific admission filters if trade count remains <200
+Trade count is statistically workable over 11 years (~23/yr for 4%, ~72/yr for 2%).
+Short strategies are genuinely lower frequency than long (fewer clean breakdown setups in NSE).
+The short-side admission filters are directionally correct; no relaxation needed at this time.
 
 ---
 
@@ -293,25 +391,46 @@ numbers. The underlying trade P&L is unaffected (pnl_pct is a separate column co
 
 ### ISSUE-013 — Entry quality degrades significantly after 9:30–9:40 IST
 
-**Status**: OPEN — needs backtest experiment to validate cutoff change
-**Severity**: Medium (late entries drag down per-trade expectancy)
+**Status**: ✅ DEFERRED — 2026-04-24 (data analysis shows no benefit from tightening cutoff)
+**Severity**: Low (original concern not supported by canonical 11-year data)
 **Found**: 2026-04-21 (data analysis on Apr-21 runs, binned by 5-min entry slot)
 
-**Findings (avg PnL per trade by entry time, Apr-21 baseline, breakout strategies)**:
+**Original concern**: Entry quality drops sharply after 9:30–9:40; earlier cutoff (30–45min)
+might improve Calmar by eliminating low-quality late entries.
 
-| Entry Time | BO 4% (bps) | BO 4% WR | BO 2% (bps) | BO 2% WR |
-|------------|-------------|----------|-------------|----------|
-| 09:20      | 176.6       | 39.4%    | 144.9       | 36.9%    |
-| 09:25      | ~140        | ~38%     | ~120        | ~35%     |
-| 10:05      | 28.1        | —        | 64.1        | —        |
-| 10:15      | 98.9        | —        | 44.2        | —        |
+**Evidence from Apr-23 canonical baselines (2015–2026, 7,091 and 2,214 trades):**
 
-Current default `entry_cutoff_minutes = 60` (10:15 IST). An earlier note in `BacktestParams`
-says 60min gave Calmar 27.06 vs 19.74 at 30min — but that analysis predates the causal admission
-fix (Mar-31, 2026) which eliminated lookahead bias. The comparison needs to be re-run.
+BREAKOUT_2PCT per-slot avg return and win rate:
 
-**Next steps**: Run two experiments per leg (30min cutoff vs 45min cutoff) and compare Calmar ratio
-and total return vs Apr-21 baselines before changing the default.
+| Entry Time | Trades | Avg Return | Win Rate | % of Total P&L |
+|------------|--------|-----------|---------|----------------|
+| 09:20      | 2,315  | **2.51%** | 42.7%   | 32.6%          |
+| 09:25      | 733    | 1.94%     | 38.6%   | 8.0%           |
+| 09:30      | 660    | 2.08%     | 38.8%   | 7.7%           |
+| 09:35      | 555    | 2.04%     | 37.7%   | 6.4%           |
+| 09:40      | 470    | 1.93%     | 37.7%   | 5.1%           |
+| 09:45      | 439    | 1.98%     | 39.9%   | 4.9%           |
+| 09:50–10:15| 1,919  | 1.73–1.91%| 32–35%  | 35.3%          |
+
+Cutoff scenario impact (what we lose by cutting early):
+
+| Cutoff     | BO2% trades | Avg/trade | P&L kept | BO4% trades | Avg/trade | P&L kept |
+|------------|-------------|-----------|----------|-------------|-----------|----------|
+| 9:40 (25m) | 4,733       | 2.25%     | 71.3%    | 1,333       | 3.20%     | 64.4%    |
+| 9:45 (30m) | 5,172       | 2.22%     | 77.2%    | 1,502       | 3.15%     | 71.4%    |
+| 10:00 (45m)| 6,210       | 2.15%     | 89.4%    | 1,898       | 3.11%     | 89.3%    |
+| **10:15**  | **7,091**   | 2.10%     | 100%     | **2,214**   | 2.99%     | 100%     |
+
+**Conclusion**: All time slots are profitable. The degradation is a gradual slope (2.51% → 1.7%),
+not a cliff. Cutting off at 9:45 would surrender 22-28% of total P&L while reducing trade count
+by ~27%. Avg per-trade return improves modestly (+0.12-0.15%) but at the cost of significant
+absolute P&L and diversification. There is no data evidence that early cutoff improves
+Calmar — the later slots have consistent win rates (32-40%) and positive EV.
+
+**Decision**: Keep `entry_cutoff_minutes = 60` (10:15 IST). The original Apr-21 analysis predated
+the causal admission fix and used a much smaller dataset. The 11-year canonical baseline
+shows late entries contribute real, consistent alpha. Revisit only if intraday slippage data
+shows late entries suffer worse fill quality in live trading.
 
 ---
 
@@ -335,7 +454,7 @@ the short-side override pattern. When set, override base param for LONG directio
 
 ---
 
-*Last updated: 2026-04-23*
+*Last updated: 2026-04-24*
 
 ---
 
@@ -789,17 +908,266 @@ filter, so DQ hygiene no longer removes most of the universe by accident.
 
 ---
 
-## Canonical Experiment IDs (2026-04-22)
+### ISSUE-040 — `nseml-paper stop` via CLI leaves open positions stranded — no auto-flatten
 
-Wave-1 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard.
-Full 11-year window: `2015-01-01 → 2026-04-22`, universe 2000.
+**Status**: OPEN — deferred, operator workflow gap
+**Severity**: Medium (positions left in OPEN state with no closed_at; PnL never realized in DB)
+**Found**: 2026-04-24 — archived both sessions after CLI stop without flatten; 10 positions stranded
+
+**Problem**: `nseml-paper stop --session <id>` marks the session COMPLETED in DuckDB immediately.
+It does not check for open positions or auto-flatten them. If the operator skips the `flatten`
+step before `stop`, positions remain in state=OPEN with closed_at=NULL indefinitely.
+
+Stranded today: DATAPATTNS, HCLTECH, KHAICHEM, ADANIENSOL, FINOPB, STANLEY, JKTYRE (shorts) +
+BLUESTONE, PAISALO, LLOYDSENGG (longs) — all from 2026-04-24 sessions a8412eed / 7169807d.
+
+**Correct operator flow**: `flatten → stop → archive`
+**Fix options** (deferred):
+1. Add a pre-flight check in `stop` that refuses if open positions exist (unless `--force` flag)
+2. Or auto-flatten at last-known mark prices before marking COMPLETED
+3. Add a `list-stranded` CLI command to surface orphaned positions across sessions
+
+---
+
+### ISSUE-041 — EOD/daily summary alert not delivered when session stopped via CLI
+
+**Status**: OPEN — deferred
+**Severity**: Medium (operator gets no end-of-day P&L summary on Telegram)
+**Found**: 2026-04-24 — alert_log shows 0 DAILY_PNL_SUMMARY or SESSION_COMPLETED entries
+
+**Problem**: `DAILY_PNL_SUMMARY` is dispatched by the live process itself at line 933 of
+`paper_live.py`, triggered when the process's internal loop detects session status=COMPLETED.
+When the operator uses `nseml-paper stop` CLI to stop the session and immediately archives it,
+the live process either:
+1. Has not yet polled the DB for the COMPLETED status, or
+2. Has already exited (if the process was killed externally)
+
+In either case the cleanup path (SESSION_COMPLETED alert + DAILY_PNL_SUMMARY) is bypassed.
+74 alerts were logged today (41 TRADE_OPENED + 31 SL_HIT + 2 SESSION_STARTED) — zero EOD summaries.
+
+**Fix needed**: Add a standalone CLI command `nseml-paper send-summary --session <id>` that
+computes and dispatches DAILY_PNL_SUMMARY + SESSION_COMPLETED alert directly from DuckDB, without
+requiring the live process. This makes the EOD summary operator-triggerable independently of how
+the session was terminated.
+
+---
+
+### ISSUE-036 — Session-started alert sends plain text body instead of HTML
+
+**Status**: ✅ FIXED — `paper_live.py` (2026-04-24)
+**Severity**: Low (alerts are delivered, but unformatted in Telegram)
+**Found**: 2026-04-24 live session — first session-start alerts observed as plain text
+
+**Problem**: `paper_live.py` dispatches `AlertType.SESSION_STARTED` with a plain-text body:
+
+```python
+body=f"Strategy: {strategy}\nSymbols: {len(symbols)}\nDate: {trade_date}"
+```
+
+The Telegram notifier always sends with `parse_mode: HTML`, so all other alerts (trade open/close,
+feed stale/recovered) use proper `<code>`, `<b>`, `<i>` HTML tags. The session-started body is
+plain text — no crash, but it renders without any formatting in Telegram.
+
+**Fix**: Replaced the inline plain-text body with an HTML-formatted card using `<b>`, `<code>`,
+and emoji labels — matching the style of `format_trade_opened_alert`. Also escaped the strategy
+name in the subject line (`escape(strategy)`). Updated `paper_live.py:519-526`.
+
+**Workaround (pre-fix)**: None — alerts arrived but looked like raw log lines.
+
+---
+
+### ISSUE-039 — Paper engine promotes breakeven stop on every 5-min bar; backtest only on daily close (parity gap)
+
+**Status**: ✅ FIXED — `paper_runtime.py` + `intraday_execution.py` (2026-04-24)
+**Severity**: High (paper systematically underperforms backtest on choppy/volatile days)
+**Found**: 2026-04-24 live session — 15+ STOP_BREAKEVEN exits with pnl=0 on a -0.75% Nifty day where shorts should have profited
+
+**Root cause**:
+
+`paper_runtime.py:260-264` promotes the breakeven stop on **every 5-minute bar close**:
+```python
+if direction == "SHORT" and close < entry_price and stop_level > entry_price:
+    stop_level = entry_price   # fires on any 5-min bar that closes below entry
+```
+
+`vectorbt_engine.py:583-585` promotes the breakeven stop only on the **daily close**:
+```python
+if not at_breakeven and float(close) < float(entry_price):
+    stop_level = min(stop_level, float(entry_price))
+    at_breakeven = True        # fires only at end-of-day
+```
+
+The backtest iterates one full trading day per loop. Paper iterates one 5-minute bar per loop.
+A trade that dips 1 paisa in favour on a single 5-min bar gets its stop promoted to breakeven
+immediately. Any intraday bounce then exits it at zero. The backtest would have held through the
+same noise and only evaluated at day-close.
+
+**Impact observed on 2026-04-24**:
+- 15+ STOP_BREAKEVEN exits (pnl=0) across both sessions
+- Zero profitable exits across the full morning session
+- Affected shorts: CIPLA, LTM, STLTECH, LEMONTREE, ATHERENERG, SONATSOFTW, WAAREEENER, TCS, IKS, TDPOWERSYS, etc.
+- On a -0.75% Nifty day, the BREAKDOWN shorts should have generated realized profit
+
+**Fix (implemented, uncommitted)**:
+1. Removed the intraday B/E promotion block entirely from `paper_runtime.py:_advance_open_position()`.
+   Backtest doesn't promote B/E intraday — paper shouldn't either. B/E promotion happens at EOD via the
+   H-carry step, not on every 5-min bar.
+2. Created `evaluate_held_position_bar()` in `intraday_execution.py` — canonical shared bar evaluator
+   called by both paper-live and paper-replay for already-open (held) positions. Handles post-day-3
+   tightening, gap-through (first bar, overnight carries only), stop hit, and trail activation.
+   NO intraday B/E promotion. Paper_runtime._advance_open_position now delegates to this function.
+3. `evaluate_held_position_bar()` is the foundation for ISSUE-042 (port backtest hold-days to 5-min bars).
+
+---
+
+### ISSUE-042 — Backtest hold-days use daily bars; live sees 5-min bars — stop timing diverges
+
+**Status**: OPEN — deferred (architecture work)
+**Severity**: Medium (backtest overstates hold-day P&L; misses intraday stop-outs on hold days 2-5)
+**Found**: 2026-04-24 architecture review
+
+**Problem**: The backtest processes hold days (Day 2 to time_stop_days) using daily OHLCV in
+`vectorbt_engine.py`. It checks stop hit using the day's HIGH/LOW, which correctly detects if the
+stop was touched — but it cannot know at what intraday time the stop fired, nor whether price
+recovered by EOD. The paper engine (and live trading) processes every 5-min bar and exits
+immediately when the stop is touched intraday.
+
+On a volatile day a position might touch the stop at 09:35, bounce back, and close above entry —
+backtest: carry to next day; paper: stopped out at 09:35.
+
+**Fix**: Make the backtest hold-day loop use 5-min candles via `evaluate_held_position_bar()`
+(already in `intraday_execution.py`). Requires loading 5-min data for hold-day symbols, which
+is a performance-sensitive change on an 11-year × 2000-symbol dataset.
+
+---
+
+### ISSUE-043 — Partial profit exit (80/20 scale-out) on abnormal move not implemented
+
+**Status**: OPEN — feature request, deferred
+**Severity**: Low-Medium (missed opportunity to lock profits on big moves)
+**Found**: 2026-04-24 strategy design discussion
+
+**Requested rule**: Within the first hour of entry (09:20–10:20), if the position moves
+`abnormal_profit_pct` in favour (e.g. +8% for LONG, -8% for SHORT on a 5-min bar):
+- Exit 80% of qty at that price (lock the profit)
+- Keep remaining 20% running with stop promoted to entry (breakeven stop)
+
+**Design requirements**:
+1. `evaluate_held_position_bar()` in `intraday_execution.py` needs an `abnormal_profit_pct`
+   parameter and partial-exit return type (qty_to_exit, qty_to_keep, tight_stop)
+2. PaperDB position model needs to support partial close (reduce qty, realize partial PnL)
+3. Backtest `_simulate_same_day_stop_execution()` needs the same rule for backtesting parity
+4. Alert: PARTIAL_EXIT alert type for Telegram
+
+**Implementation status**: Prototype built and backtested on 2026-04-24. See ISSUE-050 for
+full details and the regression finding that caused it to be disabled in presets.
+
+---
+
+### ISSUE-038 — TICKER_HEALTH coverage denominator shrinks during quiet market periods, making stale=0 misleading
+
+**Status**: OPEN — deferred
+**Severity**: Low (no trade impact; misleads operator monitoring)
+**Found**: 2026-04-24 live session — 10:20–10:30 IST coverage collapsed (1210→376→27→7 symbols)
+
+**Problem**: The `coverage=X% (n/n)` metric in `TICKER_HEALTH` uses a rolling window of
+recently-active symbols as both numerator and denominator. When the market quiets (e.g. 10:20–10:30
+IST), most symbols stop ticking and drop out of the window. The denominator collapses to single
+digits and `stale=0` — falsely signalling perfect health while 1200+ subscribed symbols have
+received no ticks for minutes.
+
+Observed sequence: `(1220/1220)` at 10:10 → `(376/376)` at 10:20 → `(27/27)` at 10:25 →
+`(7/7) stale=0` at 10:30. Total ticks kept growing (+88K/bar) so the feed was live throughout.
+
+**Fix needed**: Compute `stale` as count of symbols in the *fixed subscription list* (all 1224)
+that exceed the stale-tick threshold, not just those in the rolling active window. This gives a
+true "X of 1224 subs have gone quiet" signal rather than "all currently-active symbols look fine."
+
+---
+
+### ISSUE-037 — Position book saturation silently drops valid intraday signals
+
+**Status**: OPEN — deferred, review risk params
+**Severity**: Low-Medium (valid signals skipped; no crash, no alert)
+**Found**: 2026-04-24 live session — recurring `execute_entry: no cash for <SYMBOL> qty=0` warnings
+
+**Problem**: Once the position book reaches `max_positions` or deploys all capital, new signals that
+pass all filters are silently skipped with a WARNING log. Affected symbols observed: EDELWEISS,
+RVHL, PPLPHARMA, INDOSTAR, DIGJAMLMTD, COALINDIA (and others). No Telegram alert is sent, so the
+operator has no visibility that signals are being dropped.
+
+**Impact**: On high-signal days (bearish open with many breakdown triggers), the book fills in the
+first 1–2 bars and subsequent higher-quality signals (later in the session when volatility settles)
+cannot enter. This may reduce strategy performance vs backtest, where capital recycles faster.
+
+**Fix options** (deferred):
+1. Add a Telegram alert when signals are dropped due to capital exhaustion (at most once per bar)
+2. Review `max_positions` and `portfolio_value` in `BREAKOUT_2PCT` / `BREAKDOWN_2PCT` presets
+3. Track `signals_dropped_no_cash` counter in session stats for post-session analysis
+
+---
+
+### ISSUE-049 — DQ filter in `_get_liquid_symbols` blocks 780 liquid symbols, reducing BREAKOUT_4PCT from 2,214 → 1,034 trades
+
+**Status**: ✅ FIXED — DQ universe exclusion removed; Apr-24 baselines established
+**Severity**: High (backtest universe regression; canonical baselines no longer reproducible)
+**Found**: 2026-04-24 (regression investigation during this session)
+
+**Root cause**: The DQ filter added to `_get_liquid_symbols` in `duckdb_backtest_runner.py` (commit `d68038a3`, Apr 23) uses `LIVE_BLOCKING_DQ_CODES` (`OHLC_VIOLATION`, `NULL_PRICE`, `ZERO_PRICE`, `DUPLICATE_CANDLE`) to exclude symbols from the 11-year universe. The `ZERO_PRICE` code flags 655 of the top-2000 liquid NSE symbols (pre-market or auction candles with zero price in 5-min data), and `OHLC_VIOLATION` flags 212. Together, 780 of the 2,000 most liquid stocks are excluded, replaced by far less liquid symbols with fewer breakout setups.
+
+**Confirmed by query** (2024 liquidity window):
+```
+ZERO_PRICE:    655 symbols blocked
+OHLC_VIOLATION: 212 symbols blocked (some overlap)
+Total blocked:  780 unique symbols in top-2000
+```
+
+**Impact**: The Apr-24 runs now reproduce the canonical behavior plus only the extra-day delta:
+- BREAKOUT_4PCT: 2,217 trades vs 2,214 canonical (`+3`)
+- BREAKOUT_2PCT: 7,097 trades vs 7,091 canonical (`+6`)
+- BREAKDOWN_4PCT: 258 trades vs 258 canonical (`0`)
+- BREAKDOWN_2PCT: 792 trades vs 790 canonical (`+2`)
+
+**Fix**: Removed the DQ universe filter from `_get_liquid_symbols` and from live candidate seeding. Trading paths now rely on the strategy's own universe filters (`min_price`, `min_volume`, `min_value_traded_inr`) plus trade-level invalid-data guards.
+
+**Verification**: Apr-24 rerun complete. The four new baseline experiments are now the canonical set.
+
+**The partial-exit agent changes (uncommitted) are NOT the cause** — tested both committed and uncommitted; trade counts are identical (1,034).
+
+---
+
+### ISSUE-050 — Partial exit (80/20) feature implemented but disabled — backtested as regression at 0.20
+
+**Status**: OPEN — code in place, disabled in presets
+**Severity**: Low (feature exists, param defaults to None/disabled)
+**Found**: 2026-04-24 (prototyped and backtested in this session)
+
+**What was built**:
+- `same_day_partial_exit_pct` and `same_day_partial_exit_carry_stop_pct` added to `BacktestParams` and `PaperStrategyConfig`
+- `_simulate_same_day_stop_execution()` in `intraday_execution.py` checks for large intraday move on entry day and exits 80% at target, carries 20% with tight stop
+- `evaluate_held_position_bar()` also supports partial exit path (`is_entry_day=True`)
+- `PaperDB.partial_close_position()` and `SessionPositionTracker.partial_close()` implement DB-level partial close
+- `paper_session_driver.py` handles `PARTIAL_EXIT` action
+
+**Why disabled**: Backtested at `same_day_partial_exit_pct=0.20` (the gap-through threshold used as the partial-exit trigger). All 4 presets showed ~40-50% annualized return reduction — the partial exit amputates fat-tail winning trades before they can run. The same_day_r_ladder already handles progressive stop-tightening on intraday winners without capping upside.
+
+**Decision**: `same_day_partial_exit_pct` intentionally omitted from `_ENGINE_DEFAULTS` in `backtest_presets.py`. Feature stays in code for future research at different thresholds (e.g., 0.30 or time-gated).
+
+---
+
+## Canonical Experiment IDs (2026-04-24 Wave-2)
+
+Wave-1+2 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard,
+causal admission (watch_date features), no DQ universe exclusion.
+Full 11-year window: `2015-01-01 → 2026-04-24`, universe 2000.
 
 | Leg | Exp ID | Avg Annual | Max DD | Calmar | PF | Trades |
 |-----|--------|-----------|--------|--------|----|--------|
-| Breakout 4% | `d245816e1d89e196` | +54.2% | 3.16% | 17.2 | 20.75 | 2,213 |
-| Breakout 2% | `f5bf9a6836901550` | +122.0% | 2.73% | 44.7 | 16.50 | 7,086 |
-| Breakdown 4% | `f4a125fce62ddb24` | +3.1% | 0.74% | 4.2 | 5.51 | 258 |
-| Breakdown 2% | `be7958b0f79c3c1c` | +8.2% | 1.90% | 4.3 | 5.47 | 790 |
+| Breakout 4% | `9743049247803a3c` | +54.5% | 3.16% | 17.3 | 20.80 | 2,217 |
+| Breakout 2% | `45710b2ba811377f` | +122.0% | 2.73% | 44.7 | 19.23 | 7,097 |
+| Breakdown 4% | `6781be97c100461a` | +3.1% | 0.74% | 4.2 | 5.50 | 258 |
+| Breakdown 2% | `83ac2b194347b661` | +8.3% | 1.90% | 4.4 | 5.48 | 792 |
 
-All prior experiment IDs have been pruned from DuckDB. These four are the only active baselines.
-See `docs/research/CANONICAL_REPORTING_RUNSET_2026-04-22.md` for the frozen report.
+The Apr-23 baselines were pruned after the Apr-24 rerun. These four are the active baselines.
+Code hash: `3457db14` (breakout), `333075de` (breakdown). Dataset hash: `ed41fe6d`.
+Run timestamp: 2026-04-24 21:55-22:03 IST.

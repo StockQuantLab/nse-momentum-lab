@@ -35,7 +35,6 @@ from tqdm.auto import tqdm
 
 from nse_momentum_lab.db.market_db import (
     BACKTEST_DUCKDB_FILE,
-    LIVE_BLOCKING_DQ_CODES,
     MarketDataDB,
     get_backtest_db,
     get_market_db,
@@ -155,6 +154,11 @@ class BacktestParams:
     # Optional short-only same-day take-profit threshold.
     # Example: 0.02 exits same day once price moves +2% in favor.
     short_same_day_take_profit_pct: float | None = None
+    # Same-day partial exit: exit 80% of position when price moves N% in favor on entry day.
+    # None = disabled (default). Example: 0.20 exits 80% when price moves 20% in favor.
+    same_day_partial_exit_pct: float | None = None
+    # Stop distance for the 20% remainder after a partial exit (as fraction of exit price).
+    same_day_partial_exit_carry_stop_pct: float = 0.05
     follow_through_threshold: float = 0.0
 
     # FEE (Find and Enter Early) — Stockbee: enter in first N min of NSE open (09:15 IST)
@@ -354,6 +358,8 @@ class BacktestParams:
             trail_activation_pct=_trail_activation,
             trail_stop_pct=self.trail_stop_pct,
             short_trail_activation_pct=_short_trail,
+            same_day_partial_exit_pct=self.same_day_partial_exit_pct,
+            same_day_partial_exit_carry_stop_pct=self.same_day_partial_exit_carry_stop_pct,
         )
 
 
@@ -980,24 +986,16 @@ class DuckDBBacktestRunner:
         FROM v_daily vd
         WHERE vd.date BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
           AND vd.close >= ?
-          AND NOT EXISTS (
-              SELECT 1
-              FROM data_quality_issues dq
-              WHERE dq.symbol = vd.symbol
-                AND dq.is_active = TRUE
-                AND dq.issue_code IN ({dq_issue_codes})
-          )
         GROUP BY symbol
         ORDER BY avg_value_traded DESC
         LIMIT ?
         """
         result = self.db.con.execute(
-            query.format(dq_issue_codes=",".join("?" for _ in LIVE_BLOCKING_DQ_CODES)),
+            query,
             [
                 liquidity_start.isoformat(),
                 liquidity_end.isoformat(),
                 params.min_price,
-                *LIVE_BLOCKING_DQ_CODES,
                 params.universe_size,
             ],
         ).fetchdf()
@@ -1524,6 +1522,8 @@ class DuckDBBacktestRunner:
                 short_same_day_take_profit_pct=(
                     params.short_same_day_take_profit_pct if is_short else None
                 ),
+                same_day_partial_exit_pct=params.same_day_partial_exit_pct,
+                same_day_partial_exit_carry_stop_pct=params.same_day_partial_exit_carry_stop_pct,
                 heartbeat_cb=maybe_heartbeat,
                 db=_db,
             )
@@ -2269,6 +2269,8 @@ class DuckDBBacktestRunner:
         same_day_r_ladder_start_r: int = 2,
         short_initial_stop_atr_cap_mult: float | None = None,
         short_same_day_take_profit_pct: float | None = None,
+        same_day_partial_exit_pct: float | None = None,
+        same_day_partial_exit_carry_stop_pct: float = 0.05,
         heartbeat_cb: Callable[[str], None] | None = None,
         db: MarketDataDB | None = None,
     ) -> dict[tuple[str, date], IntradayEntry]:
@@ -2298,6 +2300,8 @@ class DuckDBBacktestRunner:
             same_day_r_ladder_start_r=same_day_r_ladder_start_r,
             short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
             short_same_day_take_profit_pct=short_same_day_take_profit_pct,
+            same_day_partial_exit_pct=same_day_partial_exit_pct,
+            same_day_partial_exit_carry_stop_pct=same_day_partial_exit_carry_stop_pct,
         )
 
     def _resolve_intraday_entry(

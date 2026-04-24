@@ -974,6 +974,46 @@ class TestPatchPositionMetadata:
         assert meta.get("last_mark_price") == pytest.approx(510.0)
 
 
+class TestPartialExitAccounting:
+    def test_partial_close_tracks_remaining_qty_and_session_pnl(self, paper_db, session_id):
+        pos = paper_db.insert_position(
+            session_id=session_id,
+            symbol="RELIANCE",
+            direction="LONG",
+            avg_entry=100.0,
+            qty=100,
+            state="OPEN",
+            metadata_json={"signal_id": "sig-partial", "entry_qty": 100},
+        )
+
+        partial = paper_db.partial_close_position(
+            pos["position_id"],
+            partial_exit_price=120.0,
+            partial_exit_qty=80,
+            carry_stop=114.0,
+            reason="PARTIAL_EXIT",
+            closed_at=datetime(2026, 4, 1, 10, 0, tzinfo=UTC),
+        )
+
+        assert partial is not None
+        assert partial["qty"] == 20
+        meta = partial["metadata_json"]
+        assert meta["partial_exit_qty"] == 80
+        assert meta["remaining_qty"] == 20
+        assert meta["partial_exit_net_pnl"] == pytest.approx(1580.4)
+        assert paper_db.get_session_realized_pnl(session_id) == pytest.approx(1580.4)
+
+        paper_db.update_position(
+            pos["position_id"],
+            closed_at=datetime(2026, 4, 1, 14, 30, tzinfo=UTC),
+            avg_exit=110.0,
+            pnl=200.0,
+            state="CLOSED",
+        )
+
+        assert paper_db.get_session_realized_pnl(session_id) == pytest.approx(1778.2)
+
+
 # ---------------------------------------------------------------------------
 # alert_dispatcher: _redact_url
 # ---------------------------------------------------------------------------

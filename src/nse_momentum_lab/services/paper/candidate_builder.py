@@ -253,6 +253,8 @@ def resolve_intraday_entry_from_5min(
     short_initial_stop_atr: float | None = None,
     short_initial_stop_atr_cap_mult: float | None = None,
     short_same_day_take_profit_pct: float | None = None,
+    same_day_partial_exit_pct: float | None = None,
+    same_day_partial_exit_carry_stop_pct: float = 0.05,
 ) -> IntradayEntry | None:
     """Resolve a single intraday entry from 5-min candles.
 
@@ -270,6 +272,8 @@ def resolve_intraday_entry_from_5min(
         short_initial_stop_atr=short_initial_stop_atr,
         short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
         short_same_day_take_profit_pct=short_same_day_take_profit_pct,
+        same_day_partial_exit_pct=same_day_partial_exit_pct,
+        same_day_partial_exit_carry_stop_pct=same_day_partial_exit_carry_stop_pct,
     )
     if result is None:
         return None
@@ -286,6 +290,7 @@ def resolve_intraday_entry_from_5min(
         else None,
         "carry_stop_next_session": result.carry_stop_next_session,
         "entry_time": result.entry_time,
+        "partial_exit_fraction": result.partial_exit_fraction,
     }
 
 
@@ -302,6 +307,8 @@ def resolve_intraday_entries_bulk(
     same_day_r_ladder_start_r: int = 2,
     short_initial_stop_atr_cap_mult: float | None = None,
     short_same_day_take_profit_pct: float | None = None,
+    same_day_partial_exit_pct: float | None = None,
+    same_day_partial_exit_carry_stop_pct: float = 0.05,
 ) -> dict[tuple[str, date], IntradayEntry]:
     """Resolve intraday entries for all signal days with one 5-min batch query.
 
@@ -406,6 +413,8 @@ def resolve_intraday_entries_bulk(
             short_initial_stop_atr=short_initial_stop_atr_by_key.get((symbol, trading_day)),
             short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
             short_same_day_take_profit_pct=short_same_day_take_profit_pct,
+            same_day_partial_exit_pct=same_day_partial_exit_pct,
+            same_day_partial_exit_carry_stop_pct=same_day_partial_exit_carry_stop_pct,
         )
         if intraday_entry is not None:
             resolved_entries[(symbol, trading_day)] = intraday_entry

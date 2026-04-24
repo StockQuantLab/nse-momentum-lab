@@ -9,6 +9,7 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertDispatcher,
     AlertEvent,
     AlertType,
+    format_partial_exit_alert,
     _redact_url,
     _should_send,
 )
@@ -137,3 +138,24 @@ def test_session_pause_resume_alerts_follow_session_lifecycle_toggle():
 
     assert not _should_send(AlertType.SESSION_PAUSED, config)
     assert not _should_send(AlertType.SESSION_RESUMED, config)
+
+
+def test_partial_exit_formatter_includes_remaining_qty_and_carry_stop():
+    subject, body = format_partial_exit_alert(
+        symbol="RELIANCE",
+        direction="LONG",
+        entry_price=100.0,
+        exit_price=120.0,
+        realized_pnl=1580.4,
+        exited_qty=80,
+        remaining_qty=20,
+        carry_stop=114.0,
+        session_id="sess1",
+        strategy="2lynchbreakout",
+    )
+
+    assert "[PARTIAL]" in subject
+    assert "RELIANCE" in subject
+    assert "Exited: <code>80</code>" in body
+    assert "Remaining: <code>20</code>" in body
+    assert "Carry SL: <code>₹114.00</code>" in body

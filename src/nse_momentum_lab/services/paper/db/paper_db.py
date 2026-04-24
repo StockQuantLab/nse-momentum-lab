@@ -60,7 +60,7 @@ _utc_now = _now
 
 
 # ---------------------------------------------------------------------------
-# DDL -- all 10 tables
+# DDL -- all 11 tables
 # ---------------------------------------------------------------------------
 
 _DDL: list[str] = [
@@ -1266,6 +1266,61 @@ class PaperDB:
         meta.update(updates)
         self.update_position(position_id, metadata_json=meta)
 
+    def partial_close_position(
+        self,
+        position_id: str,
+        *,
+        partial_exit_price: float,
+        partial_exit_qty: int,
+        carry_stop: float,
+        reason: str,
+        closed_at: datetime,
+    ) -> dict[str, Any] | None:
+        """Reduce qty for a partial exit and record the event in metadata."""
+        existing = self.get_position(position_id)
+        if existing is None:
+            return None
+        total_qty = int(existing.get("qty") or 0)
+        remain_qty = max(0, total_qty - partial_exit_qty)
+        avg_entry = float(existing.get("avg_entry") or 0.0)
+        direction = str(existing.get("direction") or "LONG").upper()
+        meta = dict(existing.get("metadata_json") or {})
+        entry_qty = int(meta.get("entry_qty") or total_qty or 0)
+        entry_fee_total = (
+            round(avg_entry * entry_qty * 0.001, 4) if avg_entry and entry_qty else 0.0
+        )
+        partial_exit_fee = (
+            round(partial_exit_price * partial_exit_qty * 0.001, 4)
+            if partial_exit_price and partial_exit_qty
+            else 0.0
+        )
+        partial_pnl = round(
+            (partial_exit_price - avg_entry) * partial_exit_qty
+            if direction == "LONG"
+            else (avg_entry - partial_exit_price) * partial_exit_qty,
+            4,
+        )
+        partial_net_pnl = round(partial_pnl - entry_fee_total - partial_exit_fee, 4)
+        meta.update(
+            entry_qty=entry_qty,
+            remaining_qty=remain_qty,
+            partial_exit_price=partial_exit_price,
+            partial_exit_qty=partial_exit_qty,
+            partial_exit_gross_pnl=partial_pnl,
+            partial_exit_entry_fee=entry_fee_total,
+            partial_exit_exit_fee=partial_exit_fee,
+            partial_exit_pnl=partial_pnl,
+            partial_exit_net_pnl=partial_net_pnl,
+            partial_exit_reason=reason,
+            partial_exit_at=closed_at.isoformat(),
+            current_sl=carry_stop,
+        )
+        self._execute(
+            "UPDATE paper_positions SET qty = $1, metadata_json = $2 WHERE position_id = $3",
+            [remain_qty, _json_dumps(meta), position_id],
+        )
+        return self.get_position(position_id)
+
     def get_session_realized_pnl(self, session_id: str) -> float:
         """Return cumulative realized P&L for a session net of modeled entry/exit fees.
 
@@ -1274,9 +1329,9 @@ class PaperDB:
         """
         rows = self._query_all(
             """
-            SELECT avg_entry, avg_exit, qty, pnl
+            SELECT avg_entry, avg_exit, qty, pnl, state, metadata_json
             FROM paper_positions
-            WHERE session_id = $1 AND state = 'CLOSED'
+            WHERE session_id = $1
             ORDER BY opened_at ASC
             """,
             [session_id],
@@ -1286,7 +1341,22 @@ class PaperDB:
             avg_entry = float(row.get("avg_entry") or 0.0)
             avg_exit = float(row.get("avg_exit") or avg_entry)
             qty = int(row.get("qty") or 0)
+            state = str(row.get("state") or "").upper()
             gross_pnl = float(row.get("pnl") or 0.0)
+            meta = _json_loads(row.get("metadata_json")) or {}
+            if not isinstance(meta, dict):
+                meta = {}
+            has_partial = "partial_exit_net_pnl" in meta
+            partial_net = float(meta.get("partial_exit_net_pnl") or 0.0)
+            partial_exit_qty = int(meta.get("partial_exit_qty") or 0)
+            if partial_exit_qty > 0 and has_partial:
+                total += partial_net
+                if state == "CLOSED":
+                    exit_fee = round(avg_exit * qty * 0.001, 4) if avg_exit and qty else 0.0
+                    total += gross_pnl - exit_fee
+                continue
+            if state != "CLOSED":
+                continue
             entry_fee = round(avg_entry * qty * 0.001, 4) if avg_entry and qty else 0.0
             exit_fee = round(avg_exit * qty * 0.001, 4) if avg_exit and qty else 0.0
             total += gross_pnl - entry_fee - exit_fee

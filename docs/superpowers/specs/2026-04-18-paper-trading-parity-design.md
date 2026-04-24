@@ -13,7 +13,7 @@
 | Phase 2 | Shared Engine: shared_engine.py, paper_runtime.py, paper_session_driver.py, bar_orchestrator.py | ✅ Complete |
 | Phase 3 | Feeds: candle_builder.py, local_ticker.py, kite_ticker.py | ✅ Complete |
 | Phase 4 | Notifications: telegram.py (HTML-escaped, token-redacted), alert_dispatcher.py (retry+audit) | ✅ Complete |
-| Phase 5 | Scripts + CLI: paper_replay.py, paper_live.py, multi_variant.py, cli/paper_v2.py (14 subcommands) | ✅ Complete |
+| Phase 5 | Scripts + CLI: paper_replay.py, paper_live.py, multi_variant.py, cli/paper_v2.py (17 subcommands) | ✅ Complete |
 | Phase 6 | Testing: unit tests, parity tests, feed/recovery/replica/notification tests | 🔲 Pending |
 | Phase 7 | Dashboard: paper_ledger_v2.py at /paper_ledger using ReplicaConsumer | ✅ Complete |
 | Phase 8 | Switch + Delete: old files removed, API/agents migrated, docs updated, pyproject.toml repointed | ✅ Complete |
@@ -586,7 +586,7 @@ States tracked in `paper_signals` DuckDB table. `paper_session_signals` links si
 
 ## Exit Reasons
 
-STOP_INITIAL, STOP_BREAKEVEN, STOP_TRAIL, TIME_STOP, EXIT_EOD, RISK_BREACH,
+STOP_INITIAL, STOP_BREAKEVEN, STOP_TRAIL, TIME_STOP, EXIT_EOD (backtest-only; paper engine uses eod-carry), RISK_BREACH,
 TARGET_HIT, SL_HIT, TRAIL_STOP, DAILY_LOSS_LIMIT, DRAWDOWN_LIMIT, FLATTEN_EOD
 
 ---
@@ -705,7 +705,7 @@ When a live session is paused and resumed:
 - ✅ Implement `scripts/paper_replay.py` (multi-day resume, bar idempotency, strategy overrides)
 - ✅ Implement `scripts/paper_live.py` (pause/resume recovery, flatten on all exit paths, mark_prices on crash flatten)
 - ✅ Implement `multi_variant.py`
-- ✅ Implement `cli/paper_v2.py` (14 subcommands: prepare, replay, live, plan, status, daily-sim, stop, pause, resume, flatten, archive, daily-prepare, daily-replay, daily-live)
+- ✅ Implement `cli/paper_v2.py` (17 subcommands: prepare, replay, live, multi-live, plan, status, daily-sim, stop, pause, resume, flatten, flatten-all, archive, daily-prepare, daily-replay, daily-live, eod-carry)
 
 ### Phase 6 — Testing 🔲 Pending
 - 🔲 Unit tests: shared engine (evaluate_candle LONG/SHORT), bar orchestrator, candle builder, paper DB

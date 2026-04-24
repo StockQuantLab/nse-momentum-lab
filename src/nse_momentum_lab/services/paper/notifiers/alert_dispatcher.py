@@ -68,6 +68,7 @@ class AlertType(StrEnum):
 
     TRADE_OPENED = "TRADE_OPENED"
     TRADE_CLOSED = "TRADE_CLOSED"
+    PARTIAL_EXIT = "PARTIAL_EXIT"
     SL_HIT = "SL_HIT"
     TRAIL_STOP = "TRAIL_STOP"
     TARGET_HIT = "TARGET_HIT"
@@ -149,6 +150,7 @@ def _should_send(alert_type: AlertType | str, config: AlertConfig) -> bool:
     mapping: dict[AlertType, bool] = {
         AlertType.TRADE_OPENED: config.trade_open,
         AlertType.TRADE_CLOSED: config.trade_close,
+        AlertType.PARTIAL_EXIT: config.trade_close,
         AlertType.SL_HIT: config.trade_close,
         AlertType.TRAIL_STOP: config.trade_close,
         AlertType.TARGET_HIT: config.trade_close,
@@ -285,6 +287,47 @@ def format_trade_closed_alert(
         + (f"📏 Qty: <code>{qty}</code>\n" if qty else "")
         + f"🏁 Reason: {escape(friendly_reason)}\n"
         + f"📤 Exit: <code>{entry_price:.2f}</code> → <code>{exit_price:.2f}</code>"
+        + (f"\n🕒 {time_str}" if time_str else "")
+        + "\n<a href='https://www.tradingview.com/chart/?symbol=NSE:"
+        + f"{escape(symbol)}'>Chart</a>"
+        + (f"\n<i>{session_context}</i>" if session_context else "")
+    )
+    return subject, body
+
+
+def format_partial_exit_alert(
+    *,
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    exit_price: float,
+    realized_pnl: float,
+    exited_qty: int,
+    remaining_qty: int,
+    carry_stop: float,
+    reason: str = "PARTIAL_EXIT",
+    session_id: str = "",
+    strategy: str = "",
+    event_time: datetime | None = None,
+) -> tuple[str, str]:
+    """Return (subject, HTML body) for a PARTIAL_EXIT alert."""
+    basis_qty = max(1, int(exited_qty) + int(remaining_qty))
+    pnl_pct = _net_trade_return_pct(
+        realized_pnl=realized_pnl,
+        entry_price=entry_price,
+        qty=basis_qty,
+    )
+    is_win = realized_pnl >= 0
+    icon = "✅" if is_win else "❌"
+    subject = f"{icon} [PARTIAL] {symbol} {direction}"
+    time_str = _format_event_time(event_time)
+    session_context = _format_session_context(strategy, session_id)
+    body = (
+        f"💰 Realized: <code>{realized_pnl:+,.2f}</code> ({pnl_pct:+.2f}%)\n"
+        f"📤 Exit: <code>₹{entry_price:.2f}</code> → <code>₹{exit_price:.2f}</code>\n"
+        f"📏 Exited: <code>{exited_qty}</code> | Remaining: <code>{remaining_qty}</code>\n"
+        f"🛡️ Carry SL: <code>₹{carry_stop:.2f}</code>\n"
+        f"🏁 Reason: {escape(_friendly_exit_reason(reason))}"
         + (f"\n🕒 {time_str}" if time_str else "")
         + "\n<a href='https://www.tradingview.com/chart/?symbol=NSE:"
         + f"{escape(symbol)}'>Chart</a>"
@@ -453,13 +496,20 @@ def summarize_session_pnl(
         avg_entry = float(position.get("avg_entry", 0) or 0.0)
         direction = str(position.get("direction", "LONG") or "LONG").upper()
         meta = position.get("metadata_json") or {}
+        if not isinstance(meta, dict):
+            meta = {}
         symbol = str(position.get("symbol", "") or "")
+        partial_exit_qty = int(meta.get("partial_exit_qty") or 0)
+        partial_exit_net_pnl = meta.get("partial_exit_net_pnl")
 
         if str(position.get("state", "")).upper() == "CLOSED":
             trades_closed_today += 1
-            avg_exit = float(position.get("avg_exit", avg_entry) or avg_entry)
             gross_pnl = float(position.get("pnl", 0) or 0.0)
-            net_pnl = gross_pnl - _estimate_fee(avg_entry, qty) - _estimate_fee(avg_exit, qty)
+            avg_exit = float(position.get("avg_exit", avg_entry) or avg_entry)
+            if partial_exit_qty > 0 and partial_exit_net_pnl is not None:
+                net_pnl = float(partial_exit_net_pnl) + gross_pnl - _estimate_fee(avg_exit, qty)
+            else:
+                net_pnl = gross_pnl - _estimate_fee(avg_entry, qty) - _estimate_fee(avg_exit, qty)
             if net_pnl >= 0:
                 winners += 1
             else:
@@ -473,7 +523,11 @@ def summarize_session_pnl(
             gross_upnl = (avg_entry - mark) * qty
         else:
             gross_upnl = (mark - avg_entry) * qty
-        entry_fee = _estimate_fee(avg_entry, qty)
+        entry_fee = (
+            0.0
+            if partial_exit_qty > 0 and partial_exit_net_pnl is not None
+            else _estimate_fee(avg_entry, qty)
+        )
         net_upnl = gross_upnl - entry_fee - _estimate_fee(mark, qty)
         unrealized_pnl += net_upnl
         open_pos_details.append(
@@ -481,6 +535,8 @@ def summarize_session_pnl(
                 "symbol": symbol,
                 "unrealized_pnl": net_upnl,
                 "days_held": meta.get("days_held", 0),
+                "partial_exit_realized_pnl": float(partial_exit_net_pnl or 0.0),
+                "remaining_qty": qty,
             }
         )
 

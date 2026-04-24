@@ -400,6 +400,10 @@ def _cmd_prepare(args: argparse.Namespace) -> None:
             notes=None,
         )
         session_id = session["session_id"]
+        # Sync immediately so PLANNED session is visible in the dashboard before
+        # the live process starts — prevents the "session missing" window when
+        # LONG and SHORT sessions are prepared sequentially.
+        _sync_paper_replica_after_cli_write(args.paper_db, db)
         print(
             json.dumps(
                 {
@@ -632,6 +636,7 @@ def _cmd_stop(args: argparse.Namespace) -> None:
     db = PaperDB(args.paper_db)
     try:
         db.update_session(session_id, status="COMPLETED")
+        _sync_paper_replica_after_cli_write(args.paper_db, db)
         print(json.dumps({"session_id": session_id, "status": "COMPLETED"}))
     finally:
         db.close()
@@ -660,6 +665,7 @@ def _cmd_pause(args: argparse.Namespace) -> None:
         status_before = str(current.get("status", "")).upper()
         if status_before != "PAUSED":
             db.update_session(session_id, status="PAUSED")
+            _sync_paper_replica_after_cli_write(args.paper_db, db)
             # Dispatch session paused alert.
             try:
                 config = get_alert_config()
@@ -710,6 +716,7 @@ def _cmd_resume(args: argparse.Namespace) -> None:
         status_before = str(current.get("status", "")).upper()
         if status_before != "ACTIVE":
             db.update_session(session_id, status="ACTIVE")
+            _sync_paper_replica_after_cli_write(args.paper_db, db)
             # Dispatch session resumed alert.
             try:
                 config = get_alert_config()
@@ -844,6 +851,7 @@ def _cmd_archive(args: argparse.Namespace) -> None:
     db = PaperDB(args.paper_db)
     try:
         db.update_session(session_id, status="ARCHIVED")
+        _sync_paper_replica_after_cli_write(args.paper_db, db)
         print(json.dumps({"session_id": session_id, "status": "ARCHIVED"}))
     finally:
         db.close()

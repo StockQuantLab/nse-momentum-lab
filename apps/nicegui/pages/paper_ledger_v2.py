@@ -851,10 +851,12 @@ async def paper_ledger_v2_page() -> None:
 
                         with arch_content:
                             # Equity curve
-                            if closed_positions:
-                                sorted_closed = sorted(
-                                    closed_positions, key=lambda x: x.get("closed_at", "")
-                                )
+                            sorted_closed = (
+                                sorted(closed_positions, key=lambda x: x.get("closed_at", ""))
+                                if closed_positions
+                                else []
+                            )
+                            if sorted_closed:
                                 cum = 0.0
                                 equity_dates = []
                                 equity_vals = []

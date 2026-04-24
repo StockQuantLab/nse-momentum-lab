@@ -162,7 +162,7 @@ def apply_eod_carry_decisions(
 
     time_stop_days: int = getattr(strategy_config, "time_stop_days", 5)
     h_carry_enabled: bool = getattr(strategy_config, "h_carry_enabled", True)
-    h_filter_threshold: float = getattr(strategy_config, "h_filter_close_pos_threshold", 0.70)
+    close_pos_threshold: float = getattr(strategy_config, "h_filter_close_pos_threshold", 0.70)
 
     carried = time_exit = weak_close_exit = no_data = 0
     now = datetime.now(UTC)
@@ -234,9 +234,9 @@ def apply_eod_carry_decisions(
         elif close_pos is None:
             filter_h_pass = False  # zero-range bar or missing feature → treat as H failed
         elif direction == "LONG":
-            filter_h_pass = close_pos >= h_filter_threshold
+            filter_h_pass = close_pos >= close_pos_threshold
         else:  # SHORT
-            filter_h_pass = close_pos <= (1.0 - h_filter_threshold)
+            filter_h_pass = close_pos <= (1.0 - close_pos_threshold)
 
         # --- H=False + losing/flat → WEAK_CLOSE_EXIT ---
         if not filter_h_pass:

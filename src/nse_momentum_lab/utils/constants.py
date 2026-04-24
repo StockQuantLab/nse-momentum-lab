@@ -89,7 +89,7 @@ def get_exit_time_for_reason(exit_reason_value: str) -> time | None:
     close_exits = {
         "TIME_STOP",
         "ABNORMAL_PROFIT",
-        "EXIT_EOD",
+        "EXIT_EOD",  # retained for historical backtest results; paper engine uses eod-carry
         "DELISTING",
         "SUSPENSION",
         "STOP_POST_DAY3",

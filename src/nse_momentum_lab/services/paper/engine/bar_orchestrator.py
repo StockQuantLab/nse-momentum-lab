@@ -133,6 +133,25 @@ class SessionPositionTracker:
         if tracked is not None:
             tracked.trail_state = trail_state
 
+    def partial_close(
+        self,
+        symbol: str,
+        *,
+        exit_qty: int,
+        exit_value: float,
+        new_stop: float,
+        new_trail_state: dict[str, Any],
+    ) -> None:
+        """Reduce position qty after a partial exit, freeing capital for the exited portion."""
+        tracked = self._open.get(symbol)
+        if tracked is None:
+            return
+        tracked.current_qty = max(0, tracked.current_qty - exit_qty)
+        tracked.quantity = tracked.current_qty
+        tracked.stop_loss = new_stop
+        tracked.trail_state = new_trail_state
+        self.cash_available += exit_value
+
     def seed_open_positions(self, positions: list[dict[str, Any]]) -> None:
         """Pre-populate tracker with existing positions on session restart or carry-over."""
         for p in positions:

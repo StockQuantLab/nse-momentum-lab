@@ -16,8 +16,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, timezone
 from typing import Any
 
-from nse_momentum_lab.db.market_db import LIVE_BLOCKING_DQ_CODES
 from nse_momentum_lab.services.backtest.duckdb_backtest_runner import BacktestParams
+from nse_momentum_lab.services.backtest.intraday_execution import evaluate_held_position_bar
 from nse_momentum_lab.services.paper.candidate_builder import (
     apply_breakdown_selection_ranking,
     apply_breakout_selection_ranking,
@@ -147,6 +147,7 @@ def evaluate_candle(
             state=state,
             tracker=tracker,
             session=session,
+            strategy_config=strategy_config,
         )
 
     # --- Position closed today: no re-entry ---
@@ -187,8 +188,14 @@ def _advance_open_position(
     state: SymbolRuntimeState,
     tracker: SessionPositionTracker,
     session: dict[str, Any],
+    strategy_config: Any = None,
 ) -> dict[str, Any]:
-    """Advance an open position: check stops, trails, time exits."""
+    """Advance an open position via the shared intraday_execution evaluator.
+
+    Delegates entirely to evaluate_held_position_bar() — the single source of
+    truth for 5-min bar stop management shared by paper-live, paper-replay, and
+    (future) the 5-min backtest hold-day loop.
+    """
     tracked = tracker.get_open_position(symbol)
     if tracked is None:
         return {"action": "SKIP", "reason": "no_position"}
@@ -197,94 +204,41 @@ def _advance_open_position(
     high = candle.get("high", close)
     low = candle.get("low", close)
     open_px = candle.get("open", close)
-    direction = tracked.direction
 
-    trail_state = tracked.trail_state
+    trail_state = dict(tracked.trail_state)
     stop_level = trail_state.get("current_sl", tracked.stop_loss)
-    entry_price = tracked.entry_price
-    is_first_bar_for_symbol = state.candle_count <= 1
-    is_carried_position = int(getattr(tracked, "days_held", 0) or 0) > 0
 
-    # Post-day3 stop tightening — applied once on the first bar of a new session
-    # after the position has been carried for 3+ nights (matching backtest behaviour).
-    if trail_state.pop("pending_day_tighten", False):
-        prior_day_low = trail_state.get("prior_day_low")
-        prior_day_high = trail_state.get("prior_day_high")
-        if direction == "LONG" and prior_day_low:
-            stop_level = max(stop_level, float(prior_day_low))
-        elif direction == "SHORT" and prior_day_high:
-            stop_level = min(stop_level, float(prior_day_high))
-        trail_state["current_sl"] = stop_level
+    same_day_partial_exit_pct = (
+        getattr(strategy_config, "same_day_partial_exit_pct", None) if strategy_config else None
+    )
+    same_day_partial_exit_carry_stop_pct = (
+        getattr(strategy_config, "same_day_partial_exit_carry_stop_pct", 0.05)
+        if strategy_config
+        else 0.05
+    )
+    is_entry_day = not (int(getattr(tracked, "days_held", 0) or 0) > 0)
 
-    # Gap-through stop is only meaningful on the first bar for an overnight-carried
-    # position. Intraday bars opening beyond the stop should still be treated as a
-    # normal stop hit, not as an overnight gap-through event.
-    if (
-        is_first_bar_for_symbol
-        and is_carried_position
-        and direction == "LONG"
-        and open_px <= stop_level
-    ):
-        return {
-            "action": "CLOSE",
-            "exit_price": open_px,
-            "reason": "GAP_THROUGH_STOP",
-        }
-    if (
-        is_first_bar_for_symbol
-        and is_carried_position
-        and direction == "SHORT"
-        and open_px >= stop_level
-    ):
-        return {
-            "action": "CLOSE",
-            "exit_price": open_px,
-            "reason": "GAP_THROUGH_STOP",
-        }
+    result = evaluate_held_position_bar(
+        open_px=open_px,
+        high_px=high,
+        low_px=low,
+        close_px=close,
+        entry_price=tracked.entry_price,
+        stop_level=stop_level,
+        direction=tracked.direction,
+        trail_state=trail_state,
+        is_first_bar_of_session=state.candle_count <= 1,
+        is_carried_position=int(getattr(tracked, "days_held", 0) or 0) > 0,
+        same_day_partial_exit_pct=same_day_partial_exit_pct,
+        same_day_partial_exit_carry_stop_pct=same_day_partial_exit_carry_stop_pct,
+        is_entry_day=is_entry_day,
+    )
 
-    # Stop hit.
-    if direction == "LONG" and low <= stop_level:
-        return {
-            "action": "CLOSE",
-            "exit_price": stop_level,
-            "reason": _classify_stop_reason(entry_price, stop_level, direction),
-        }
-    if direction == "SHORT" and high >= stop_level:
-        return {
-            "action": "CLOSE",
-            "exit_price": stop_level,
-            "reason": _classify_stop_reason(entry_price, stop_level, direction),
-        }
-
-    # Breakeven: tighten stop to entry if price moved in our favor.
-    if direction == "LONG" and close > entry_price and stop_level < entry_price:
-        stop_level = entry_price
-        trail_state["phase"] = "BREAKEVEN"
-    if direction == "SHORT" and close < entry_price and stop_level > entry_price:
-        stop_level = entry_price
-        trail_state["phase"] = "BREAKEVEN"
-
-    # Trail: if price moved significantly, tighten stop.
-    trail_activation_pct = trail_state.get("trail_activation_pct", 0.08)
-    trail_stop_pct = trail_state.get("trail_stop_pct", 0.02)
-    if direction == "LONG":
-        gain = (high - entry_price) / entry_price if entry_price > 0 else 0
-        if gain >= trail_activation_pct:
-            new_stop = high * (1 - trail_stop_pct)
-            stop_level = max(stop_level, new_stop)
-            trail_state["phase"] = "TRAIL"
-        trail_state["highest_since_entry"] = max(trail_state.get("highest_since_entry", high), high)
-    if direction == "SHORT":
-        gain = (entry_price - low) / entry_price if entry_price > 0 else 0
-        if gain >= trail_activation_pct:
-            new_stop = low * (1 + trail_stop_pct)
-            stop_level = min(stop_level, new_stop) if stop_level > 0 else new_stop
-            trail_state["phase"] = "TRAIL"
-        trail_state["lowest_since_entry"] = min(trail_state.get("lowest_since_entry", low), low)
-
-    # HOLD: update trail state.
-    trail_state["current_sl"] = stop_level
-    return {"action": "HOLD", "next_trail_state": trail_state}
+    if result["action"] == "CLOSE":
+        return {"action": "CLOSE", "exit_price": result["exit_price"], "reason": result["reason"]}
+    if result["action"] == "PARTIAL_EXIT":
+        return result  # pass through with all keys intact
+    return {"action": "HOLD", "next_trail_state": result["updated_trail_state"]}
 
 
 def _classify_stop_reason(entry_price: float, stop_level: float, direction: str) -> str:
@@ -666,26 +620,6 @@ def seed_candidates_from_market_db(
 
     if not symbols:
         return 0
-    blocked_symbols: set[str] = set()
-    if hasattr(market_db, "get_active_dq_symbols"):
-        try:
-            blocked_symbols = set(
-                market_db.get_active_dq_symbols(issue_codes=LIVE_BLOCKING_DQ_CODES)
-            )
-        except Exception:
-            logger.exception("Failed to query active DQ symbols; continuing without filter")
-            blocked_symbols = set()
-    if blocked_symbols:
-        kept_symbols = [sym for sym in symbols if sym not in blocked_symbols]
-        dropped = len(symbols) - len(kept_symbols)
-        if dropped > 0:
-            logger.warning(
-                "seed_candidates_from_market_db: excluded %d symbol(s) with active CRITICAL/HIGH DQ",
-                dropped,
-            )
-        symbols = kept_symbols
-        if not symbols:
-            return 0
     symbol_set = set(symbols)
     found: set[str] = set()
     ranked_rows: dict[str, dict[str, Any]] = {}

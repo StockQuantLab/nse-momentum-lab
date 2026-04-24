@@ -106,6 +106,9 @@ _ENGINE_DEFAULTS: dict[str, Any] = {
     # H-carry logic: exit at close when position is not profitable AND didn't close near
     # high/low; tighten stop to at least breakeven when carrying. Enabled for all strategies.
     "h_carry_enabled": True,
+    # same_day_partial_exit_pct intentionally omitted — defaults to None (disabled).
+    # Backtested 2026-04-24: enabling at 0.20 cuts annual return ~40-50% by capping
+    # fat-tail winners. The same_day_r_ladder handles progressive profit-locking instead.
 }
 
 ALL_PRESETS: dict[str, StrategyPreset] = {

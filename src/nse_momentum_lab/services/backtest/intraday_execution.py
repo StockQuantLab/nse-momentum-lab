@@ -23,6 +23,7 @@ class IntradayExecutionResult:
     same_day_exit_time: time | None
     same_day_exit_reason: ExitReason | None
     carry_stop_next_session: float | None
+    partial_exit_fraction: float | None = None
 
 
 def _row_trading_date(row: dict[str, object]) -> date | None:
@@ -84,8 +85,14 @@ def _simulate_same_day_stop_execution(
     same_day_r_ladder: bool,
     same_day_r_ladder_start_r: int = 2,
     short_same_day_take_profit_pct: float | None = None,
-) -> tuple[bool, float | None, time | None, ExitReason | None, float]:
-    """Simulate stop execution on bars after entry and return final carry stop."""
+    same_day_partial_exit_pct: float | None = None,
+    same_day_partial_exit_carry_stop_pct: float = 0.05,
+) -> tuple[bool, float | None, time | None, ExitReason | None, float, float | None]:
+    """Simulate stop execution on bars after entry and return final carry stop.
+
+    Returns a 6-tuple: (did_exit, exit_price, exit_time, exit_reason, carry_stop, partial_fraction).
+    partial_fraction is non-None only for PARTIAL_EXIT (0.80 = exit 80%).
+    """
     stop_level = float(initial_stop)
     risk = (
         (float(initial_stop) - float(entry_price))
@@ -93,13 +100,28 @@ def _simulate_same_day_stop_execution(
         else (float(entry_price) - float(initial_stop))
     )
     if risk <= 0:
-        return False, None, None, None, stop_level
+        return False, None, None, None, stop_level, None
 
     for follow_row in rows[entry_idx + 1 :]:
         high_px = float(follow_row["high"])
         low_px = float(follow_row["low"])
         open_px = float(follow_row["open"])
         exit_time = normalize_candle_time(follow_row.get("candle_time"))
+
+        # Same-day partial exit: large intraday move → exit 80%, carry 20% with tight stop.
+        if same_day_partial_exit_pct and same_day_partial_exit_pct > 0:
+            if is_short:
+                target = float(entry_price) * (1.0 - float(same_day_partial_exit_pct))
+                if low_px <= target:
+                    exit_px = open_px if open_px <= target else target
+                    carry = exit_px * (1.0 + float(same_day_partial_exit_carry_stop_pct))
+                    return True, exit_px, exit_time, ExitReason.PARTIAL_EXIT, carry, 0.80
+            else:
+                target = float(entry_price) * (1.0 + float(same_day_partial_exit_pct))
+                if high_px >= target:
+                    exit_px = open_px if open_px >= target else target
+                    carry = exit_px * (1.0 - float(same_day_partial_exit_carry_stop_pct))
+                    return True, exit_px, exit_time, ExitReason.PARTIAL_EXIT, carry, 0.80
 
         # Optional short-only same-day profit-taking.
         if (
@@ -110,12 +132,19 @@ def _simulate_same_day_stop_execution(
             target_price = float(entry_price) * (1 - float(short_same_day_take_profit_pct))
             if low_px <= target_price:
                 exit_price = open_px if open_px <= target_price else target_price
-                return True, float(exit_price), exit_time, ExitReason.ABNORMAL_PROFIT, stop_level
+                return (
+                    True,
+                    float(exit_price),
+                    exit_time,
+                    ExitReason.ABNORMAL_PROFIT,
+                    stop_level,
+                    None,
+                )
 
         # Gap-through stop is filled at open.
         gap_through = open_px >= stop_level if is_short else open_px <= stop_level
         if gap_through:
-            return True, open_px, exit_time, ExitReason.GAP_THROUGH_STOP, stop_level
+            return True, open_px, exit_time, ExitReason.GAP_THROUGH_STOP, stop_level, None
 
         if same_day_r_ladder:
             if is_short:
@@ -153,9 +182,193 @@ def _simulate_same_day_stop_execution(
                 reason = ExitReason.STOP_INITIAL
 
         exit_time = normalize_candle_time(follow_row.get("candle_time"))
-        return True, float(stop_level), exit_time, reason, stop_level
+        return True, float(stop_level), exit_time, reason, stop_level, None
 
-    return False, None, None, None, stop_level
+    return False, None, None, None, stop_level, None
+
+
+# ---------------------------------------------------------------------------
+# Shared held-position bar evaluator
+# Called by paper-live, paper-replay, and (future) 5-min backtest hold-day loop.
+# ---------------------------------------------------------------------------
+
+
+def _classify_stop_reason_str(entry_price: float, stop_level: float, is_short: bool) -> str:
+    """Return 'STOP_INITIAL' | 'STOP_BREAKEVEN' | 'STOP_TRAIL' for a stop hit."""
+    eps = max(0.01, abs(entry_price) * 1e-5)
+    if not is_short:
+        if stop_level > entry_price + eps:
+            return "STOP_TRAIL"
+        if stop_level >= entry_price - eps:
+            return "STOP_BREAKEVEN"
+        return "STOP_INITIAL"
+    else:
+        if stop_level < entry_price - eps:
+            return "STOP_TRAIL"
+        if stop_level <= entry_price + eps:
+            return "STOP_BREAKEVEN"
+        return "STOP_INITIAL"
+
+
+def evaluate_held_position_bar(
+    *,
+    open_px: float,
+    high_px: float,
+    low_px: float,
+    close_px: float,
+    entry_price: float,
+    stop_level: float,
+    direction: str,
+    trail_state: dict,
+    is_first_bar_of_session: bool = False,
+    is_carried_position: bool = False,
+    same_day_partial_exit_pct: float | None = None,
+    same_day_partial_exit_carry_stop_pct: float = 0.05,
+    is_entry_day: bool = False,
+) -> dict:
+    """Evaluate one 5-min bar for an already-open position.
+
+    Canonical stop-management rules (shared across paper-live, paper-replay,
+    and the future 5-min backtest hold-day loop):
+
+    1. Post-day-3 stop tightening — applied once on the first bar of a new
+       session when ``trail_state["pending_day_tighten"]`` is set.
+    2. Gap-through stop — fires only on the first bar of a session for an
+       overnight-carried position (open already through the stop).
+    3. Stop hit — intraday low/high crosses stop_level → exit.
+    4. Trail activation — if cumulative gain ≥ trail_activation_pct, tighten.
+
+    NOT here: intraday breakeven promotion.
+    Breakeven / stop tightening based on close-position-in-range is an
+    EOD-only operation handled by the eod-carry step (H-carry rule).
+
+    Returns
+    -------
+    dict with keys:
+        action          "CLOSE" | "HOLD"
+        exit_price      float (0.0 for HOLD)
+        reason          str   (empty for HOLD)
+        updated_stop    float
+        updated_trail_state  dict
+    """
+    is_short = direction == "SHORT"
+    trail_activation_pct = float(trail_state.get("trail_activation_pct", 0.08))
+    trail_stop_pct = float(trail_state.get("trail_stop_pct", 0.02))
+    updated = dict(trail_state)
+
+    # ── 1. Post-day-3 stop tightening ────────────────────────────────────────
+    if updated.pop("pending_day_tighten", False):
+        prior_day_low = updated.get("prior_day_low")
+        prior_day_high = updated.get("prior_day_high")
+        if not is_short and prior_day_low:
+            stop_level = max(stop_level, float(prior_day_low))
+        elif is_short and prior_day_high:
+            stop_level = min(stop_level, float(prior_day_high))
+        updated["current_sl"] = stop_level
+
+    # ── 2. Gap-through stop (overnight carries, first bar only) ──────────────
+    if is_first_bar_of_session and is_carried_position:
+        if not is_short and open_px <= stop_level:
+            updated["current_sl"] = stop_level
+            return {
+                "action": "CLOSE",
+                "exit_price": open_px,
+                "reason": "GAP_THROUGH_STOP",
+                "updated_stop": stop_level,
+                "updated_trail_state": updated,
+            }
+        if is_short and open_px >= stop_level:
+            updated["current_sl"] = stop_level
+            return {
+                "action": "CLOSE",
+                "exit_price": open_px,
+                "reason": "GAP_THROUGH_STOP",
+                "updated_stop": stop_level,
+                "updated_trail_state": updated,
+            }
+
+    # ── 2b. Same-day partial exit ─────────────────────────────────────────────
+    # Fires on entry day only when a large move hits the partial exit threshold.
+    if is_entry_day and same_day_partial_exit_pct and same_day_partial_exit_pct > 0:
+        if not is_short:
+            target = entry_price * (1.0 + float(same_day_partial_exit_pct))
+            if high_px >= target:
+                exit_px = open_px if open_px >= target else target
+                carry = exit_px * (1.0 - float(same_day_partial_exit_carry_stop_pct))
+                updated["current_sl"] = carry
+                return {
+                    "action": "PARTIAL_EXIT",
+                    "exit_price": exit_px,
+                    "reason": "PARTIAL_EXIT",
+                    "partial_fraction": 0.80,
+                    "carry_stop": carry,
+                    "updated_stop": carry,
+                    "updated_trail_state": updated,
+                }
+        else:
+            target = entry_price * (1.0 - float(same_day_partial_exit_pct))
+            if low_px <= target:
+                exit_px = open_px if open_px <= target else target
+                carry = exit_px * (1.0 + float(same_day_partial_exit_carry_stop_pct))
+                updated["current_sl"] = carry
+                return {
+                    "action": "PARTIAL_EXIT",
+                    "exit_price": exit_px,
+                    "reason": "PARTIAL_EXIT",
+                    "partial_fraction": 0.80,
+                    "carry_stop": carry,
+                    "updated_stop": carry,
+                    "updated_trail_state": updated,
+                }
+
+    # ── 3. Stop hit ───────────────────────────────────────────────────────────
+    if not is_short and low_px <= stop_level:
+        reason = _classify_stop_reason_str(entry_price, stop_level, is_short)
+        updated["current_sl"] = stop_level
+        return {
+            "action": "CLOSE",
+            "exit_price": stop_level,
+            "reason": reason,
+            "updated_stop": stop_level,
+            "updated_trail_state": updated,
+        }
+    if is_short and high_px >= stop_level:
+        reason = _classify_stop_reason_str(entry_price, stop_level, is_short)
+        updated["current_sl"] = stop_level
+        return {
+            "action": "CLOSE",
+            "exit_price": stop_level,
+            "reason": reason,
+            "updated_stop": stop_level,
+            "updated_trail_state": updated,
+        }
+
+    # ── 4. Trail activation ───────────────────────────────────────────────────
+    if not is_short:
+        gain = (high_px - entry_price) / entry_price if entry_price > 0 else 0.0
+        if gain >= trail_activation_pct:
+            stop_level = max(stop_level, high_px * (1 - trail_stop_pct))
+            updated["phase"] = "TRAIL"
+        updated["highest_since_entry"] = max(
+            float(updated.get("highest_since_entry", high_px)), high_px
+        )
+    else:
+        gain = (entry_price - low_px) / entry_price if entry_price > 0 else 0.0
+        if gain >= trail_activation_pct:
+            stop_level = min(stop_level, low_px * (1 + trail_stop_pct))
+            updated["phase"] = "TRAIL"
+        updated["lowest_since_entry"] = min(
+            float(updated.get("lowest_since_entry", low_px)), low_px
+        )
+
+    updated["current_sl"] = stop_level
+    return {
+        "action": "HOLD",
+        "exit_price": 0.0,
+        "reason": "",
+        "updated_stop": stop_level,
+        "updated_trail_state": updated,
+    }
 
 
 def resolve_intraday_execution_from_5min(
@@ -171,6 +384,8 @@ def resolve_intraday_execution_from_5min(
     short_initial_stop_atr: float | None = None,
     short_initial_stop_atr_cap_mult: float | None = None,
     short_same_day_take_profit_pct: float | None = None,
+    same_day_partial_exit_pct: float | None = None,
+    same_day_partial_exit_carry_stop_pct: float = 0.05,
 ) -> IntradayExecutionResult | None:
     """Resolve intraday entry and same-day stop behavior from 5-minute candles.
 
@@ -269,21 +484,28 @@ def resolve_intraday_execution_from_5min(
     ):
         return None
 
-    stop_hit, same_day_exit_price, same_day_exit_time, same_day_exit_reason, carry_stop = (
-        _simulate_same_day_stop_execution(
-            rows=rows,
-            entry_idx=entry_idx,
-            entry_price=entry_price,
-            initial_stop=initial_stop,
-            is_short=is_short,
-            same_day_r_ladder=same_day_r_ladder,
-            same_day_r_ladder_start_r=same_day_r_ladder_start_r,
-            short_same_day_take_profit_pct=short_same_day_take_profit_pct,
-        )
+    (
+        did_exit,
+        same_day_exit_price,
+        same_day_exit_time,
+        same_day_exit_reason,
+        carry_stop,
+        partial_fraction,
+    ) = _simulate_same_day_stop_execution(
+        rows=rows,
+        entry_idx=entry_idx,
+        entry_price=entry_price,
+        initial_stop=initial_stop,
+        is_short=is_short,
+        same_day_r_ladder=same_day_r_ladder,
+        same_day_r_ladder_start_r=same_day_r_ladder_start_r,
+        short_same_day_take_profit_pct=short_same_day_take_profit_pct,
+        same_day_partial_exit_pct=same_day_partial_exit_pct,
+        same_day_partial_exit_carry_stop_pct=same_day_partial_exit_carry_stop_pct,
     )
 
     same_day_exit_ts = None
-    if stop_hit and same_day_exit_time is not None:
+    if did_exit and same_day_exit_time is not None:
         same_day_exit_ts = datetime.combine(entry_ts.date(), same_day_exit_time)
 
     return IntradayExecutionResult(
@@ -296,4 +518,5 @@ def resolve_intraday_execution_from_5min(
         same_day_exit_time=same_day_exit_time,
         same_day_exit_reason=same_day_exit_reason,
         carry_stop_next_session=float(carry_stop) if carry_stop is not None else None,
+        partial_exit_fraction=partial_fraction,
     )

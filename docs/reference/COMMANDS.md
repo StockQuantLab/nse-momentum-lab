@@ -1,7 +1,7 @@
 # Command Reference - nse-momentum-lab
 
 **Version**: Multi-Strategy Platform (Phase 1–7 complete) + Paper Trading v2 Engine
-**Last Updated**: 2026-04-23
+**Last Updated**: 2026-04-24
 
 ---
 
@@ -451,6 +451,27 @@ doppler run -- uv run nseml-paper live --session-id <SESSION_ID>
 doppler run -- uv run nseml-paper live --session-id <SESSION_ID> --poll-interval 1.0 --max-cycles 100
 ```
 
+#### Run multiple live sessions (one writer process)
+
+```bash
+# Preferred method: one shared writer for breakout + breakdown
+doppler run -- uv run nseml-paper multi-live \
+  --strategy 2lynchbreakout \
+  --strategy 2lynchbreakdown \
+  --trade-date 2026-04-27
+
+# Or by explicit session IDs (repeatable)
+doppler run -- uv run nseml-paper multi-live \
+  --session-id <ID_1> --session-id <ID_2>
+
+# Suppress Telegram/email alerts
+doppler run -- uv run nseml-paper multi-live \
+  --strategy 2lynchbreakout --strategy 2lynchbreakdown \
+  --trade-date 2026-04-27 --no-alerts
+```
+
+**Why**: DuckDB is single-writer — running two separate `live` processes against the same `paper.duckdb` causes lock contention. `multi-live` runs all sessions inside one process, sharing one DB connection.
+
 #### Session status
 
 ```bash
@@ -481,6 +502,9 @@ doppler run -- uv run nseml-paper stop --session-id <SESSION_ID>
 
 # Flatten open positions and pause session
 doppler run -- uv run nseml-paper flatten --session-id <SESSION_ID>
+
+# EMERGENCY: force-close all positions across all sessions for a trade date
+doppler run -- uv run nseml-paper flatten-all --trade-date 2026-04-24
 
 # Archive a completed session
 doppler run -- uv run nseml-paper archive --session-id <SESSION_ID>
@@ -520,6 +544,24 @@ doppler run -- uv run nseml-paper daily-live --strategy thresholdbreakout
 # Fast daily simulation (single-day replay, prints summary)
 doppler run -- uv run nseml-paper daily-sim --session-id <SESSION_ID> --trade-date 2026-03-25
 ```
+
+#### Post-market EOD carry
+
+```bash
+# Run after nseml-build-features completes — applies H-carry decisions and TIME_EXIT
+doppler run -- uv run nseml-paper eod-carry --strategy 2lynchbreakout --trade-date 2026-04-24
+
+# Or by session ID
+doppler run -- uv run nseml-paper eod-carry --session-id <SESSION_ID> --trade-date 2026-04-24
+
+# Suppress alerts
+doppler run -- uv run nseml-paper eod-carry --strategy 2lynchbreakout --trade-date 2026-04-24 --no-alerts
+```
+
+**When to run**: After `nseml-build-features --since TODAY` completes. The H-carry rule checks daily
+`close_pos_in_range` (the `filter_h` feature), which is only available after features are rebuilt.
+This step carries positions overnight or triggers TIME_EXIT / WEAK_CLOSE_EXIT based on hold duration
+and the H-filter signal.
 
 See also: [`docs/operations/pre-open-live-paper.md`](../operations/pre-open-live-paper.md)
 
@@ -856,5 +898,5 @@ doppler run -- uv run nseml-dashboard
 
 ---
 
-**Last Updated**: 2026-04-21
+**Last Updated**: 2026-04-24
 **For Issues**: Check [dev/AGENTS.md](../dev/AGENTS.md) runbook

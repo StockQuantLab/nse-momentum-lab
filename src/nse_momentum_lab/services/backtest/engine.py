@@ -23,12 +23,13 @@ class ExitReason(Enum):
     STOP_TRAIL = "STOP_TRAIL"
     STOP_POST_DAY3 = "STOP_POST_DAY3"
     TIME_STOP = "TIME_STOP"
-    EXIT_EOD = "EXIT_EOD"
+    EXIT_EOD = "EXIT_EOD"  # retained for historical backtest result compatibility; paper engine uses eod-carry instead
     GAP_THROUGH_STOP = "GAP_THROUGH_STOP"
     ABNORMAL_PROFIT = "ABNORMAL_PROFIT"
     ABNORMAL_GAP_EXIT = "ABNORMAL_GAP_EXIT"
     SUSPENSION = "SUSPENSION"
     WEAK_CLOSE_EXIT = "WEAK_CLOSE_EXIT"
+    PARTIAL_EXIT = "PARTIAL_EXIT"
 
 
 class PositionSide(Enum):

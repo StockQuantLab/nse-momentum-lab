@@ -58,6 +58,8 @@ class PaperStrategyConfig:
     short_trail_activation_pct: float | None = (
         None  # if set, used for SHORT; else trail_activation_pct
     )
+    same_day_partial_exit_pct: float | None = None
+    same_day_partial_exit_carry_stop_pct: float = 0.05
     extra_params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -158,6 +160,8 @@ def get_paper_strategy_config(
         "trail_activation_pct": base.trail_activation_pct,
         "trail_stop_pct": base.trail_stop_pct,
         "short_trail_activation_pct": base.short_trail_activation_pct,
+        "same_day_partial_exit_pct": base.same_day_partial_exit_pct,
+        "same_day_partial_exit_carry_stop_pct": base.same_day_partial_exit_carry_stop_pct,
     }
     for k, v in overrides.items():
         if k in fields:
@@ -189,6 +193,8 @@ def get_paper_strategy_config(
         trail_activation_pct=fields["trail_activation_pct"],
         trail_stop_pct=fields["trail_stop_pct"],
         short_trail_activation_pct=fields["short_trail_activation_pct"],
+        same_day_partial_exit_pct=fields["same_day_partial_exit_pct"],
+        same_day_partial_exit_carry_stop_pct=fields["same_day_partial_exit_carry_stop_pct"],
         extra_params=params,
     )
 

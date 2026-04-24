@@ -28,6 +28,7 @@ from nse_momentum_lab.services.paper.engine.paper_runtime import (
 from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertEvent,
     AlertType,
+    format_partial_exit_alert,
     format_trade_closed_alert,
     format_trade_opened_alert,
 )
@@ -155,6 +156,85 @@ async def process_closed_bar_group(
                                 tracked_pos.position_id,
                                 last_mark_price=mark,
                                 current_sl=trail_state.get("current_sl"),
+                            )
+
+            elif result.get("action") == "PARTIAL_EXIT":
+                exit_price = float(result["exit_price"])
+                partial_fraction = float(result.get("partial_fraction", 0.80))
+                carry_stop = float(result["carry_stop"])
+                trail_state = result.get("updated_trail_state", {})
+                tracked_pos = tracker.get_open_position(symbol)
+                if tracked_pos is not None:
+                    total_qty = tracked_pos.current_qty
+                    exit_qty = max(1, int(total_qty * partial_fraction))
+                    remain_qty = total_qty - exit_qty
+                    if remain_qty <= 0:
+                        # qty too small to split — treat as full close
+                        exit_value = _compute_exit_value(tracker, symbol, exit_price)
+                        tracker.record_close(symbol, exit_value)
+                        state = runtime_state.for_symbol(symbol)
+                        state.position_closed_today = True
+                        _log_close(symbol, result["reason"], exit_price, tracked_pos)
+                        if paper_db is not None:
+                            _record_close_in_db(
+                                paper_db, session_id, symbol, exit_price, result["reason"]
+                            )
+                    else:
+                        exit_value = exit_price * exit_qty
+                        entry_price = float(tracked_pos.entry_price)
+                        realized_pnl = (
+                            (exit_price - entry_price) * exit_qty
+                            if tracked_pos.direction == "LONG"
+                            else (entry_price - exit_price) * exit_qty
+                        )
+                        realized_pnl -= round(entry_price * total_qty * 0.001, 4)
+                        realized_pnl -= round(exit_price * exit_qty * 0.001, 4)
+                        tracker.partial_close(
+                            symbol,
+                            exit_qty=exit_qty,
+                            exit_value=exit_value,
+                            new_stop=carry_stop,
+                            new_trail_state=trail_state,
+                        )
+                        logger.info(
+                            "PARTIAL_EXIT %s %s @ %.2f qty=%d remain=%d carry_stop=%.2f",
+                            tracked_pos.direction,
+                            symbol,
+                            exit_price,
+                            exit_qty,
+                            remain_qty,
+                            carry_stop,
+                        )
+                        if paper_db is not None and tracked_pos.position_id:
+                            paper_db.partial_close_position(
+                                tracked_pos.position_id,
+                                partial_exit_price=exit_price,
+                                partial_exit_qty=exit_qty,
+                                carry_stop=carry_stop,
+                                reason="PARTIAL_EXIT",
+                                closed_at=datetime.now(tz=UTC),
+                            )
+                        if alert_dispatcher is not None:
+                            subject, body = format_partial_exit_alert(
+                                symbol=symbol,
+                                direction=tracked_pos.direction,
+                                entry_price=entry_price,
+                                exit_price=exit_price,
+                                realized_pnl=realized_pnl,
+                                exited_qty=exit_qty,
+                                remaining_qty=remain_qty,
+                                carry_stop=carry_stop,
+                                session_id=session_id,
+                                strategy=str(session.get("strategy_name", "")),
+                                event_time=datetime.now(tz=UTC),
+                            )
+                            alert_dispatcher.enqueue(
+                                AlertEvent(
+                                    alert_type=AlertType.PARTIAL_EXIT,
+                                    session_id=session_id,
+                                    subject=subject,
+                                    body=body,
+                                )
                             )
 
         # ------------------------------------------------------------------

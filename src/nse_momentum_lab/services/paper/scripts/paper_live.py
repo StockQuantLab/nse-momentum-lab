@@ -462,7 +462,7 @@ async def run_live_session(
             source_path=paper_path,
             replica_dir=paper_path.parent / "paper_replica",
             prefix="paper_replica",
-            min_interval_sec=5.0,
+            min_interval_sec=2.0,
             tables=DEFAULT_PAPER_TABLES,
         )
         own_replica = True
@@ -516,12 +516,20 @@ async def run_live_session(
             _started_key = f"SESSION_STARTED:{session_id}"
             if _started_key not in runtime_state.alerts_sent:
                 runtime_state.alerts_sent.add(_started_key)
+                _session_body = (
+                    f"🚀 <b>Session started</b>\n"
+                    f"Strategy: <code>{escape(strategy)}</code>\n"
+                    f"Session: <code>{session_id[:16]}</code>\n"
+                    f"Symbols: <code>{len(symbols)}</code>\n"
+                    f"Date: <code>{trade_date}</code>\n"
+                    f"Mode: <code>live</code>"
+                )
                 alert_dispatcher.enqueue(
                     AlertEvent(
                         alert_type=AlertType.SESSION_STARTED,
                         session_id=session_id,
-                        subject=f"Session {session_id} started",
-                        body=f"Strategy: {strategy}\nSymbols: {len(symbols)}\nDate: {trade_date}",
+                        subject=f"🚀 Session started — {escape(strategy)}",
+                        body=_session_body,
                     )
                 )
         # Seed durable feed-alert state so stale/recovered alerts survive restarts.
