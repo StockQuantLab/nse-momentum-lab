@@ -114,7 +114,7 @@ def strategy_page() -> None:
                 ],
                 rows=[
                     {
-                        "exp_id": str(row["exp_id"])[:12],
+                        "exp_id": str(row["exp_id"]),
                         "strategy_label": _strategy_display_name(row),
                         "start_year": int(row["start_year"])
                         if row.get("start_year") is not None

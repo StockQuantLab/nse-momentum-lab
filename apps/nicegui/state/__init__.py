@@ -511,12 +511,11 @@ def _format_exp_created_at(value: object) -> str:
 def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
     """Build {label: exp_id} dict with human-readable labels, latest first.
 
-    Label format: "exp_id[:12] | 2026-04-20 21:54 | Breakout 4% | 2025-01-01→2026-04-20 | TotRet 53.9% | PF 1.94 | Trades 579"
+    Label format: "exp_id | 2026-04-20 21:54 | Breakout 4% | 2025-01-01→2026-04-20 | TotRet 53.9% | PF 1.94 | Trades 579"
     """
     options: dict[str, str] = {}
     for row in experiments_df.iter_rows(named=True):
         exp_id = str(row["exp_id"])
-        rid = exp_id[:12]
         created = _format_exp_created_at(row.get("created_at"))
         strategy = _strategy_display_name(row)
 
@@ -529,7 +528,7 @@ def build_experiment_options(experiments_df: pl.DataFrame) -> dict[str, str]:
         ret = float(row.get("total_return_pct", 0) or 0)
         pf = float(row.get("profit_factor", 0) or 0)
 
-        parts = [rid]
+        parts = [exp_id]
         if created:
             parts.append(created)
         parts.append(strategy)

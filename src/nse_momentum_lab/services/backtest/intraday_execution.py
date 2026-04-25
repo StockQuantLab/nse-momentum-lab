@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 
 from nse_momentum_lab.services.backtest.engine import ExitReason
+from nse_momentum_lab.services.paper.engine.shared_eval import evaluate_entry_trigger
 from nse_momentum_lab.utils import minutes_from_nse_open, normalize_candle_time
 
 
@@ -289,13 +290,20 @@ def evaluate_held_position_bar(
 
     # ── 2b. Same-day partial exit ─────────────────────────────────────────────
     # Fires on entry day only when a large move hits the partial exit threshold.
-    if is_entry_day and same_day_partial_exit_pct and same_day_partial_exit_pct > 0:
+    # One-shot guard: only fires once per position.
+    if (
+        is_entry_day
+        and same_day_partial_exit_pct
+        and same_day_partial_exit_pct > 0
+        and not trail_state.get("partial_exit_taken")
+    ):
         if not is_short:
             target = entry_price * (1.0 + float(same_day_partial_exit_pct))
             if high_px >= target:
                 exit_px = open_px if open_px >= target else target
                 carry = exit_px * (1.0 - float(same_day_partial_exit_carry_stop_pct))
                 updated["current_sl"] = carry
+                updated["partial_exit_taken"] = True
                 return {
                     "action": "PARTIAL_EXIT",
                     "exit_price": exit_px,
@@ -311,6 +319,7 @@ def evaluate_held_position_bar(
                 exit_px = open_px if open_px <= target else target
                 carry = exit_px * (1.0 + float(same_day_partial_exit_carry_stop_pct))
                 updated["current_sl"] = carry
+                updated["partial_exit_taken"] = True
                 return {
                     "action": "PARTIAL_EXIT",
                     "exit_price": exit_px,
@@ -428,44 +437,47 @@ def resolve_intraday_execution_from_5min(
         if entry_start_minutes > 0 and minutes < entry_start_minutes:
             continue
 
-        triggered = False
-        trigger_price = float(breakout_price)
-
         if orh_window_minutes > 0 and not is_short:
             if minutes < orh_window_minutes:
                 orh_high = h if orh_high is None else max(orh_high, h)
                 continue
             if orh_high is None:
                 continue
-            if h >= orh_high:
-                triggered = True
-                trigger_price = float(orh_high)
+            # ORH trigger: use orh_high as the trigger price (LONG-only mode).
+            _trigger = evaluate_entry_trigger(
+                candle_high=h,
+                candle_low=low_px,
+                candle_open=o,
+                session_low=float(session_low if session_low is not None else low_px),
+                session_high=float(session_high if session_high is not None else h),
+                trigger_price=float(orh_high),
+                is_short=False,
+                max_stop_dist_pct=999.0,
+            )
+            if _trigger is None:
+                continue
+            entry_price = _trigger.entry_price
+            initial_stop = _trigger.initial_stop
         else:
-            if is_short and low_px <= trigger_price:
-                triggered = True
-            elif (not is_short) and h >= trigger_price:
-                triggered = True
-
-        if not triggered:
-            continue
-
-        if is_short:
-            entry_price = o if o <= trigger_price else trigger_price
-            session_stop = float(session_high if session_high is not None else h)
-            initial_stop = session_stop
-            if (
-                short_initial_stop_atr is not None
-                and short_initial_stop_atr_cap_mult is not None
-                and short_initial_stop_atr > 0
-                and short_initial_stop_atr_cap_mult > 0
-            ):
-                capped_stop = float(entry_price) + (
-                    float(short_initial_stop_atr_cap_mult) * float(short_initial_stop_atr)
-                )
-                initial_stop = min(session_stop, capped_stop)
-        else:
-            entry_price = o if o >= trigger_price else trigger_price
-            initial_stop = float(session_low if session_low is not None else low_px)
+            # Standard threshold trigger — delegate to shared pure helper.
+            # max_stop_dist_pct=999.0: the backtest runner applies this guard externally;
+            # passing a large value avoids double-gating.
+            _trigger = evaluate_entry_trigger(
+                candle_high=h,
+                candle_low=low_px,
+                candle_open=o,
+                session_low=float(session_low if session_low is not None else low_px),
+                session_high=float(session_high if session_high is not None else h),
+                trigger_price=float(breakout_price),
+                is_short=is_short,
+                max_stop_dist_pct=999.0,
+                short_initial_stop_atr_cap_mult=short_initial_stop_atr_cap_mult,
+                atr=float(short_initial_stop_atr) if short_initial_stop_atr is not None else 0.0,
+            )
+            if _trigger is None:
+                continue
+            entry_price = _trigger.entry_price
+            initial_stop = _trigger.initial_stop
 
         trading_day = _row_trading_date(row)
         if trading_day is None:

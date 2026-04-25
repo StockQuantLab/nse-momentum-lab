@@ -18,7 +18,7 @@ import logging
 import os
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -141,6 +141,182 @@ def _terminal_session_status(final_status: str, tracker: SessionPositionTracker 
     if normalized == "MAX_CYCLES":
         return "COMPLETED"
     return normalized or "FAILED"
+
+
+def _cleanup_stale_signal_files(session_id: str) -> None:
+    """Remove orphaned sentinel signal files older than 24 hours."""
+    import time as _time
+
+    signal_dir = Path(".tmp_logs")
+    if not signal_dir.exists():
+        return
+    cutoff = _time.time() - 86400  # 24 hours ago
+    cleaned = 0
+    try:
+        for f in signal_dir.glob("flatten_*.signal"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    cleaned += 1
+            except OSError:
+                pass
+        for d in signal_dir.glob("cmd_*"):
+            if d.is_dir():
+                try:
+                    if d.stat().st_mtime < cutoff:
+                        for cf in d.glob("*.json"):
+                            try:
+                                cf.unlink()
+                            except OSError:
+                                pass
+                        d.rmdir()
+                        cleaned += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    if cleaned:
+        logger.info("[%s] Cleaned %d stale signal file(s) from .tmp_logs/", session_id, cleaned)
+
+
+def _validate_live_runtime_coverage(
+    *,
+    market_db: Any,
+    session_id: str,
+    trade_date: str,
+) -> None:
+    """Verify prior-day data exists before starting a live session. Hard-exit on failure."""
+    try:
+        td = date.fromisoformat(trade_date)
+    except ValueError, TypeError:
+        logger.warning("[%s] Cannot parse trade_date=%s for coverage check", session_id, trade_date)
+        return
+
+    # Use the session's own market_db connection.
+    con = market_db.con
+    errors = []
+
+    # Check prior-day daily bars.
+    prior_daily = con.execute(
+        "SELECT COUNT(*) FROM v_daily WHERE date = (SELECT MAX(date) FROM v_daily WHERE date < $1)",
+        [td],
+    ).fetchone()[0]
+    if prior_daily == 0:
+        errors.append("No prior-day daily bars found in v_daily")
+
+    # Check prior-day 5-min bars.
+    prior_5min = con.execute(
+        "SELECT COUNT(*) FROM v_5min WHERE date = (SELECT MAX(date) FROM v_5min WHERE date < $1)",
+        [td],
+    ).fetchone()[0]
+    if prior_5min == 0:
+        errors.append("No prior-day 5-min bars found in v_5min")
+
+    # Check feat_daily for signal date.
+    feat_rows = con.execute(
+        "SELECT COUNT(*) FROM feat_daily WHERE trade_date = $1",
+        [td],
+    ).fetchone()[0]
+    if feat_rows == 0:
+        errors.append(f"No feat_daily rows for signal date {trade_date}")
+
+    if errors:
+        msg = "\n  ".join(errors)
+        logger.error(
+            "[%s] Coverage validation FAILED for trade_date=%s:\n  %s",
+            session_id,
+            trade_date,
+            msg,
+        )
+        raise SystemExit(
+            f"Live session blocked — missing data:\n  {msg}\n"
+            f"Run: doppler run -- uv run nseml-build-features --since {trade_date}"
+        )
+    logger.info(
+        "[%s] Coverage OK: prior_daily=%d prior_5min=%d feat_daily=%d",
+        session_id,
+        prior_daily,
+        prior_5min,
+        feat_rows,
+    )
+
+
+def _log_direction_readiness(runtime_state: Any, session_id: str) -> None:
+    """Count seeded candidates with valid setup rows; log readiness ratio."""
+    states = getattr(runtime_state, "symbols", {}) or {}
+    total = len(states)
+    valid = sum(1 for s in states.values() if getattr(s, "setup_status", None) == "candidate")
+    if total == 0:
+        logger.warning("[%s] LIVE_STARTUP_READY: 0/0 candidates — no symbols seeded", session_id)
+        return
+    logger.info(
+        "[%s] LIVE_STARTUP_READY: %d/%d candidates have valid features",
+        session_id,
+        valid,
+        total,
+    )
+    if valid < total * 0.5:
+        logger.warning(
+            "[%s] Less than 50%% of candidates are ready (%d/%d)",
+            session_id,
+            valid,
+            total,
+        )
+
+
+async def _wait_until_market_ready(
+    *,
+    session_id: str,
+    ticker_adapter: Any,
+    symbols: list[str],
+    builder: Any,
+    strategy_config: Any,
+) -> None:
+    """Connect WebSocket before market open and wait until trading is allowed.
+
+    Connects early so the 09:15 bar data is captured for session_low/session_high
+    accumulation used by stop placement. Trading decisions are suppressed until
+    entry_start_minutes after open (handled by paper_runtime.py).
+    """
+    _ist = ZoneInfo("Asia/Kolkata")
+    now_ist = datetime.now(tz=_ist)
+    market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    entry_start_minutes = getattr(strategy_config, "entry_start_minutes", 5)
+    trading_enabled_time = market_open + timedelta(minutes=entry_start_minutes)
+
+    # Connect WebSocket early (even before market open) to capture 09:15 bar.
+    if hasattr(ticker_adapter, "register_session"):
+        ticker_adapter.register_session(session_id, symbols, builder)
+
+    if now_ist < market_open:
+        wait_sec = (market_open - now_ist).total_seconds()
+        logger.info(
+            "[%s] Pre-market wait: %.0fs until market open (09:15 IST)", session_id, wait_sec
+        )
+        while wait_sec > 0:
+            print(f"  Market opens in {int(wait_sec)}s...", end="\r", flush=True)
+            await asyncio.sleep(min(5.0, wait_sec))
+            wait_sec = (market_open - datetime.now(tz=_ist)).total_seconds()
+            if wait_sec <= 0:
+                break
+        print("  Market open! Waiting for trading window...              ", flush=True)
+
+    if now_ist < trading_enabled_time:
+        remaining = (trading_enabled_time - datetime.now(tz=_ist)).total_seconds()
+        if remaining > 0:
+            logger.info(
+                "[%s] Trading suppressed for %ds (entry_start_minutes=%d)",
+                session_id,
+                int(remaining),
+                entry_start_minutes,
+            )
+            await asyncio.sleep(remaining)
+
+    logger.info(
+        "[%s] TRADING_ENABLED — entry_start_minutes=%d passed",
+        session_id,
+        entry_start_minutes,
+    )
 
 
 def _session_alert_already_sent(paper_db: PaperDB, session_id: str, alert_type: AlertType) -> bool:
@@ -339,6 +515,35 @@ def _write_feed_state(
     )
 
 
+def _compute_exit_value(tracker: SessionPositionTracker, symbol: str, exit_price: float) -> float:
+    """Compute the cash value returned when a tracked position is closed."""
+    tracked = tracker.get_open_position(symbol)
+    if tracked is None:
+        return 0.0
+    qty = tracked.current_qty
+    if str(tracked.direction or "").upper() == "SHORT":
+        return qty * (2 * tracked.entry_price - exit_price)
+    return qty * exit_price
+
+
+def _reconcile_tracker_after_flatten(
+    tracker: SessionPositionTracker | None,
+    closed_positions: list[dict[str, Any]],
+) -> None:
+    """Close matching tracker positions using the actual DB exit prices."""
+    if tracker is None:
+        return
+    for closed in closed_positions:
+        symbol = str(closed.get("symbol", "") or "")
+        if not symbol:
+            continue
+        exit_price = float(closed.get("exit_price") or 0.0)
+        tracked = tracker.get_open_position(symbol)
+        if tracked is None:
+            continue
+        tracker.record_close(symbol, _compute_exit_value(tracker, symbol, exit_price))
+
+
 def _maybe_emit_feed_transition(
     *,
     paper_db: PaperDB,
@@ -475,12 +680,16 @@ async def run_live_session(
     tracker: SessionPositionTracker | None = None
     local_feed = False
     final_status = "COMPLETED"
+    terminal_reason = ""
     created_adapter = False
     api_key, access_token = _resolve_kite_credentials(api_key, access_token)
     feed_state = None
     feed_alert_state: dict[str, Any] = {}
 
     try:
+        # Stale signal file cleanup: sweep orphaned .signal and cmd_*/ files.
+        _cleanup_stale_signal_files(session_id)
+
         # Load session.
         session = paper_db.get_session(session_id)
         if session is None:
@@ -494,6 +703,14 @@ async def run_live_session(
             return {"error": "No symbols in session"}
 
         trade_date = session.get("trade_date", "")
+
+        # --- Step 3.2: Runtime coverage validation ---
+        if not local_feed and market_db is not None:
+            _validate_live_runtime_coverage(
+                market_db=market_db,
+                session_id=session_id,
+                trade_date=trade_date,
+            )
 
         logger.info(
             "Session starting id=%s strategy=%s symbols=%d",
@@ -580,6 +797,9 @@ async def run_live_session(
             session_id=session_id,
         )
 
+        # --- Step 3.3: Direction readiness preflight ---
+        _log_direction_readiness(runtime_state, session_id)
+
         # Setup ticker adapter.
         if ticker_adapter is None:
             local_feed = False
@@ -590,13 +810,48 @@ async def run_live_session(
 
         builder = FiveMinuteCandleBuilder(interval_minutes=_CANDLE_INTERVAL)
 
-        if isinstance(ticker_adapter, KiteTickerAdapter):
+        # --- Step 3.1: Pre-market connect (live sessions only) ---
+        # Connect WebSocket before market open to capture the 09:15 bar for
+        # session_low/session_high accumulation used by stop placement.
+        if isinstance(ticker_adapter, KiteTickerAdapter) and not local_feed:
             instrument_map = _resolve_kite_instrument_map(symbols)
             if instrument_map:
                 ticker_adapter.set_instrument_map(instrument_map)
+            await _wait_until_market_ready(
+                session_id=session_id,
+                ticker_adapter=ticker_adapter,
+                symbols=symbols,
+                builder=builder,
+                strategy_config=strategy_config,
+            )
+
+        if isinstance(ticker_adapter, KiteTickerAdapter):
             ticker_adapter.register_session(session_id, symbols, builder)
         else:
             ticker_adapter.register_session(session_id, symbols, builder)
+
+        # Graceful shutdown: install signal handlers so Ctrl+C / taskkill
+        # triggers an orderly teardown instead of an abrupt crash.
+        _shutdown_requested = False
+
+        def _handle_shutdown_signal(signum: int, _frame: Any) -> None:
+            nonlocal _shutdown_requested
+            if _shutdown_requested:
+                return  # Second signal: let default handler kill the process.
+            _shutdown_requested = True
+            sig_name = {
+                2: "SIGINT",
+                5: "SIGBREAK",
+                15: "SIGTERM",
+            }.get(signum, f"signal {signum}")
+            logger.info("[%s] Received %s — initiating graceful shutdown", session_id, sig_name)
+
+        import signal
+
+        signal.signal(signal.SIGINT, _handle_shutdown_signal)
+        signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+        if hasattr(signal, "SIGBREAK"):
+            signal.signal(signal.SIGBREAK, _handle_shutdown_signal)
 
         # Main loop.
         active_symbols = list(symbols)
@@ -610,6 +865,17 @@ async def run_live_session(
         while True:
             if max_cycles is not None and cycles >= max_cycles:
                 final_status = "MAX_CYCLES"
+                break
+
+            # Check for graceful shutdown signal.
+            if _shutdown_requested:
+                final_status = "STOPPING"
+                terminal_reason = "signal_shutdown"
+                logger.info("[%s] Graceful shutdown — setting STOPPING", session_id)
+                try:
+                    paper_db.update_session(session_id, status="STOPPING")
+                except Exception:
+                    pass
                 break
 
             # Reload session for status changes.
@@ -636,6 +902,79 @@ async def run_live_session(
                 await asyncio.sleep(poll_interval)
                 cycles += 1
                 continue
+
+            # Sentinel-file flatten: checked every poll cycle regardless of bar activity
+            # so it fires even when active_symbols is a small quiet set with no ticks.
+            _signal_file = Path(".tmp_logs") / f"flatten_{session_id}.signal"
+            if _signal_file.exists():
+                logger.info(
+                    "[%s] Flatten signal detected — closing all positions and completing session",
+                    session_id,
+                )
+                try:
+                    _signal_file.unlink()
+                except OSError:
+                    pass
+                final_status = "COMPLETED"
+                terminal_reason = "manual_flatten_signal"
+                break
+
+            # Admin command queue: dashboard / agent / operator drop JSON files here.
+            _cmd_dir = Path(".tmp_logs") / f"cmd_{session_id}"
+            if _cmd_dir.exists():
+                for _cmd_file in sorted(_cmd_dir.glob("*.json")):
+                    try:
+                        import json as _json
+
+                        _cmd = _json.loads(_cmd_file.read_text())
+                        _action = _cmd.get("action", "")
+                        _reason = _cmd.get("reason", "admin_command")
+                        _requester = _cmd.get("requester", "unknown")
+                        logger.info(
+                            "[%s] Admin command: action=%s symbols=%s requester=%s",
+                            session_id,
+                            _action,
+                            _cmd.get("symbols"),
+                            _requester,
+                        )
+                        if _action == "close_all":
+                            # Flatten all positions before completing the session.
+                            if tracker is not None and tracker.open_count > 0:
+                                closed_positions = paper_db.flatten_open_positions(
+                                    session_id, mark_prices=last_close_prices
+                                )
+                                _reconcile_tracker_after_flatten(tracker, closed_positions)
+                            final_status = "COMPLETED"
+                            terminal_reason = f"admin_{_reason}"
+                            break
+                        elif _action == "close_positions":
+                            _syms = [str(s).upper() for s in (_cmd.get("symbols") or [])]
+                            if _syms:
+                                # Close only the requested symbols from open positions.
+                                closed_positions = paper_db.flatten_open_positions(
+                                    session_id,
+                                    exit_note=f"ADMIN_CLOSE_{_requester}",
+                                    mark_prices=last_close_prices,
+                                    symbols=_syms,
+                                )
+                                _reconcile_tracker_after_flatten(tracker, closed_positions)
+                                _sync_replica_after_write(replica, paper_db, force=True)
+                                logger.info(
+                                    "[%s] Admin close_positions: closed symbols %s",
+                                    session_id,
+                                    [p.get("symbol") for p in closed_positions],
+                                )
+                    except Exception:
+                        logger.exception(
+                            "[%s] Admin command failed: %s", session_id, _cmd_file.name
+                        )
+                    finally:
+                        try:
+                            _cmd_file.unlink()
+                        except OSError:
+                            pass
+                if final_status == "COMPLETED":
+                    break
 
             # Drain closed candles.
             closed_candles: list = []
@@ -917,13 +1256,28 @@ async def run_live_session(
 
         # Finalize session — flatten any open positions for operator stops / feed death.
         # Crash/exception path does this in the except block; normal exits need it too.
-        if final_status in ("STOPPING", "CANCELLED", "RISK_BREACH", "NO_SYMBOLS"):
+        _should_flatten = (
+            final_status
+            in (
+                "STOPPING",
+                "CANCELLED",
+                "RISK_BREACH",
+                "NO_SYMBOLS",
+            )
+            or terminal_reason in ("manual_flatten_signal",)
+            or (
+                final_status == "COMPLETED"
+                and terminal_reason.startswith("admin_")
+                and tracker is not None
+                and tracker.open_count > 0
+            )
+        )
+        if _should_flatten:
             if tracker is not None and tracker.open_count > 0:
-                paper_db.flatten_open_positions(session_id, mark_prices=last_close_prices)
-                for symbol in list(tracker.open_symbols()):
-                    tracked = tracker.get_open_position(symbol)
-                    if tracked:
-                        tracker.record_close(symbol, tracked.entry_price * tracked.current_qty)
+                closed_positions = paper_db.flatten_open_positions(
+                    session_id, mark_prices=last_close_prices
+                )
+                _reconcile_tracker_after_flatten(tracker, closed_positions)
 
         db_status = _terminal_session_status(final_status, tracker)
         await complete_session(session_id=session_id, paper_db=paper_db, status=db_status)
@@ -1014,6 +1368,8 @@ async def run_live_session(
 _RETRY_MAX = 5
 _RETRY_WAIT_BASE_SEC = 10.0
 _RETRYABLE_STATUSES = {"FAILED", "STALE"}
+_RETRY_CUTOFF_HOUR = 14  # No retries after 14:30 IST.
+_RETRY_CUTOFF_MINUTE = 30
 
 
 def _should_retry(result: dict[str, Any] | None, attempt: int, max_attempts: int) -> bool:
@@ -1023,6 +1379,13 @@ def _should_retry(result: dict[str, Any] | None, attempt: int, max_attempts: int
     It only decides whether to restart the session runner.
     """
     if attempt >= max_attempts:
+        return False
+    # Time-of-day gate: no retries after cutoff (too close to close).
+    now_ist = datetime.now(tz=_IST)
+    if now_ist.hour > _RETRY_CUTOFF_HOUR or (
+        now_ist.hour == _RETRY_CUTOFF_HOUR and now_ist.minute >= _RETRY_CUTOFF_MINUTE
+    ):
+        logger.info("No retry — past cutoff time (%02d:%02d IST)", now_ist.hour, now_ist.minute)
         return False
     if result is None:
         return True
@@ -1095,7 +1458,7 @@ async def run_live_session_with_retry(
         if not _should_retry(result, attempt, max_retries):
             return result
 
-        wait_sec = _RETRY_WAIT_BASE_SEC * attempt
+        wait_sec = _RETRY_WAIT_BASE_SEC * (2 ** (attempt - 1))  # Exponential backoff.
         logger.warning(
             "Session %s attempt %d/%d failed (status=%s), retrying in %.0fs — "
             "positions NOT flattened, will re-seed from DB",

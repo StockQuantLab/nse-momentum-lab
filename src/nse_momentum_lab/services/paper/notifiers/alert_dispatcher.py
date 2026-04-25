@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -27,8 +28,12 @@ import httpx
 logger = logging.getLogger(__name__)
 
 MAX_QUEUE_SIZE = 100
-MAX_RETRIES = 6
-RETRY_BACKOFF = (1.0, 2.0, 4.0, 30.0, 120.0, 300.0)
+MAX_RETRIES = 5  # 3 fast + 2 slow
+MAX_ALERT_AGE_SEC = 600  # Discard alerts older than 10 minutes
+
+# Two-tier retry: fast for all errors, slow for network errors only.
+_FAST_BACKOFF = (1.0, 2.0, 4.0)  # attempts 0-2 (all error types)
+_SLOW_BACKOFF = (30.0, 120.0)  # attempts 3-4 (network errors only)
 
 # Redact Telegram bot-token URLs (https://api.telegram.org/bot<TOKEN>/...)
 _BOT_TOKEN_RE = re.compile(r"(https?://[^/]+/bot)[^/\s]+(/?)", re.IGNORECASE)
@@ -143,6 +148,7 @@ class AlertEvent:
     body: str
     level: str = "info"
     metadata: dict[str, Any] = field(default_factory=dict)
+    created_at: float = field(default_factory=time.time)
 
 
 def _should_send(alert_type: AlertType | str, config: AlertConfig) -> bool:
@@ -737,10 +743,28 @@ class AlertDispatcher:
             await self._send_with_retry(event)
 
     async def _send_with_retry(self, event: AlertEvent) -> None:
-        """Try each notifier with exponential backoff, skipping already-succeeded ones."""
+        """Try each notifier with two-tier exponential backoff.
+
+        Fast tier (attempts 0-2): retries all error types with short backoff (1/2/4s).
+        Slow tier (attempts 3-4): retries network errors only with longer backoff (30/120s).
+        Alerts older than MAX_ALERT_AGE_SEC are discarded as stale.
+        """
         succeeded: set[int] = set()
         terminal_failed: set[int] = set()
         for attempt in range(MAX_RETRIES):
+            # Age guard: discard stale alerts before retrying.
+            if attempt > 0:
+                age = time.time() - event.created_at
+                if age > MAX_ALERT_AGE_SEC:
+                    logger.warning(
+                        "Discarding stale alert (age=%.0fs > %ds): %s",
+                        age,
+                        MAX_ALERT_AGE_SEC,
+                        event.alert_type,
+                    )
+                    self._log_alert(event, status="discarded_stale", channel="AGE_GUARD")
+                    return
+
             all_ok = True
             any_transient_failure = False
             for i, notifier in enumerate(self._notifiers):
@@ -772,8 +796,19 @@ class AlertDispatcher:
             if not any_transient_failure:
                 return
 
+            # Two-tier backoff selection.
+            if attempt < len(_FAST_BACKOFF):
+                backoff = _FAST_BACKOFF[attempt]
+            elif any_transient_failure:
+                slow_idx = attempt - len(_FAST_BACKOFF)
+                if slow_idx < len(_SLOW_BACKOFF):
+                    backoff = _SLOW_BACKOFF[slow_idx]
+                else:
+                    return  # Exhausted slow retries.
+            else:
+                return  # Non-transient failure in slow tier, stop.
+
             if attempt < MAX_RETRIES - 1:
-                backoff = RETRY_BACKOFF[attempt]
                 logger.warning(
                     "Alert send failed (attempt %d/%d), retrying in %.1fs: %s",
                     attempt + 1,

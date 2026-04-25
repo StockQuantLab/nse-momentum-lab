@@ -9,9 +9,9 @@ from nse_momentum_lab.services.paper.notifiers.alert_dispatcher import (
     AlertDispatcher,
     AlertEvent,
     AlertType,
-    format_partial_exit_alert,
     _redact_url,
     _should_send,
+    format_partial_exit_alert,
 )
 from nse_momentum_lab.services.paper.notifiers.telegram import TelegramNotifier
 

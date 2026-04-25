@@ -88,6 +88,7 @@ class VersionedReplicaSync:
         self._last_sync_time: float = 0.0
         self._current_version: int = 0
         self._syncing: bool = False
+        self._batch_depth: int = 0
         self._lock = threading.Lock()
 
         self._replica_dir.mkdir(parents=True, exist_ok=True)
@@ -102,6 +103,23 @@ class VersionedReplicaSync:
         with self._lock:
             self._dirty_gen += 1
 
+    # ------------------------------------------------------------------
+    # Batch suppression for multi-write operations
+    # ------------------------------------------------------------------
+
+    def begin_batch(self) -> None:
+        """Suppress maybe_sync calls until end_batch() is called."""
+        with self._lock:
+            self._batch_depth += 1
+
+    def end_batch(self, source_conn: duckdb.DuckDBPyConnection | None = None) -> None:
+        """End batch suppression and force sync if writes occurred."""
+        with self._lock:
+            self._batch_depth = max(0, self._batch_depth - 1)
+            dirty = self._dirty_gen > self._synced_gen
+        if self._batch_depth == 0 and dirty:
+            self.force_sync(source_conn)
+
     def maybe_sync(self, source_conn: duckdb.DuckDBPyConnection | None = None) -> None:
         """Sync if dirty and enough time has passed since the last sync.
 
@@ -113,6 +131,8 @@ class VersionedReplicaSync:
             (required on Windows to avoid double-attach).
         """
         with self._lock:
+            if self._batch_depth > 0:
+                return
             if self._dirty_gen <= self._synced_gen:
                 return
             if self._syncing:

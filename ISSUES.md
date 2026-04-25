@@ -43,6 +43,23 @@ the final writes. Dashboard shows stale values until the next full 5s window.
 
 ---
 
+### ISSUE-052 — Dashboard truncated experiment run IDs to 12 characters
+
+**Status**: ✅ FIXED — `apps/nicegui/state/__init__.py`, `apps/nicegui/pages/home.py`, `apps/nicegui/pages/strategy_analysis.py` (2026-04-25)
+**Severity**: Medium (dashboard showed run IDs that did not match the full experiment IDs)
+**Found**: 2026-04-25 — dashboard labels and tables displayed only `exp_id[:12]`, which made the run IDs in the UI look different from the actual experiment IDs used in baseline comparisons
+
+**Problem**: Several NiceGUI views truncated `exp_id` to the first 12 characters:
+- `build_experiment_options()` in `apps/nicegui/state/__init__.py`
+- home dashboard KPI and recent experiments table in `apps/nicegui/pages/home.py`
+- strategy analysis experiment table in `apps/nicegui/pages/strategy_analysis.py`
+
+This made the dashboard display a shortened run ID that did not match the full IDs pasted from backtest results.
+
+**Fix**: Display the full `exp_id` everywhere in the dashboard and added a regression test covering a long experiment ID.
+
+---
+
 ### ISSUE-046 — Sentinel file flatten mechanism not implemented (CPR pattern missing)
 
 **Status**: OPEN — deferred, operator convenience feature
@@ -1155,6 +1172,152 @@ Total blocked:  780 unique symbols in top-2000
 
 ---
 
+### ISSUE-051 — Phase 1 shared entry helper changed canonical baseline trade rows
+
+**Status**: OPEN — investigate shared_eval / sizing drift
+**Severity**: High (post-refactor baseline drift; trade-level parity not yet proven)
+**Found**: 2026-04-25 during before-vs-after Phase 1 baseline comparison
+
+**Observed deltas vs pre-Phase-1 runs**:
+- BREAKOUT_4PCT: 3 removed, 1 added, 22 changed
+- BREAKOUT_2PCT: 7 removed, 1 added, 44 changed
+- BREAKDOWN_4PCT: 4 removed, 0 added, 3 changed
+- BREAKDOWN_2PCT: 0 removed, 0 added, 0 changed
+
+**Notable pattern**:
+- Many changed rows are not just the final 2026 bar; they span 2015-2026.
+- A large subset of BREAKOUT rows changed `initial_stop`, `pnl_r`, `qty`, `position_value`, and net/gross P&L.
+- BREAKDOWN_2PCT stayed identical, so the drift is not universal.
+
+**Current hypothesis**:
+The new `shared_eval.evaluate_entry_trigger()` wiring is behaviorally close but not yet fully identical to the old per-engine entry logic for all baseline paths. The discrepancy may be in the entry trigger / stop derivation path, the sizing interaction, or a downstream field update in the refactor.
+
+**Action**:
+Compare pre/post `bt_trade` rows trade-by-trade and isolate the first field divergence for each affected symbol/date pair before promoting Phase 1 to canonical.
+
+**Cleanup update**: On 2026-04-25 the transient pre-fix comparison runs were pruned from `data/backtest.duckdb` and the dashboard replica was synced. Removed IDs:
+- `2e7f4c3d0a3fd23e`
+- `6b8a2392ee875db8`
+- `4ec6f500d12d6dda`
+- `1ec48134640a7c6c`
+
+The current post-fix comparison set is now:
+- `a23f33ed4c15545c`
+- `de7e20a20ecd03fc`
+- `2ef1d641142a6d25`
+- `e489fef43123b62a`
+
+The canonical pre-Phase-1 reference remains:
+- `bd22a5859c571c0d`
+- `e5cbeed50a3c78e4`
+- `d6b34cbfb49137de`
+- `073e3a2225abb123`
+
+---
+
+### ISSUE-053 — Portfolio sizing is fixed-notional, not true risk-per-trade
+
+**Status**: OPEN — risk-management review needed
+**Severity**: Medium (design mismatch; may understate or misstate intended per-trade risk)
+**Found**: 2026-04-25 during Phase 1 regression review
+
+**Observation**: The current sizing model uses a `Rs 10L` portfolio base and roughly `10%` notional per slot (`max_positions=10`, `max_position_pct=0.10`). The `risk_per_trade_pct=0.01` config exists, but it does not drive position sizing in the canonical path. With an `8%` long stop cap, the worst-case loss is about `0.8%` of portfolio per full slot, not `1.0%`.
+
+**Why this matters**: This is a fixed-slot allocation model, not a strict percentage-risk model. That may be fine by design, but it should be stated explicitly and reviewed because the current code/comments can be read as if risk is capped at 1% per trade.
+
+**Action**: Revisit the risk framework later and decide whether:
+- the strategy should remain fixed-slot notional sizing, or
+- the code should size to a true risk budget derived from stop distance.
+
+---
+
+### ISSUE-054 — Short H-carry / breakdown exit path is fragile and needs dedicated regression coverage
+
+**Status**: OPEN — investigate carry-stop sensitivity
+**Severity**: Medium (breakdown exits changed on canonical rows after Phase 1)
+**Found**: 2026-04-25 during Phase 1 postmortem
+
+**Observation**: In the breakdown path, short trades with `hold_quality_passed=True` go through the H-carry rule and preserve a carried stop into the next session rather than exiting at the same-day close. On the Phase 1 comparison, `CENTRALBK` (`2018-10-09`) and `ADANIGREEN` (`2023-02-27`) both changed exit price even though entry date and initial stop were stable.
+
+**Why this matters**: The short carry path is path-sensitive and can change next-day exits materially without any visible entry-price change. That makes it harder to reason about baseline drift and easier to regress accidentally during refactors.
+
+**Action**:
+- Add a dedicated regression test for `CENTRALBK` and `ADANIGREEN` short carry behavior.
+- Re-check whether the short H-carry rule should remain this aggressive, or whether it should be simplified / made more explicit in the engine.
+
+---
+
+### ISSUE-055 — Backtest and paper/live still do not share one carry/exit engine
+
+**Status**: OPEN — architectural parity gap
+**Severity**: High (same rule, separate implementations; dangerous for parity drift)
+**Found**: 2026-04-25 during H-carry / breakdown parity review
+
+**Observation**: Entry admission was partially unified in Phase 1, but the carry/exit path is still split across multiple runners:
+- backtest carry logic lives in `duckdb_backtest_runner.py` plus `vectorbt_engine.py`
+- paper/live EOD carry logic lives in `paper_eod_carry.py`
+- same-day stop execution still depends on the engine-specific runner path
+
+The long/short H-carry rule is now extracted into `shared_eval.evaluate_hold_quality_carry_rule()`, which reduces one major duplication point. However, same-day stop execution and next-session stop application are still split across engine-specific code paths, so a small change in one path can still move exit price, stop tightening, or same-day close handling without the other path changing.
+
+**Why this matters**: This is the exact kind of split that creates misleading "parity" confidence. The system can appear aligned at the rule level while still diverging in edge cases, especially around short carry, gap-through handling, and next-session stop application.
+
+**Action**:
+- Extract a single pure carry/exit decision helper that both backtest and paper/live call.
+- Add regression coverage for representative long and short carry cases, including the `CENTRALBK` and `ADANIGREEN` short carry examples.
+- Treat any future divergence in carry/exit math as a parity bug until proven otherwise.
+
+---
+
+### ISSUE-056 — Live websocket timing vs historical replay timing can create bounded parity gaps
+
+**Status**: OPEN — investigate / quantify acceptable drift
+**Severity**: Medium (expected data-flow difference, but needs explicit bounds)
+**Found**: 2026-04-25 during parity review
+
+**Observation**: Live paper trading receives websocket ticks and bar completion events in real time, while backtest consumes finalized historical bars. That means the two environments do not have identical data arrival timing, even when they use the same rule.
+
+This matters for:
+- pre-open readiness
+- same-day partial exits
+- stop updates that depend on the first bar after entry
+- any rule that can react before the bar is fully "known" in live
+
+**Why this matters**: Some live-vs-backtest differences are unavoidable data-flow differences, not engine bugs. But they should be measured and labeled explicitly, not treated as automatic equivalence.
+
+**Action**:
+- Add replay/parity diagnostics that compare bar-arrival timing, carry-stop application time, and exit-trigger order.
+- Define which drift is acceptable because of live market timing and which drift is a code regression.
+- Revisit this after the shared carry/exit engine is in place.
+
+---
+
+### ISSUE-057 — Backtest carry-stop traceability is incomplete; stored exits cannot be reconstructed from persisted fields alone
+
+**Status**: ✅ FIXED — `carry_stop_next_session` and `carry_action` persisted in `bt_execution_diagnostic`
+**Severity**: Medium (blocks precise carry-stop postmortems and parity audits)
+**Found**: 2026-04-25 during CENTRALBK / ADANIGREEN carry tracing
+
+**Observation**: The persisted backtest tables store trade results and a limited diagnostic snapshot, but they do not persist the derived `carry_stop_next_session` that actually drives the next-session exit. On the current code path, calling the shared intraday helper for `CENTRALBK` (`2018-10-09`) and `ADANIGREEN` (`2023-02-27`) returns:
+- `same_day_exit_reason = None`
+- `carry_stop_next_session = initial_stop`
+
+The backtest runner then applies the H-carry clamp, but the final stored exit prices in the historical experiments are not directly reconstructible from the persisted trade/diagnostic rows alone.
+
+**Update**: The backtest diagnostics now persist `carry_stop_next_session` and `carry_action`, which closes the main traceability gap for postmortems.
+
+**Why this matters**: When a baseline drifts, we need to answer "which stop value was used?" from the DB, not by rerunning the engine manually. Without persisting the derived carry stop, a parity audit cannot distinguish:
+- same-day stop logic changes
+- carry-clamp changes
+- next-session stop application changes
+- data-snapshot drift
+
+**Action**:
+- Add a regression test that asserts the stored carry-stop trace for `CENTRALBK` and `ADANIGREEN` can be reconstructed end-to-end from DB rows.
+- Keep ISSUE-055 open until the shared carry/exit helper is extracted and the remaining engine-specific stop paths are consolidated.
+
+---
+
 ## Canonical Experiment IDs (2026-04-24 Wave-2)
 
 Wave-1+2 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard,
@@ -1163,11 +1326,25 @@ Full 11-year window: `2015-01-01 → 2026-04-24`, universe 2000.
 
 | Leg | Exp ID | Avg Annual | Max DD | Calmar | PF | Trades |
 |-----|--------|-----------|--------|--------|----|--------|
-| Breakout 4% | `9743049247803a3c` | +54.5% | 3.16% | 17.3 | 20.80 | 2,217 |
-| Breakout 2% | `45710b2ba811377f` | +122.0% | 2.73% | 44.7 | 19.23 | 7,097 |
-| Breakdown 4% | `6781be97c100461a` | +3.1% | 0.74% | 4.2 | 5.50 | 258 |
-| Breakdown 2% | `83ac2b194347b661` | +8.3% | 1.90% | 4.4 | 5.48 | 792 |
+| Breakout 4% | `0620c21eca81a567` | +54.5% | 3.16% | 17.3 | 20.80 | 2,217 |
+| Breakout 2% | `4b6b548bbe0121f0` | +122.0% | 2.73% | 44.7 | 19.23 | 7,097 |
+| Breakdown 4% | `5f5d2c00471f07f6` | +3.1% | 0.74% | 4.2 | 5.50 | 258 |
+| Breakdown 2% | `0bf8ec0d38586e32` | +8.3% | 1.90% | 4.4 | 5.48 | 792 |
 
-The Apr-23 baselines were pruned after the Apr-24 rerun. These four are the active baselines.
-Code hash: `3457db14` (breakout), `333075de` (breakdown). Dataset hash: `ed41fe6d`.
-Run timestamp: 2026-04-24 21:55-22:03 IST.
+Pre-Phase-1 CPR parity reference. Confirmed zero regression from Phase 2-8 changes.
+Run timestamp: 2026-04-25 13:07-13:15 IST.
+
+## Current Post-Phase-1 Comparison Set (2026-04-25)
+
+These are the surviving post-fix experiments after pruning the transient pre-fix Phase 1 runs.
+They are the active comparison set for the remaining carry/exit consolidation work.
+
+| Leg | Exp ID | Avg Annual | Max DD | Calmar | PF | Trades |
+|-----|--------|-----------|--------|--------|----|--------|
+| Breakout 4% | `a23f33ed4c15545c` | +54.5% | 3.16% | 17.3 | 20.78 | 2,215 |
+| Breakout 2% | `de7e20a20ecd03fc` | +121.8% | 2.73% | 44.7 | 19.21 | 7,091 |
+| Breakdown 4% | `2ef1d641142a6d25` | +3.1% | 0.74% | 4.2 | 5.82 | 254 |
+| Breakdown 2% | `e489fef43123b62a` | +8.3% | 1.90% | 4.4 | 5.48 | 792 |
+
+This set matches the post-Phase-1 runs after the shared carry helper / traceability fix and is kept
+for comparison against the canonical pre-Phase-1 baseline above.

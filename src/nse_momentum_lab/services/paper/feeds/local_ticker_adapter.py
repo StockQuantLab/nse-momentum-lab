@@ -38,11 +38,17 @@ class LocalTickerAdapter:
         symbols: list[str],
         candle_interval_minutes: int = 5,
         market_db: Any = None,
+        pack_source: str = "market",
+        paper_db: Any = None,
+        session_id: str | None = None,
     ) -> None:
         self._trade_date = trade_date
         self._symbols = list(symbols)
         self._interval = candle_interval_minutes
         self._market_db = market_db
+        self._pack_source = pack_source
+        self._paper_db = paper_db
+        self._session_id = session_id
 
         # Loaded candle data: {symbol: list[ClosedCandle]}
         self._candles_by_symbol: dict[str, list[ClosedCandle]] = {}
@@ -59,7 +65,9 @@ class LocalTickerAdapter:
         # Stats.
         self._tick_count = 0
 
-        if market_db is not None:
+        if self._pack_source == "feed_audit" and self._paper_db is not None:
+            self._load_candles_from_feed_audit()
+        elif market_db is not None:
             self._load_candles()
 
     # ------------------------------------------------------------------
@@ -217,8 +225,65 @@ class LocalTickerAdapter:
 
         self._sorted_bar_ends = sorted(bar_end_set)
         logger.info(
-            "LocalTickerAdapter: loaded %d symbols, %d bars for %s",
+            "LocalTickerAdapter: loaded %d symbols, %d bars for %s (source=market)",
             len(self._candles_by_symbol),
             len(self._sorted_bar_ends),
             self._trade_date,
+        )
+
+    def _load_candles_from_feed_audit(self) -> None:
+        """Load candles from ``paper_feed_audit`` table for parity replay.
+
+        Reconstructs ClosedCandle objects from the recorded live feed data
+        instead of the EOD-built v_5min view, enabling exact reproduction
+        of what the live engine saw during a session.
+        """
+        if self._paper_db is None:
+            return
+
+        audit_rows = self._paper_db.get_feed_audit_rows(
+            trade_date=self._trade_date,
+            session_id=self._session_id,
+        )
+
+        if not audit_rows:
+            raise ValueError(
+                f"No feed audit rows for session={self._session_id} "
+                f"date={self._trade_date}. Cannot replay from feed_audit "
+                f"without recorded live data. Use --pack-source market instead."
+            )
+
+        bar_end_set: set[float] = set()
+        interval_sec = self._interval * 60
+
+        for row in audit_rows:
+            symbol = row.symbol
+            if symbol not in self._symbols:
+                continue
+
+            bar_end_dt = row.bar_end
+            if not hasattr(bar_end_dt, "timestamp"):
+                continue
+
+            bar_end_epoch = bar_end_dt.timestamp()
+            candle = ClosedCandle(
+                symbol=symbol,
+                bar_start=bar_end_epoch - interval_sec,
+                bar_end=bar_end_epoch,
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                volume=row.volume,
+            )
+            self._candles_by_symbol.setdefault(symbol, []).append(candle)
+            bar_end_set.add(bar_end_epoch)
+
+        self._sorted_bar_ends = sorted(bar_end_set)
+        logger.info(
+            "LocalTickerAdapter: loaded %d symbols, %d bars for %s (source=feed_audit, session=%s)",
+            len(self._candles_by_symbol),
+            len(self._sorted_bar_ends),
+            self._trade_date,
+            self._session_id,
         )

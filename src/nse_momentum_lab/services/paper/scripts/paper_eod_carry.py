@@ -30,6 +30,10 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from nse_momentum_lab.services.paper.engine.shared_eval import (
+    evaluate_hold_quality_carry_rule,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -238,37 +242,41 @@ def apply_eod_carry_decisions(
         else:  # SHORT
             filter_h_pass = close_pos <= (1.0 - close_pos_threshold)
 
-        # --- H=False + losing/flat → WEAK_CLOSE_EXIT ---
-        if not filter_h_pass:
-            is_short = direction == "SHORT"
-            # Losing/flat: SHORT when close >= entry; LONG when close <= entry.
-            position_losing = (daily_close >= avg_entry) if is_short else (daily_close <= avg_entry)
-            if position_losing:
-                logger.info(
-                    "eod-carry: WEAK_CLOSE_EXIT %s close_pos=%.3f price=%.2f",
-                    symbol,
-                    close_pos or 0.0,
-                    daily_close,
-                )
-                _eod_close_position(
-                    paper_db=paper_db,
-                    pos=pos,
-                    session_id=session_id,
-                    exit_price=daily_close,
-                    exit_reason="WEAK_CLOSE_EXIT",
-                    now=now,
-                )
-                weak_close_exit += 1
-                continue
-            # H=False but profitable → fall through to carry with breakeven stop tightening.
+        carry_result = evaluate_hold_quality_carry_rule(
+            hold_quality_passed=filter_h_pass,
+            entry_price=avg_entry,
+            close_price=daily_close,
+            carry_stop_next_session=float(
+                meta.get("current_sl") or pos.get("stop_loss") or avg_entry
+            ),
+            same_day_exit_price=None,
+            same_day_exit_reason=None,
+            same_day_exit_ts=None,
+            same_day_exit_time=None,
+            signal_date=trade_date_obj,
+            is_short=direction == "SHORT",
+        )
 
-        # --- CARRY: tighten stop to at least breakeven, update metadata ---
-        # Mirrors backtest: H=True or (H=False + profitable) both carry with BE stop.
+        if carry_result.same_day_exit_reason == "WEAK_CLOSE_EXIT":
+            logger.info(
+                "eod-carry: WEAK_CLOSE_EXIT %s close_pos=%.3f price=%.2f",
+                symbol,
+                close_pos or 0.0,
+                daily_close,
+            )
+            _eod_close_position(
+                paper_db=paper_db,
+                pos=pos,
+                session_id=session_id,
+                exit_price=daily_close,
+                exit_reason="WEAK_CLOSE_EXIT",
+                now=now,
+            )
+            weak_close_exit += 1
+            continue
+
+        tightened_sl = float(carry_result.carry_stop_next_session or avg_entry)
         current_sl = float(meta.get("current_sl") or pos.get("stop_loss") or avg_entry)
-        if direction == "SHORT":
-            tightened_sl = min(current_sl, avg_entry)  # SHORT stop must not exceed entry
-        else:
-            tightened_sl = max(current_sl, avg_entry)  # LONG stop must not fall below entry
 
         updated_meta = {
             **meta,

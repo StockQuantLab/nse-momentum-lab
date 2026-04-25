@@ -1,5 +1,7 @@
 # Canonical Reporting Runset (2026-04-22)
 
+> ⚠️ **SUPERSEDED** by `CANONICAL_REPORTING_RUNSET_2026-04-25.md`
+
 Supersedes: `CANONICAL_REPORTING_RUNSET_2026-04-21.md`
 
 This document freezes the current default backtest IDs used for dashboard comparisons and research reporting.

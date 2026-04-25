@@ -16,20 +16,44 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 
-def test_should_retry_excludes_risk_breach_and_no_symbols():
-    from nse_momentum_lab.services.paper.scripts.paper_live import _should_retry
+def test_should_retry_excludes_risk_breach_and_no_symbols(monkeypatch):
+    from datetime import timezone, timedelta
+    from nse_momentum_lab.services.paper.scripts import paper_live
 
-    assert _should_retry({"status": "FAILED"}, 1, 5)
-    assert _should_retry({"status": "STALE"}, 1, 5)
-    assert not _should_retry({"status": "RISK_BREACH"}, 1, 5)
-    assert not _should_retry({"status": "NO_SYMBOLS"}, 1, 5)
-    assert not _should_retry({"error": "Session sess-1 not found"}, 1, 5)
-    assert not _should_retry({"error": "No symbols in session"}, 1, 5)
+    # Freeze time at 10:00 IST so the time-of-day gate never fires.
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    _before_cutoff = datetime(2026, 4, 25, 10, 0, 0, tzinfo=_IST)
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _before_cutoff.astimezone(tz) if tz else _before_cutoff
+
+    monkeypatch.setattr(paper_live, "datetime", _FakeDT)
+
+    assert paper_live._should_retry({"status": "FAILED"}, 1, 5)
+    assert paper_live._should_retry({"status": "STALE"}, 1, 5)
+    assert not paper_live._should_retry({"status": "RISK_BREACH"}, 1, 5)
+    assert not paper_live._should_retry({"status": "NO_SYMBOLS"}, 1, 5)
+    assert not paper_live._should_retry({"error": "Session sess-1 not found"}, 1, 5)
+    assert not paper_live._should_retry({"error": "No symbols in session"}, 1, 5)
 
 
 @pytest.mark.asyncio
 async def test_run_live_session_with_retry_reuses_alert_dedup(monkeypatch):
+    from datetime import timezone, timedelta
     from nse_momentum_lab.services.paper.scripts import paper_live
+
+    # Freeze time at 10:00 IST so _should_retry's time-of-day gate never fires.
+    _IST = timezone(timedelta(hours=5, minutes=30))
+    _before_cutoff = datetime(2026, 4, 25, 10, 0, 0, tzinfo=_IST)
+
+    class _FakeDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _before_cutoff.astimezone(tz) if tz else _before_cutoff
+
+    monkeypatch.setattr(paper_live, "datetime", _FakeDT)
 
     call_state: list[tuple[int, bool, set[str]]] = []
 
@@ -127,6 +151,22 @@ def test_session_alert_lookup_uses_alert_log(monkeypatch, tmp_path):
         )
     finally:
         db.close()
+
+
+def test_log_direction_readiness_reads_seeded_symbols(caplog):
+    from nse_momentum_lab.services.paper.scripts import paper_live
+
+    runtime_state = SimpleNamespace(
+        symbols={
+            "AAA": SimpleNamespace(setup_status="candidate"),
+            "BBB": SimpleNamespace(setup_status="skipped"),
+        }
+    )
+
+    with caplog.at_level("INFO"):
+        paper_live._log_direction_readiness(runtime_state, "sess-1")
+
+    assert "LIVE_STARTUP_READY: 1/2" in caplog.text
 
 
 def test_feed_transition_alert_state_dedups_across_calls():

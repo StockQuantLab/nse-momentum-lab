@@ -10,8 +10,10 @@ rather than re-encoding strategy rules.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta, timezone
 from typing import Any
@@ -26,8 +28,22 @@ from nse_momentum_lab.services.paper.engine.bar_orchestrator import (
     SessionPositionTracker,
     TrackedPosition,
 )
+from nse_momentum_lab.services.paper.engine.shared_eval import evaluate_entry_trigger
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Parity trace logging (env-gated, zero overhead when disabled)
+# ---------------------------------------------------------------------------
+
+_PARITY_TRACE = os.environ.get("PARITY_TRACE", "0") == "1"
+
+
+def _parity_trace(**fields: Any) -> None:
+    """Log a structured parity trace line. Only active when PARITY_TRACE=1."""
+    if _PARITY_TRACE:
+        logger.info("PARITY_TRACE %s", json.dumps(fields, default=str))
+
 
 # IST market open time.
 NSE_OPEN = time(9, 15)
@@ -141,7 +157,7 @@ def evaluate_candle(
 
     # --- Open position: advance (exit/trail) ---
     if tracker.has_open_position(symbol):
-        return _advance_open_position(
+        result = _advance_open_position(
             symbol=symbol,
             candle=candle,
             state=state,
@@ -149,6 +165,15 @@ def evaluate_candle(
             session=session,
             strategy_config=strategy_config,
         )
+        _parity_trace(
+            event="advance_position",
+            symbol=symbol,
+            action=result.get("action"),
+            reason=result.get("reason"),
+            bar_end=str(bar_end),
+            candle_close=candle.get("close"),
+        )
+        return result
 
     # --- Position closed today: no re-entry ---
     if state.position_closed_today:
@@ -172,13 +197,23 @@ def evaluate_candle(
     if not allow_entry_evaluation:
         return {"action": "SKIP", "reason": "entry_not_allowed"}
 
-    return _evaluate_entry(
+    result = _evaluate_entry(
         symbol=symbol,
         candle=candle,
         state=state,
         session=session,
         strategy_config=strategy_config,
     )
+    _parity_trace(
+        event="evaluate_entry",
+        symbol=symbol,
+        action=result.get("action"),
+        reason=result.get("reason"),
+        bar_end=str(bar_end),
+        candle_close=candle.get("close"),
+        setup_status=state.setup_status,
+    )
+    return result
 
 
 def _advance_open_position(
@@ -267,16 +302,10 @@ def _evaluate_entry(
     session: dict[str, Any],
     strategy_config: Any,
 ) -> dict[str, Any]:
-    """Evaluate entry for a symbol using intraday trigger logic.
+    """Evaluate entry using the shared evaluate_entry_trigger() helper.
 
-    Uses the same trigger and stop logic as the backtest engine's
-    resolve_intraday_execution_from_5min (intraday_execution.py):
-    - LONG: triggers when high >= prev_close * (1 + threshold); initial stop = session low.
-    - SHORT: triggers when low <= prev_close * (1 - threshold); initial stop = session high,
-      optionally capped by ATR multiplier from extra_params['short_initial_stop_atr_cap_mult'].
-
-    state.candles already contains the current candle (appended before this call), so
-    session_low / session_high reflect all bars from market open through this bar.
+    Delegates threshold check, stop placement, and max-stop-dist guard to
+    the shared pure function — same code path as the backtest engine.
     """
     setup_row = state.setup_row
     if setup_row is None:
@@ -293,8 +322,7 @@ def _evaluate_entry(
     low = candle.get("low", close)
     atr = setup_row.get("atr_20", 0.0) or setup_row.get("atr", 0.0)
 
-    # Session extremes across all accumulated bars — matches backtest session_low/session_high.
-    # Filter out None and non-finite values to avoid min()/max() blowing up on bad bar data.
+    # Session extremes across all accumulated bars.
     lows = [
         float(v)
         for c in state.candles
@@ -308,65 +336,48 @@ def _evaluate_entry(
     session_low = min(lows) if lows else float(low)
     session_high = max(highs) if highs else float(high)
 
-    if direction == "LONG":
-        breakout_price = prev_close * (1 + threshold)
-        if high >= breakout_price:
-            entry_price = candle.get("open", close)
-            entry_price = breakout_price if entry_price < breakout_price else entry_price
-            # Backtest uses session low as initial stop; fall back to ATR if session_low is
-            # unavailable or above entry (degenerate bar data).
-            if session_low < entry_price:
-                initial_stop = session_low
-            else:
-                initial_stop = entry_price - atr * 2.0 if atr > 0 else entry_price * 0.96
-            # Reject if stop is too wide (matches backtest max_stop_dist_pct guard).
-            max_stop_dist = getattr(strategy_config, "max_stop_dist_pct", 0.08)
-            if entry_price > 0 and initial_stop < entry_price * (1 - max_stop_dist):
-                return {"action": "SKIP", "reason": "stop_too_wide"}
-            return {
-                "action": "ENTRY_CANDIDATE",
-                "symbol": symbol,
-                "direction": "LONG",
-                "entry_price": entry_price,
-                "initial_stop": initial_stop,
-                "breakout_price": breakout_price,
-                "setup_row": setup_row,
-                "signal_id": setup_row.get("signal_id", ""),
-            }
-    elif direction == "SHORT":
-        breakdown_price = prev_close * (1 - threshold)
-        if low <= breakdown_price:
-            entry_price = candle.get("open", close)
-            entry_price = breakdown_price if entry_price > breakdown_price else entry_price
-            # Backtest uses session high as initial stop, optionally capped by ATR.
-            initial_stop = session_high if session_high > entry_price else entry_price * 1.04
-            short_stop_atr_mult = strategy_config.extra_params.get(
-                "short_initial_stop_atr_cap_mult"
-            )
-            if short_stop_atr_mult is not None and float(short_stop_atr_mult) > 0 and atr > 0:
-                capped = entry_price + float(short_stop_atr_mult) * atr
-                initial_stop = min(initial_stop, capped)
-            # Reject if stop is too wide (matches backtest short_max_stop_dist_pct guard).
-            short_max = getattr(strategy_config, "short_max_stop_dist_pct", None)
-            effective_max_stop = (
-                float(short_max)
-                if short_max is not None
-                else getattr(strategy_config, "max_stop_dist_pct", 0.08)
-            )
-            if entry_price > 0 and initial_stop > entry_price * (1 + effective_max_stop):
-                return {"action": "SKIP", "reason": "stop_too_wide"}
-            return {
-                "action": "ENTRY_CANDIDATE",
-                "symbol": symbol,
-                "direction": "SHORT",
-                "entry_price": entry_price,
-                "initial_stop": initial_stop,
-                "breakdown_price": breakdown_price,
-                "setup_row": setup_row,
-                "signal_id": setup_row.get("signal_id", ""),
-            }
+    is_short = direction == "SHORT"
+    trigger_price = prev_close * (1.0 - threshold) if is_short else prev_close * (1.0 + threshold)
 
-    return {"action": "SKIP", "reason": "no_trigger"}
+    short_max = getattr(strategy_config, "short_max_stop_dist_pct", None)
+    max_stop_dist = (
+        float(short_max)
+        if is_short and short_max is not None
+        else getattr(strategy_config, "max_stop_dist_pct", 0.08)
+    )
+    short_stop_atr_mult = (
+        strategy_config.extra_params.get("short_initial_stop_atr_cap_mult")
+        if is_short and hasattr(strategy_config, "extra_params")
+        else None
+    )
+
+    result = evaluate_entry_trigger(
+        candle_high=float(high),
+        candle_low=float(low),
+        candle_open=float(candle.get("open", close)),
+        session_low=session_low,
+        session_high=session_high,
+        trigger_price=trigger_price,
+        is_short=is_short,
+        max_stop_dist_pct=max_stop_dist,
+        short_initial_stop_atr_cap_mult=short_stop_atr_mult,
+        atr=float(atr) if atr else 0.0,
+    )
+
+    if result is None:
+        return {"action": "SKIP", "reason": "no_trigger"}
+
+    trigger_key = "breakdown_price" if is_short else "breakout_price"
+    return {
+        "action": "ENTRY_CANDIDATE",
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": result.entry_price,
+        "initial_stop": result.initial_stop,
+        trigger_key: trigger_price,
+        "setup_row": setup_row,
+        "signal_id": setup_row.get("signal_id", ""),
+    }
 
 
 # ---------------------------------------------------------------------------

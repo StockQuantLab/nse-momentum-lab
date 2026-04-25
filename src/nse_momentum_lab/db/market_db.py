@@ -419,6 +419,8 @@ class MarketDataDB:
                 initial_stop        DOUBLE,
                 filters_json        VARCHAR,
                 hold_quality_passed BOOLEAN,
+                carry_stop_next_session DOUBLE,
+                carry_action        VARCHAR,
                 executed_exit_reason VARCHAR,
                 pnl_pct             DOUBLE,
                 selection_score     DOUBLE,
@@ -429,6 +431,8 @@ class MarketDataDB:
         self._ensure_column("bt_execution_diagnostic", "selection_score", "DOUBLE")
         self._ensure_column("bt_execution_diagnostic", "selection_rank", "INTEGER")
         self._ensure_column("bt_execution_diagnostic", "selection_components_json", "VARCHAR")
+        self._ensure_column("bt_execution_diagnostic", "carry_stop_next_session", "DOUBLE")
+        self._ensure_column("bt_execution_diagnostic", "carry_action", "VARCHAR")
 
         # Query acceleration for experiment drill-down views.
         self.con.execute("""
@@ -899,6 +903,8 @@ class MarketDataDB:
                 d.get("initial_stop"),
                 json.dumps(d.get("filters_json") or {}),
                 bool(d.get("hold_quality_passed", False)),
+                d.get("carry_stop_next_session"),
+                d.get("carry_action"),
                 d.get("executed_exit_reason"),
                 d.get("pnl_pct"),
                 float(d.get("selection_score") or 0.0),
@@ -913,9 +919,10 @@ class MarketDataDB:
                 """INSERT INTO bt_execution_diagnostic
                    (exp_id, year, signal_date, symbol, status, reason,
                     entry_time, entry_price, initial_stop, filters_json,
-                    hold_quality_passed, executed_exit_reason, pnl_pct,
+                    hold_quality_passed, carry_stop_next_session, carry_action,
+                    executed_exit_reason, pnl_pct,
                     selection_score, selection_rank, selection_components_json)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
             self.con.execute("COMMIT")

@@ -41,10 +41,11 @@ def test_shutdown_dashboard_resources_is_idempotent(monkeypatch) -> None:
 
 
 def test_build_experiment_options_includes_breakout_threshold() -> None:
+    exp_id = "bd22a5859c571c0de5cbeed50a3c78e4"
     experiments_df = pl.DataFrame(
         [
             {
-                "exp_id": "exp-1",
+                "exp_id": exp_id,
                 "strategy_name": "2LYNCHBreakout",
                 "params_json": '{"breakout_threshold": 0.02, "start_date": "2025-01-01", "end_date": "2026-03-27"}',
                 "total_trades": 123,
@@ -61,11 +62,11 @@ def test_build_experiment_options_includes_breakout_threshold() -> None:
 
     assert "2LYNCHBreakout 2%" in label
     assert "2025-01-01→2026-03-27" in label
-    assert "exp-1" in label
+    assert exp_id in label
     assert "TotRet 45.6%" in label
     assert "PF 0.00" in label
     assert "Trades 123" in label
-    assert options[label] == "exp-1"
+    assert options[label] == exp_id
 
 
 def test_get_experiment_param_items_returns_sorted_params() -> None:

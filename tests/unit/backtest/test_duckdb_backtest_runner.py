@@ -479,6 +479,35 @@ def test_market_db_persists_wf_run_id_and_cleanup_summary() -> None:
         db.con.close()
 
 
+def test_market_db_persists_carry_diagnostics() -> None:
+    db = _make_in_memory_market_db()
+    try:
+        exp_id = "exp_carry_diag"
+        db.save_execution_diagnostics(
+            exp_id,
+            [
+                {
+                    "year": 2024,
+                    "signal_date": date(2024, 1, 2),
+                    "symbol": "CENTRALBK",
+                    "status": "executed",
+                    "reason": "entry",
+                    "carry_stop_next_session": 100.0,
+                    "carry_action": "breakeven_carry",
+                    "hold_quality_passed": True,
+                }
+            ],
+        )
+
+        diag = db.get_experiment_execution_diagnostics(exp_id)
+        assert diag.height == 1
+        row = diag.row(0, named=True)
+        assert row["carry_stop_next_session"] == pytest.approx(100.0)
+        assert row["carry_action"] == "breakeven_carry"
+    finally:
+        db.con.close()
+
+
 def test_list_experiments_backfills_missing_wf_run_id_column() -> None:
     db = _make_legacy_in_memory_market_db()
     try:

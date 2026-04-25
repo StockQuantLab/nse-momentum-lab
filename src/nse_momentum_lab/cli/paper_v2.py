@@ -481,6 +481,7 @@ def _cmd_replay(args: argparse.Namespace) -> None:
             paper_db_path=args.paper_db,
             market_db_path=args.market_db,
             no_alerts=getattr(args, "no_alerts", False),
+            pack_source=getattr(args, "pack_source", "market"),
         )
     )
     print(json.dumps(result, default=str))
@@ -627,14 +628,47 @@ def _cmd_status(args: argparse.Namespace) -> None:
 
 
 def _cmd_stop(args: argparse.Namespace) -> None:
-    """Stop (mark COMPLETED) a running session."""
+    """Stop (mark COMPLETED) a running session.
+
+    Refuses if open positions exist unless --force is given.
+    With --force: flattens all positions first, then marks COMPLETED.
+    Dispatches both SESSION_COMPLETED and DAILY_PNL_SUMMARY alerts.
+    """
     from nse_momentum_lab.services.paper.db.paper_db import PaperDB
 
     session_id = _resolve_session_id(
         args, args.paper_db, mode=getattr(args, "mode", "replay") or "replay"
     )
+    force = getattr(args, "force", False)
     db = PaperDB(args.paper_db)
     try:
+        open_positions = db.list_open_positions(session_id)
+        if open_positions and not force:
+            print(
+                f"Error: session {session_id} has {len(open_positions)} open position(s). "
+                "Use --force to flatten and stop.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        if open_positions:
+            flattened = db.flatten_open_positions(session_id)
+            flattened_count = len(flattened) if isinstance(flattened, list) else 0
+            logger.info(
+                "stop --force: flattened %d position(s) for session %s",
+                flattened_count,
+                session_id,
+            )
+            try:
+                _dispatch_manual_flatten_notifications(
+                    db=db,
+                    session_id=session_id,
+                    flattened_count=flattened_count,
+                    session_status="COMPLETED",
+                )
+            except Exception:
+                logger.exception("Failed to dispatch flatten alerts on stop session=%s", session_id)
+
         db.update_session(session_id, status="COMPLETED")
         _sync_paper_replica_after_cli_write(args.paper_db, db)
         print(json.dumps({"session_id": session_id, "status": "COMPLETED"}))
@@ -964,6 +998,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     replay.add_argument("--trade-date", required=True, help="YYYY-MM-DD")
     replay.add_argument("--no-alerts", action="store_true", help="Disable Telegram/email alerts")
+    replay.add_argument(
+        "--pack-source",
+        choices=["market", "feed_audit"],
+        default="market",
+        help="Data source for replay bars",
+    )
     replay.set_defaults(handler=_cmd_replay)
 
     # live
@@ -1049,6 +1089,9 @@ def build_parser() -> argparse.ArgumentParser:
     _stop.add_argument("--strategy", default=None)
     _stop.add_argument("--trade-date", default=None)
     _stop.add_argument("--mode", default="replay")
+    _stop.add_argument(
+        "--force", action="store_true", help="Flatten open positions before stopping"
+    )
     _stop.set_defaults(handler=_cmd_stop)
 
     # pause
@@ -1163,7 +1206,19 @@ def main() -> None:
     handler = getattr(args, "handler", None)
     if handler is None:
         raise SystemExit("No command specified")
-    handler(args)
+
+    # Read-only handlers that never need the lock.
+    _read_only_handlers = {_cmd_status}
+    if handler in _read_only_handlers:
+        handler(args)
+        return
+
+    # All other handlers (including daily shortcuts) acquire an exclusive
+    # cross-process file lock before writing to paper.duckdb.
+    from nse_momentum_lab.services.paper.engine.command_lock import acquire_command_lock
+
+    with acquire_command_lock("paper_writer", detail=f"nseml-paper {args.command}"):
+        handler(args)
 
 
 if __name__ == "__main__":

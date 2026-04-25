@@ -12,10 +12,13 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re as _re
+import subprocess as _subprocess
 import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import duckdb
@@ -519,6 +522,65 @@ def _rows_to_dicts(desc: list[tuple], rows: list[tuple]) -> list[dict[str, Any]]
 
 
 # ---------------------------------------------------------------------------
+# Lock diagnostics
+# ---------------------------------------------------------------------------
+
+
+def diagnose_paper_db_lock(db_path: str | Path, exc: Exception) -> None:
+    """Print an actionable banner when paper.duckdb is locked by another process.
+
+    DuckDB embeds the holding PID in its IOException message on Windows:
+      "File is already open in <exe> (PID N)"
+    Extracts it, resolves the command line via PowerShell, and tells the
+    operator exactly which taskkill command to run.
+    """
+    msg = str(exc)
+    pid_match = _re.search(r"\(PID\s+(\d+)\)", msg)
+    exe_match = _re.search(r"already open in\s*\n?\s*(.+?)\s*\(PID", msg, _re.DOTALL)
+
+    pid = pid_match.group(1) if pid_match else None
+    exe = (exe_match.group(1).strip() if exe_match else None) or "unknown"
+
+    cmd_line = ""
+    if pid:
+        try:
+            result = _subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            cmd_line = result.stdout.strip()
+        except Exception:
+            pass
+
+    kill_cmd = f"taskkill /F /PID {pid}" if pid else "tasklist — PID not found in error"
+    logger.error(
+        "[STARTUP BLOCKED] %s is locked by PID %s. Fix: %s",
+        Path(db_path).name,
+        pid or "unknown",
+        kill_cmd,
+    )
+    print(
+        f"\n{'=' * 60}\n"
+        f"[STARTUP BLOCKED] {Path(db_path).name} is locked!\n"
+        f"  Holding PID : {pid or 'unknown'}\n"
+        f"  Executable  : {exe}\n"
+        f"  Command     : {cmd_line or '(could not determine)'}\n"
+        f"  Fix         : {kill_cmd}\n"
+        f"  Then retry  : doppler run -- uv run nseml-paper status\n"
+        f"{'=' * 60}\n",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # PaperDB class
 # ---------------------------------------------------------------------------
 
@@ -552,7 +614,13 @@ class PaperDB:
     def connect(self) -> None:
         if self._con is not None:
             return
-        self._con = duckdb.connect(self._path)
+        try:
+            self._con = duckdb.connect(self._path)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "being used by another process" in msg or "cannot open file" in msg:
+                diagnose_paper_db_lock(self._path, exc)
+            raise
         self._bootstrap()
 
     def close(self) -> None:
@@ -1431,13 +1499,20 @@ class PaperDB:
         *,
         exit_note: str = "FLATTEN",
         mark_prices: dict[str, float] | None = None,
+        symbols: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Close all open positions at last-mark price (or avg_entry as zero-PnL fallback).
 
         Pass ``mark_prices`` to use current bar prices (e.g. from crash recovery).
         The lookup order is: mark_prices → metadata_json.last_mark_price → avg_entry.
+        If ``symbols`` is provided, only close the matching open positions.
         """
         open_positions = self.list_open_positions(session_id)
+        if symbols is not None:
+            wanted = {str(sym).upper() for sym in symbols if str(sym).strip()}
+            open_positions = [
+                pos for pos in open_positions if str(pos.get("symbol", "")).upper() in wanted
+            ]
         closed: list[dict[str, Any]] = []
         now = _now()
 

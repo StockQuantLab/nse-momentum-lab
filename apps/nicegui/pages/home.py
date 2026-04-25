@@ -267,7 +267,7 @@ async def home_page() -> None:
                         ),
                         dict(
                             title="Exp ID",
-                            value=str(latest.get("exp_id", "-"))[:12],
+                            value=str(latest.get("exp_id", "-")),
                             icon="tag",
                             color=color_gray(),
                             muted=True,
@@ -286,7 +286,7 @@ async def home_page() -> None:
                     ret = float(r.get("total_return_pct", 0) or 0)
                     rows.append(
                         {
-                            "exp_id": str(r.get("exp_id", "-"))[:12],
+                            "exp_id": str(r.get("exp_id", "-")),
                             "strategy": str(r.get("strategy_name", "-")),
                             "period": f"{r.get('start_year', '?')}-{r.get('end_year', '?')}",
                             "trades": int(r.get("total_trades", 0) or 0),

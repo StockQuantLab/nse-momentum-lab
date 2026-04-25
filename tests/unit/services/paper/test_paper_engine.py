@@ -952,6 +952,17 @@ class TestFlattenOpenPositions:
         close_orders = [o for o in orders if o.get("symbol") == "AXISBANK"]
         assert any(o["side"] == "BUY" for o in close_orders)
 
+    def test_subset_flatten_only_closes_requested_symbols(self, paper_db, session_id):
+        self._open_position(paper_db, session_id, "RELIANCE", "LONG", 2500.0, 10)
+        self._open_position(paper_db, session_id, "TCS", "LONG", 3500.0, 5)
+
+        closed = paper_db.flatten_open_positions(session_id, symbols=["RELIANCE"])
+
+        assert [pos["symbol"] for pos in closed] == ["RELIANCE"]
+        open_after = paper_db.list_open_positions(session_id)
+        assert len(open_after) == 1
+        assert open_after[0]["symbol"] == "TCS"
+
 
 class TestPatchPositionMetadata:
     def test_merge_without_overwriting_other_keys(self, paper_db, session_id):

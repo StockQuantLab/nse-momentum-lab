@@ -57,6 +57,9 @@ from nse_momentum_lab.services.backtest.vectorbt_engine import (
 from nse_momentum_lab.services.dataset import (
     build_code_hash,
 )
+from nse_momentum_lab.services.paper.engine.shared_eval import (
+    evaluate_hold_quality_carry_rule,
+)
 from nse_momentum_lab.utils import (
     ALL_FILTERS,
     compute_composite_hash,
@@ -1664,14 +1667,7 @@ class DuckDBBacktestRunner:
                 carry_action = "normal"
 
                 if intraday_entry is not None:
-                    (
-                        same_day_exit_price,
-                        same_day_exit_reason,
-                        same_day_exit_ts,
-                        same_day_exit_time,
-                        carry_stop_next_session,
-                        carry_action,
-                    ) = self._apply_hold_quality_carry_rule(
+                    carry_result = evaluate_hold_quality_carry_rule(
                         hold_quality_passed=hold_quality_passed,
                         entry_price=entry_price,
                         close_price=float(row["close"]) if row.get("close") is not None else None,
@@ -1683,12 +1679,29 @@ class DuckDBBacktestRunner:
                         signal_date=sig_date,
                         is_short=is_short,
                     )
+                    (
+                        same_day_exit_price,
+                        same_day_exit_reason,
+                        same_day_exit_ts,
+                        same_day_exit_time,
+                        carry_stop_next_session,
+                        carry_action,
+                    ) = (
+                        carry_result.same_day_exit_price,
+                        carry_result.same_day_exit_reason,
+                        carry_result.same_day_exit_ts,
+                        carry_result.same_day_exit_time,
+                        carry_result.carry_stop_next_session,
+                        carry_result.carry_action,
+                    )
 
                 diag_entry["entry_time"] = entry_time
                 diag_entry["entry_price"] = entry_price
                 diag_entry["initial_stop"] = initial_stop
                 diag_entry["filters_json"] = filter_snapshot
                 diag_entry["hold_quality_passed"] = hold_quality_passed
+                diag_entry["carry_stop_next_session"] = carry_stop_next_session
+                diag_entry["carry_action"] = carry_action
 
                 signal_context[(symbol_id, sig_date)] = {
                     "gap_pct": gap_pct,
@@ -2078,85 +2091,26 @@ class DuckDBBacktestRunner:
         signal_date: date,
         is_short: bool,
     ) -> tuple[float | None, str | None, datetime | None, time | None, float | None, str]:
-        """Apply post-entry carry logic driven by hold-quality filters.
-
-        H=True (close near high/low for long/short): tighten carry stop to at least breakeven.
-        H=False + losing/flat position: WEAK_CLOSE_EXIT (exit at day close).
-        H=False + profitable position: carry overnight with breakeven stop.
-        """
-        if same_day_exit_reason is not None:
-            # Already exited intraday — no carry rule to apply.
-            return (
-                same_day_exit_price,
-                same_day_exit_reason,
-                same_day_exit_ts,
-                same_day_exit_time,
-                carry_stop_next_session,
-                "normal",
-            )
-
-        if entry_price is None or close_price is None:
-            return (
-                same_day_exit_price,
-                same_day_exit_reason,
-                same_day_exit_ts,
-                same_day_exit_time,
-                carry_stop_next_session,
-                "normal",
-            )
-
-        if hold_quality_passed:
-            # H=True: close is near high (long) or near low (short). Tighten carry stop to
-            # at least breakeven so overnight carry doesn't give back more than entry price.
-            base = carry_stop_next_session if carry_stop_next_session is not None else entry_price
-            tightened = (
-                min(float(base), float(entry_price))
-                if is_short
-                else max(float(base), float(entry_price))
-            )
-            return (
-                same_day_exit_price,
-                same_day_exit_reason,
-                same_day_exit_ts,
-                same_day_exit_time,
-                tightened,
-                "normal",
-            )
-
-        # H=False: check whether the position is profitable or losing.
-        # For shorts: in profit when close < entry (price fell); losing/flat when close >= entry.
-        # For longs: in profit when close > entry (price rose); losing/flat when close <= entry.
-        if is_short:
-            close_failed_entry = close_price >= entry_price
-        else:
-            close_failed_entry = close_price <= entry_price
-
-        if close_failed_entry:
-            # Price moved against us (or flat) AND didn't close near high/low: exit at close.
-            return (
-                float(close_price),
-                ExitReason.WEAK_CLOSE_EXIT.value,
-                datetime.combine(signal_date, time(15, 30)),
-                time(15, 30),
-                carry_stop_next_session,
-                "weak_close_exit",
-            )
-
-        base_carry_stop = (
-            carry_stop_next_session if carry_stop_next_session is not None else entry_price
-        )
-        tightened_stop = (
-            min(float(base_carry_stop), float(entry_price))
-            if is_short
-            else max(float(base_carry_stop), float(entry_price))
+        """Compatibility wrapper around the shared H-carry helper."""
+        result = evaluate_hold_quality_carry_rule(
+            hold_quality_passed=hold_quality_passed,
+            entry_price=entry_price,
+            close_price=close_price,
+            carry_stop_next_session=carry_stop_next_session,
+            same_day_exit_price=same_day_exit_price,
+            same_day_exit_reason=same_day_exit_reason,
+            same_day_exit_ts=same_day_exit_ts,
+            same_day_exit_time=same_day_exit_time,
+            signal_date=signal_date,
+            is_short=is_short,
         )
         return (
-            same_day_exit_price,
-            same_day_exit_reason,
-            same_day_exit_ts,
-            same_day_exit_time,
-            tightened_stop,
-            "breakeven_carry",
+            result.same_day_exit_price,
+            result.same_day_exit_reason,
+            result.same_day_exit_ts,
+            result.same_day_exit_time,
+            result.carry_stop_next_session,
+            result.carry_action,
         )
 
     @staticmethod

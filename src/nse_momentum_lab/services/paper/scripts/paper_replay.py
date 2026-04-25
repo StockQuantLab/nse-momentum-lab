@@ -50,8 +50,15 @@ async def run_replay(
     market_db_path: str = "data/market.duckdb",
     max_cycles: int | None = None,
     no_alerts: bool = False,
+    pack_source: str = "market",
 ) -> dict[str, Any]:
-    """Run a paper replay session from start to finish."""
+    """Run a paper replay session from start to finish.
+
+    Args:
+        pack_source: ``"market"`` (default) loads from v_5min via market_db.
+            ``"feed_audit"`` loads from the recorded paper_feed_audit table,
+            reproducing exactly what the live engine saw.
+    """
     paper_db = PaperDB(paper_db_path)
     market_db = MarketDataDB(Path(market_db_path))
     alert_dispatcher = AlertDispatcher(
@@ -145,6 +152,9 @@ async def run_replay(
             trade_date=trade_date,
             symbols=symbols,
             market_db=market_db,
+            pack_source=pack_source,
+            paper_db=paper_db if pack_source == "feed_audit" else None,
+            session_id=session_id if pack_source == "feed_audit" else None,
         )
         adapter.register_session(session_id, symbols)
 
@@ -184,13 +194,15 @@ async def run_replay(
                 bar_candles = bars_by_end[bar_end]
 
                 # Record feed audit before engine conversion.
+                _feed_src = "feed_audit_replay" if pack_source == "feed_audit" else "replay"
+                _transport = "feed_audit" if pack_source == "feed_audit" else "local"
                 record_closed_candles(
                     bar_candles=bar_candles,
                     session_id=session_id,
                     trade_date=trade_date,
-                    feed_source="replay",
+                    feed_source=_feed_src,
                     paper_db=paper_db,
-                    transport="local",
+                    transport=_transport,
                 )
 
                 # Convert ClosedCandle to dict for engine.
@@ -330,6 +342,13 @@ def main() -> None:
     parser.add_argument("--paper-db", default="data/paper.duckdb")
     parser.add_argument("--market-db", default="data/market.duckdb")
     parser.add_argument("--max-cycles", type=int, default=None)
+    parser.add_argument(
+        "--pack-source",
+        choices=["market", "feed_audit"],
+        default="market",
+        help="Data source: 'market' (v_5min) or 'feed_audit' (recorded live bars)",
+    )
+    parser.add_argument("--no-alerts", action="store_true")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -343,6 +362,8 @@ def main() -> None:
             paper_db_path=args.paper_db,
             market_db_path=args.market_db,
             max_cycles=args.max_cycles,
+            pack_source=args.pack_source,
+            no_alerts=args.no_alerts,
         )
     )
     print(result)
