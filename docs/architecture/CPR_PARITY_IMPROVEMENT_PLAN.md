@@ -384,9 +384,92 @@ Post-Phases-2-8 canonical IDs (active pre-Phase-1 reference, run 2026-04-25 to e
 | BREAKDOWN_4% | `d6b34cbfb49137de` | +3.1% | 0.74% | 4.2 | 5.50 | 258 | 36.0% |
 | BREAKDOWN_2% | `073e3a2225abb123` | +8.3% | 1.90% | 4.4 | 5.48 | 792 | 25.9% |
 
-**After Phase 1** is implemented, re-run the 4-leg canonical backtest (`--end-date 2026-04-24`,
-the last trading day) and repeat this comparison. The new exp_ids become the post-Phase-1
-reference; the IDs above become the pre-Phase-1 baseline.
+#### ✅ Baseline Regression Check — Phase 1 (2026-04-26)
+
+Post-Phase-1 4-leg run (end-date 2026-04-26). Compared trade-by-trade against the pre-Phase-1
+reference above. **Result: NOT a regression — post-Phase-1 reflects the intended canonical rules.**
+
+| Leg | Pre-Phase-1 ID | Post-Phase-1 ID | Ann Δ | Trade Δ | Verdict |
+|-----|---------------|-----------------|-------|---------|---------|
+| BREAKOUT_4% | `bd22a5859c571c0d` | `a23f33ed4c15545c` | ~0 | −3 dropped / +1 added / 16 stop-only | ✅ spec change (stop semantics) |
+| BREAKOUT_2% | `e5cbeed50a3c78e4` | `de7e20a20ecd03fc` | −0.2pp | −7 dropped / +1 added / 23 stop-only | ✅ spec change (stop semantics) |
+| BREAKDOWN_4% | `d6b34cbfb49137de` | `2ef1d641142a6d25` | PF 5.50→5.82 | −4 dropped / 3 exit-changed | ✅ SHORT carry bug fixed |
+| BREAKDOWN_2% | `073e3a2225abb123` | `e489fef43123b62a` | 0 | 0 dropped / 0 added / 0 changed | ✅ identical |
+
+**Phase 1 had exactly two independent behavior-changing code changes:**
+
+---
+
+**Change 1 — Entry admission: `session_low` accumulation (spec change, not a bug fix)**
+
+Pre-Phase-1: `initial_stop` was computed from the **triggering candle's own low** (point-in-time snapshot).
+Post-Phase-1: `evaluate_entry_trigger()` uses `session_low = min(all candle lows from 09:15 → trigger time)` — the accumulated session low, which is a wider and more representative stop reference.
+
+This is a **stop-distance semantics change**, not a bug fix. Both interpretations are internally consistent; post-Phase-1 is the intended canonical rule.
+
+Effect on dropped trades (stop_dist from pre-Phase-1 DB):
+
+| Trade | Pre stop_dist | Exit reason | P/L |
+|-------|--------------|-------------|-----|
+| RVNL 2020-05-12 | 0.00% | STOP_BREAKEVEN | −0.08% |
+| MIRZAINT 2023-04-17 | 0.00% | ABNORMAL_PROFIT | +18.60% |
+| RMDRIP 2025-03-21 | 0.00% | DATA_INVALIDATION | 0.00% |
+| MOL 2023-04-18 | 1.96% | GAP_STOP | −0.66% |
+| LAOPALA 2023-06-05 | 1.63% | TIME_EXIT | +4.21% |
+| IDFCFIRSTB 2023-07-11 | 1.65% | STOP_POST_DAY3 | +0.23% |
+| TEGA 2023-10-27 | 2.22% | STOP_INITIAL | −1.10% |
+
+The three BREAKOUT_4% drops (RVNL, MIRZAINT, RMDRIP) all showed `stop_dist=0.00%` —
+the triggering candle opened exactly at its own low, making the old candle-only stop = entry price.
+Under the new accumulated `session_low`, the stop distance exceeded `max_stop_dist_pct=0.08` and
+those entries were correctly rejected by the stricter canonical rule.
+
+These were **valid trades under the old, looser stop interpretation**; they fail the **stricter
+canonical stop-distance rule after Phase 1** and are removed by design. Whether MIRZAINT's
++18.60% gain is "lost" depends on which stop spec you consider authoritative. Post-Phase-1 is the
+intended spec.
+
+The 16/23 stop-only-changed trades are **diagnostic-only changes**: `initial_stop` shifted by a
+fixed ratio (~0.96) due to the accumulation vs. snapshot difference, but exit price, exit reason,
+and pnl_pct are **IDENTICAL** in all cases — no behavioral regression.
+
+---
+
+**Change 2 — SHORT H-carry breakeven clamp direction (real bug fix)**
+
+Pre-Phase-1: the backtest applied `max(carry_stop, entry_price)` to SHORT trades — the LONG
+formula. For a SHORT, breakeven requires the stop to be **at or below** entry price (`min`, not `max`).
+Using `max` pushed the carry stop above entry for profitable shorts.
+
+Post-Phase-1: `evaluate_hold_quality_carry_rule(is_short=True)` correctly uses
+`min(carry_stop, entry_price)`.
+
+| Trade | Entry | Pre exit | Pre pnl | Post exit | Post pnl | Swing |
+|-------|-------|----------|---------|-----------|---------|-------|
+| CENTRALBK 2018-10-09 | 30.20 | 28.700 | +4.88% | 29.848 | +1.08% | −3.8pp |
+| ADANIGREEN 2023-02-27 | 462.20 | 485.300 | −5.08% | 456.664 | +1.11% | **+6.2pp** |
+| MOKSH 2022-02-15 | 19.31 | 19.310 | −0.08% | 19.310 | −0.08% | 0 (stop-only) |
+
+ADANIGREEN is the clearest evidence: the old carry stop (inferred from the exit price as ~485.30)
+was **above the initial loss stop (472.25)**, which for a SHORT means the position was allowed to
+run into a larger loss than the risk stop defined at entry. The `max` formula turned a breakeven
+clamp into a loss-widener.
+
+**Important caveat**: The pre-Phase-1 carry stop values (e.g. 485.30 for ADANIGREEN) are
+**inferred from exit prices**, not read from stored DB fields. `carry_stop_next_session` was not
+persisted in pre-Phase-1 experiments (see ISSUE-057). The inference is consistent with the
+observed exit prices, but cannot be verified column-by-column from the old `bt_trade` rows.
+Post-Phase-1 rows correctly store the clamped carry stop.
+
+Regression tests for both cases are in `tests/unit/services/paper/test_parity.py`:
+`test_short_carry_regression_centralbk_2018` and `test_short_carry_regression_adanigreen_2023`.
+
+---
+
+- **BREAKDOWN_2% zero diff**: `breakdown_filter_n_narrow_only=True` narrows candidates such
+  that the session_high discrepancy from Change 1 does not affect any of the 792 entries.
+- **Open**: same-day stop execution and next-session stop application are still split across
+  engine-specific paths — tracked in ISSUE-055 (carry/exit consolidation, not yet done).
 
 ### Step 8.3 — Deployment timing rules
 

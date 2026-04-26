@@ -1195,23 +1195,13 @@ The new `shared_eval.evaluate_entry_trigger()` wiring is behaviorally close but 
 **Action**:
 Compare pre/post `bt_trade` rows trade-by-trade and isolate the first field divergence for each affected symbol/date pair before promoting Phase 1 to canonical.
 
-**Cleanup update**: On 2026-04-25 the transient pre-fix comparison runs were pruned from `data/backtest.duckdb` and the dashboard replica was synced. Removed IDs:
-- `2e7f4c3d0a3fd23e`
-- `6b8a2392ee875db8`
-- `4ec6f500d12d6dda`
-- `1ec48134640a7c6c`
+**Cleanup update (2026-04-26)**: All pre-Phase-1 and post-Phase-1 comparison runs (8 total) pruned from `data/backtest.duckdb`. New post-ISSUE-055 canonical IDs are now the only experiments in the DB:
+- `6565aa5698186b01` (BREAKOUT_4%)
+- `874515a0c02ba7ee` (BREAKOUT_2%)
+- `a2f4063613d259b3` (BREAKDOWN_4%)
+- `9a5ed7575f68613a` (BREAKDOWN_2%)
 
-The current post-fix comparison set is now:
-- `a23f33ed4c15545c`
-- `de7e20a20ecd03fc`
-- `2ef1d641142a6d25`
-- `e489fef43123b62a`
-
-The canonical pre-Phase-1 reference remains:
-- `bd22a5859c571c0d`
-- `e5cbeed50a3c78e4`
-- `d6b34cbfb49137de`
-- `073e3a2225abb123`
+Zero regression confirmed against post-Phase-1 set. Window: 2015-01-01 → 2026-04-24, universe 2000.
 
 ---
 
@@ -1233,39 +1223,74 @@ The canonical pre-Phase-1 reference remains:
 
 ### ISSUE-054 — Short H-carry / breakdown exit path is fragile and needs dedicated regression coverage
 
-**Status**: OPEN — investigate carry-stop sensitivity
+**Status**: OPEN — regression tests added; carry/exit consolidation still pending (ISSUE-055)
 **Severity**: Medium (breakdown exits changed on canonical rows after Phase 1)
 **Found**: 2026-04-25 during Phase 1 postmortem
 
 **Observation**: In the breakdown path, short trades with `hold_quality_passed=True` go through the H-carry rule and preserve a carried stop into the next session rather than exiting at the same-day close. On the Phase 1 comparison, `CENTRALBK` (`2018-10-09`) and `ADANIGREEN` (`2023-02-27`) both changed exit price even though entry date and initial stop were stable.
 
+**Root cause confirmed (2026-04-26)**: Pre-Phase-1 backtest applied the LONG breakeven clamp (`max`) to SHORT trades. For a SHORT, breakeven means the stop must be ≤ entry price. Using `max` instead of `min` pushed the carry stop above entry for profitable shorts — in ADANIGREEN's case above the initial loss stop itself (485.30 > 472.25 > entry 462.20), causing the position to exit at a large loss. Post-Phase-1 `evaluate_hold_quality_carry_rule(is_short=True)` correctly uses `min(carry_stop, entry_price)`.
+
+**Caveat**: The pre-Phase-1 carry_stop values (e.g. 485.30 for ADANIGREEN) are **inferred from exit prices**, not stored in the pre-Phase-1 DB rows. `carry_stop_next_session` was not persisted before the ISSUE-057 traceability fix. The post-Phase-1 rows correctly store the clamped carry stop. The inference is consistent but cannot be verified column-by-column from the old experiments.
+
 **Why this matters**: The short carry path is path-sensitive and can change next-day exits materially without any visible entry-price change. That makes it harder to reason about baseline drift and easier to regress accidentally during refactors.
 
-**Action**:
-- Add a dedicated regression test for `CENTRALBK` and `ADANIGREEN` short carry behavior.
-- Re-check whether the short H-carry rule should remain this aggressive, or whether it should be simplified / made more explicit in the engine.
+**Progress**:
+- Two regression tests added to `tests/unit/services/paper/test_parity.py` (Layer 1c):
+  - `test_short_carry_regression_centralbk_2018`: verifies carry_stop clamps to entry_price (30.20) for profitable SHORT.
+  - `test_short_carry_regression_adanigreen_2023`: verifies carry_stop input above entry_price (485.30 > 462.20) is clamped to entry_price, preventing the wrong-direction clamp from blowing through the loss stop.
+
+**Remaining**: Same-day stop execution and next-session stop application are still split across engine-specific paths (backtest vs. paper). The re-check of H-carry aggression and the shared carry/exit helper extraction are tracked in ISSUE-055.
 
 ---
 
 ### ISSUE-055 — Backtest and paper/live still do not share one carry/exit engine
 
-**Status**: OPEN — architectural parity gap
-**Severity**: High (same rule, separate implementations; dangerous for parity drift)
+**Status**: OPEN — partially resolved (H-filter extraction complete; same-day stop consolidation deferred)
+**Severity**: Medium (H-filter now tested for parity; residual risk is batch-vs-streaming same-day stop)
 **Found**: 2026-04-25 during H-carry / breakdown parity review
+**Updated**: 2026-05-09 after code archaeology and partial fix
 
 **Observation**: Entry admission was partially unified in Phase 1, but the carry/exit path is still split across multiple runners:
 - backtest carry logic lives in `duckdb_backtest_runner.py` plus `vectorbt_engine.py`
 - paper/live EOD carry logic lives in `paper_eod_carry.py`
 - same-day stop execution still depends on the engine-specific runner path
 
-The long/short H-carry rule is now extracted into `shared_eval.evaluate_hold_quality_carry_rule()`, which reduces one major duplication point. However, same-day stop execution and next-session stop application are still split across engine-specific code paths, so a small change in one path can still move exit price, stop tightening, or same-day close handling without the other path changing.
+**What was completed in this session**:
 
-**Why this matters**: This is the exact kind of split that creates misleading "parity" confidence. The system can appear aligned at the rule level while still diverging in edge cases, especially around short carry, gap-through handling, and next-session stop application.
+1. **H-filter computation extracted** — `compute_h_filter_passed()` added to `shared_eval.py`.
+   Paper EOD carry now calls this function instead of the inline 8-line block. No behavior change.
+   - LONG: `close_pos >= threshold` (0.70 default)
+   - SHORT: `close_pos <= (1 - threshold)` (0.30 for default threshold)
+   - `None` → False (parity with backtest `filters.py check_h()`)
+   - `h_carry_enabled=False` → always True
 
-**Action**:
-- Extract a single pure carry/exit decision helper that both backtest and paper/live call.
-- Add regression coverage for representative long and short carry cases, including the `CENTRALBK` and `ADANIGREEN` short carry examples.
-- Treat any future divergence in carry/exit math as a parity bug until proven otherwise.
+2. **Backtest SHORT H-filter confirmed direction-aware** — investigation found the breakdown candidate
+   SQL in `strategy_families.py` (line 374) already builds `filter_h = (signal_close_pos_in_range <= h_threshold_short)`
+   where `h_threshold_short = round(1 - h_filter_close_pos_threshold, 6)`. This is direction-correct and
+   matches the Python helper. No code change needed on the backtest side.
+
+3. **Dead code removed** — `_apply_hold_quality_carry_rule()` static method in `duckdb_backtest_runner.py`
+   (lines 2081-2114) was a compatibility wrapper with no callers. Deleted.
+
+4. **Tests added** — `TestComputeHFilterPassed` in `test_parity.py` (14 tests) verifies:
+   - LONG/SHORT pass/fail/boundary
+   - None → False (both directions)
+   - `h_carry_enabled=False` → True (override path)
+   - Non-default threshold
+   - Backtest SQL parity (SHORT close_pos=0.15 → True, 0.80 → False)
+   - Direction string case-insensitive
+
+**Remaining gap — same-day stop execution**:
+Same-day stop execution and next-session stop application remain split: backtest uses a batch
+5-min candle loop (`_simulate_same_day_stop_execution`), while paper uses a streaming WebSocket path.
+These are fundamentally different data-flow models. Full unification would require a shared pure
+function for intraday stop simulation, which is out of scope until the ENGINE_OPTIMIZATION plan.
+Treat any future divergence here as a parity bug investigation trigger.
+
+**Why this matters**: The H-filter formula is now tested for equivalence via explicit parity tests.
+Same-day stop and next-session stop application remain engine-specific — a change in one path can
+still produce different exit prices without the other path updating.
 
 ---
 
@@ -1318,33 +1343,17 @@ The backtest runner then applies the H-carry clamp, but the final stored exit pr
 
 ---
 
-## Canonical Experiment IDs (2026-04-24 Wave-2)
+## Current Canonical Baselines (2026-04-26)
 
-Wave-1+2 fixes applied: H-carry rule enabled, entry gate at 09:20, filter direction parity, pnl_r guard,
-causal admission (watch_date features), no DQ universe exclusion.
+Post-Phase-1 + ISSUE-055 (shared eval refactor, H-filter rounding fix).
 Full 11-year window: `2015-01-01 → 2026-04-24`, universe 2000.
 
 | Leg | Exp ID | Avg Annual | Max DD | Calmar | PF | Trades |
 |-----|--------|-----------|--------|--------|----|--------|
-| Breakout 4% | `0620c21eca81a567` | +54.5% | 3.16% | 17.3 | 20.80 | 2,217 |
-| Breakout 2% | `4b6b548bbe0121f0` | +122.0% | 2.73% | 44.7 | 19.23 | 7,097 |
-| Breakdown 4% | `5f5d2c00471f07f6` | +3.1% | 0.74% | 4.2 | 5.50 | 258 |
-| Breakdown 2% | `0bf8ec0d38586e32` | +8.3% | 1.90% | 4.4 | 5.48 | 792 |
+| Breakout 4% | `6565aa5698186b01` | +54.5% | 3.16% | 17.3 | 20.78 | 2,215 |
+| Breakout 2% | `874515a0c02ba7ee` | +121.8% | 2.73% | 44.6 | 19.21 | 7,091 |
+| Breakdown 4% | `a2f4063613d259b3` | +3.1% | 0.74% | 4.2 | 5.82 | 254 |
+| Breakdown 2% | `9a5ed7575f68613a` | +8.3% | 1.90% | 4.4 | 5.48 | 792 |
 
-Pre-Phase-1 CPR parity reference. Confirmed zero regression from Phase 2-8 changes.
-Run timestamp: 2026-04-25 13:07-13:15 IST.
-
-## Current Post-Phase-1 Comparison Set (2026-04-25)
-
-These are the surviving post-fix experiments after pruning the transient pre-fix Phase 1 runs.
-They are the active comparison set for the remaining carry/exit consolidation work.
-
-| Leg | Exp ID | Avg Annual | Max DD | Calmar | PF | Trades |
-|-----|--------|-----------|--------|--------|----|--------|
-| Breakout 4% | `a23f33ed4c15545c` | +54.5% | 3.16% | 17.3 | 20.78 | 2,215 |
-| Breakout 2% | `de7e20a20ecd03fc` | +121.8% | 2.73% | 44.7 | 19.21 | 7,091 |
-| Breakdown 4% | `2ef1d641142a6d25` | +3.1% | 0.74% | 4.2 | 5.82 | 254 |
-| Breakdown 2% | `e489fef43123b62a` | +8.3% | 1.90% | 4.4 | 5.48 | 792 |
-
-This set matches the post-Phase-1 runs after the shared carry helper / traceability fix and is kept
-for comparison against the canonical pre-Phase-1 baseline above.
+Zero regression confirmed vs post-Phase-1 comparison set. All prior IDs pruned from `data/backtest.duckdb`.
+Run timestamp: 2026-04-26.

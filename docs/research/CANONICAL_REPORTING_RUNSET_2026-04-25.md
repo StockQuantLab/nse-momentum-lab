@@ -1,5 +1,8 @@
 # Canonical Reporting Runset (2026-04-25)
 
+> ⚠️ **Superseded** by [`CANONICAL_REPORTING_RUNSET_2026-04-26.md`](CANONICAL_REPORTING_RUNSET_2026-04-26.md)
+> (Post-Phase-1 + ISSUE-055 canonical set, 2026-04-26). Retained as historical reference.
+
 Supersedes: `CANONICAL_REPORTING_RUNSET_2026-04-22.md`
 
 This document freezes the canonical backtest IDs used as the **pre-Phase-1 reference baseline**

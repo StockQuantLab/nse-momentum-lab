@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from nse_momentum_lab.services.paper.engine.shared_eval import (
+    compute_h_filter_passed,
     evaluate_hold_quality_carry_rule,
 )
 
@@ -233,14 +234,12 @@ def apply_eod_carry_decisions(
 
         # --- filter_h check ---
         # Matches filters.py check_h(): None → H fails (parity with backtest).
-        if not h_carry_enabled:
-            filter_h_pass = True
-        elif close_pos is None:
-            filter_h_pass = False  # zero-range bar or missing feature → treat as H failed
-        elif direction == "LONG":
-            filter_h_pass = close_pos >= close_pos_threshold
-        else:  # SHORT
-            filter_h_pass = close_pos <= (1.0 - close_pos_threshold)
+        filter_h_pass = compute_h_filter_passed(
+            direction=direction,
+            close_pos_in_range=close_pos,
+            threshold=close_pos_threshold,
+            h_carry_enabled=h_carry_enabled,
+        )
 
         carry_result = evaluate_hold_quality_carry_rule(
             hold_quality_passed=filter_h_pass,

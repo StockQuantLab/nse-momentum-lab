@@ -1,18 +1,18 @@
 # Backtest Results
 
-**Production Baseline** - Experiment ID: `0620c21eca81a567`
-<br>Strategy: 2LYNCHBreakout 4% | Period: 2015-2026-04-23 | Status: COMPLETED
+**Production Baseline** - Experiment ID: `6565aa5698186b01`
+<br>Strategy: 2LYNCHBreakout 4% | Period: 2015-2026-04-24 | Status: COMPLETED
 
 ---
 
-## All Strategy Results (2015–2026-04-23, universe 2000, 60-min FEE)
+## All Strategy Results (2015–2026-04-24, universe 2000, 60-min FEE)
 
 | Strategy | Threshold | Dir | Exp ID | Trades | Win% | Ann Ret | Max DD | Calmar | Total Ret |
 |----------|-----------|-----|--------|--------|------|---------|--------|--------|-----------|
-| **2LYNCHBreakout** | 4% | LONG | `0620c21eca81a567` | **2,217** | **40.6%** | **54.5%** | **3.16%** | **17.3** | **654.3%** |
-| 2LYNCHBreakout | 2% | LONG | `4b6b548bbe0121f0` | 7,097 | 38.6% | 122.0% | 2.73% | **44.7** | 1,464.0% |
-| 2LYNCHBreakdown | 4% | SHORT | `5f5d2c00471f07f6` | 258 | 36.0% | 3.1% | 0.74% | 4.2 | 37.8% |
-| 2LYNCHBreakdown | 2% | SHORT | `0bf8ec0d38586e32` | 792 | 25.9% | 8.3% | 1.90% | 4.4 | 99.3% |
+| **2LYNCHBreakout** | 4% | LONG | `6565aa5698186b01` | **2,215** | **40.6%** | **54.5%** | **3.16%** | **17.3** | **654.3%** |
+| 2LYNCHBreakout | 2% | LONG | `874515a0c02ba7ee` | 7,091 | 38.6% | 121.8% | 2.73% | **44.6** | 1,464.0% |
+| 2LYNCHBreakdown | 4% | SHORT | `a2f4063613d259b3` | 254 | 36.2% | 3.1% | 0.74% | 4.2 | 37.8% |
+| 2LYNCHBreakdown | 2% | SHORT | `9a5ed7575f68613a` | 792 | 25.9% | 8.3% | 1.90% | 4.4 | 99.3% |
 
 **Notes:**
 - thresholdbreakout@4% = 2LYNCHBreakout@4% exactly — identical filter stack, confirmed bit-for-bit (2026-03-07)
@@ -31,7 +31,7 @@
 | **Win Rate**          | **40.6%**     |
 | **Max Drawdown**      | **3.16%**     |
 | **Calmar Ratio**      | **17.3**      |
-| **Total Trades**      | **2,217**     |
+| **Total Trades**      | **2,215**     |
 
 **Key Configuration:**
 - **Universe**: Top 2,000 by liquidity → filtered to ~1,800 stocks
@@ -93,7 +93,10 @@
 ## Current 2LYNCH Canonical Runset
 
 The current 2LYNCH breakout/breakdown canonical baselines are tracked separately in
-[`docs/research/CANONICAL_REPORTING_RUNSET_2026-04-22.md`](research/CANONICAL_REPORTING_RUNSET_2026-04-22.md).
+[`docs/research/CANONICAL_REPORTING_RUNSET_2026-04-26.md`](research/CANONICAL_REPORTING_RUNSET_2026-04-26.md).
+
+> **Note**: Yearly breakdown data below is from a legacy engine run and does not reflect
+> the current canonical IDs listed above.
 
 ---
 

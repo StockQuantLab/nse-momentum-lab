@@ -2078,42 +2078,6 @@ class DuckDBBacktestRunner:
         return normalize_candle_time(candle_time)
 
     @staticmethod
-    def _apply_hold_quality_carry_rule(
-        *,
-        hold_quality_passed: bool,
-        entry_price: float | None,
-        close_price: float | None,
-        carry_stop_next_session: float | None,
-        same_day_exit_price: float | None,
-        same_day_exit_reason: str | None,
-        same_day_exit_ts: datetime | None,
-        same_day_exit_time: time | None,
-        signal_date: date,
-        is_short: bool,
-    ) -> tuple[float | None, str | None, datetime | None, time | None, float | None, str]:
-        """Compatibility wrapper around the shared H-carry helper."""
-        result = evaluate_hold_quality_carry_rule(
-            hold_quality_passed=hold_quality_passed,
-            entry_price=entry_price,
-            close_price=close_price,
-            carry_stop_next_session=carry_stop_next_session,
-            same_day_exit_price=same_day_exit_price,
-            same_day_exit_reason=same_day_exit_reason,
-            same_day_exit_ts=same_day_exit_ts,
-            same_day_exit_time=same_day_exit_time,
-            signal_date=signal_date,
-            is_short=is_short,
-        )
-        return (
-            result.same_day_exit_price,
-            result.same_day_exit_reason,
-            result.same_day_exit_ts,
-            result.same_day_exit_time,
-            result.carry_stop_next_session,
-            result.carry_action,
-        )
-
-    @staticmethod
     def _simulate_same_day_stop_execution(
         *,
         rows: list[dict[str, object]],

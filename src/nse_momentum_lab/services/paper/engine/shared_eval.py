@@ -108,6 +108,31 @@ def evaluate_entry_trigger(
         return EntryTriggerResult(entry_price=entry_price, initial_stop=initial_stop)
 
 
+def compute_h_filter_passed(
+    *,
+    direction: str,
+    close_pos_in_range: float | None,
+    threshold: float = 0.70,
+    h_carry_enabled: bool = True,
+) -> bool:
+    """Direction-aware H-filter computation for EOD carry decisions.
+
+    LONG: passes when ``close_pos_in_range >= threshold`` (close in upper range).
+    SHORT: passes when ``close_pos_in_range <= (1 - threshold)`` (close in lower range).
+
+    Returns True unconditionally when ``h_carry_enabled=False``.
+    Returns False when ``close_pos_in_range`` is None — parity with backtest
+    ``filters.py check_h()`` which treats missing feature rows as H=False.
+    """
+    if not h_carry_enabled:
+        return True
+    if close_pos_in_range is None:
+        return False
+    if str(direction).upper() == "SHORT":
+        return float(close_pos_in_range) <= round(1.0 - threshold, 6)
+    return float(close_pos_in_range) >= threshold
+
+
 def evaluate_hold_quality_carry_rule(
     *,
     hold_quality_passed: bool,

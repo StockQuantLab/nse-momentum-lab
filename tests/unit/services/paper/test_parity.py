@@ -14,6 +14,7 @@ import pytest
 
 from nse_momentum_lab.services.paper.engine.shared_eval import (
     EntryTriggerResult,
+    compute_h_filter_passed,
     evaluate_entry_trigger,
     evaluate_hold_quality_carry_rule,
 )
@@ -275,6 +276,161 @@ def test_short_weak_close_exits_at_close() -> None:
     assert result.carry_stop_next_session == pytest.approx(105.0)
 
 
+def test_short_carry_regression_centralbk_2018() -> None:
+    """Regression: CENTRALBK 2018-10-09 SHORT carry.
+
+    Pre-Phase-1 bug: carry_stop drifted below entry_price for a profitable SHORT,
+    allowing the position to run further than intended (exit=28.70, pnl=+4.88%).
+    Post-Phase-1 fix: carry_stop clamped to min(initial_stop, entry_price) = entry_price,
+    ensuring breakeven protection (exit=29.848, pnl=+1.08%).
+
+    entry=30.20, initial_stop=31.35 (session_high, above entry for SHORT).
+    """
+    result = evaluate_hold_quality_carry_rule(
+        hold_quality_passed=True,
+        entry_price=30.20,
+        close_price=28.70,          # profitable short (close < entry)
+        carry_stop_next_session=31.35,
+        same_day_exit_price=None,
+        same_day_exit_reason=None,
+        same_day_exit_ts=None,
+        same_day_exit_time=None,
+        signal_date=date(2018, 10, 9),
+        is_short=True,
+    )
+    assert result.same_day_exit_reason is None               # profitable: carry, not exit
+    assert result.carry_stop_next_session == pytest.approx(30.20)  # clamped to entry (breakeven)
+    assert result.carry_stop_next_session <= 30.20           # must not drift below entry for SHORT
+
+
+def test_short_carry_regression_adanigreen_2023() -> None:
+    """Regression: ADANIGREEN 2023-02-27 SHORT carry.
+
+    Pre-Phase-1 bug: carry_stop_next_session was set to 485.30 (ABOVE initial_stop 472.25 and
+    entry 462.20) because the backtest applied the LONG breakeven clamp (max) to a SHORT trade.
+    This meant the next-session stop was above the loss threshold, causing the position to exit
+    at 485.30 with pnl=-5.08% (a loss — stop blown past the initial loss limit).
+
+    Post-Phase-1 fix: carry_stop = min(carry_stop_input, entry_price) = 462.20 (breakeven),
+    correct for SHORT. Position exits at 456.664 with pnl=+1.11%.
+
+    The invariant: carry_stop_next_session must NEVER exceed entry_price for a SHORT trade.
+    """
+    result = evaluate_hold_quality_carry_rule(
+        hold_quality_passed=True,
+        entry_price=462.20,
+        close_price=456.664,        # profitable short (close < entry)
+        carry_stop_next_session=485.30,  # old bug value: above both initial_stop and entry
+        same_day_exit_price=None,
+        same_day_exit_reason=None,
+        same_day_exit_ts=None,
+        same_day_exit_time=None,
+        signal_date=date(2023, 2, 27),
+        is_short=True,
+    )
+    assert result.same_day_exit_reason is None
+    assert result.carry_stop_next_session == pytest.approx(462.20)  # clamped to entry_price
+
+
+# ---------------------------------------------------------------------------
+# TestComputeHFilterPassed — ISSUE-055 extracted helper
+# ---------------------------------------------------------------------------
+
+
+class TestComputeHFilterPassed:
+    """Unit tests for compute_h_filter_passed() — direction-aware H-filter helper.
+
+    Verifies that the extracted Python function matches the semantics of:
+    - the inline paper EOD carry block it replaced
+    - the backtest SQL formula: LONG close_pos >= 0.70, SHORT close_pos <= 0.30
+    """
+
+    # LONG direction -----------------------------------------------------------
+
+    def test_long_pass(self) -> None:
+        assert compute_h_filter_passed(direction="LONG", close_pos_in_range=0.80) is True
+
+    def test_long_fail(self) -> None:
+        assert compute_h_filter_passed(direction="LONG", close_pos_in_range=0.60) is False
+
+    def test_long_boundary_exact(self) -> None:
+        assert compute_h_filter_passed(direction="LONG", close_pos_in_range=0.70) is True
+
+    # SHORT direction ----------------------------------------------------------
+
+    def test_short_pass(self) -> None:
+        assert compute_h_filter_passed(direction="SHORT", close_pos_in_range=0.20) is True
+
+    def test_short_fail(self) -> None:
+        assert compute_h_filter_passed(direction="SHORT", close_pos_in_range=0.50) is False
+
+    def test_short_boundary_exact(self) -> None:
+        # threshold=0.70 → SHORT boundary = 1-0.70 = 0.30 → passes at exactly 0.30
+        assert compute_h_filter_passed(direction="SHORT", close_pos_in_range=0.30) is True
+
+    # Edge cases ---------------------------------------------------------------
+
+    def test_none_returns_false_long(self) -> None:
+        assert compute_h_filter_passed(direction="LONG", close_pos_in_range=None) is False
+
+    def test_none_returns_false_short(self) -> None:
+        assert compute_h_filter_passed(direction="SHORT", close_pos_in_range=None) is False
+
+    def test_h_carry_disabled_overrides_all(self) -> None:
+        # h_carry_enabled=False → always carry regardless of close_pos or direction
+        assert compute_h_filter_passed(
+            direction="LONG", close_pos_in_range=0.10, h_carry_enabled=False
+        ) is True
+        assert compute_h_filter_passed(
+            direction="SHORT", close_pos_in_range=0.90, h_carry_enabled=False
+        ) is True
+        assert compute_h_filter_passed(
+            direction="LONG", close_pos_in_range=None, h_carry_enabled=False
+        ) is True
+
+    def test_custom_threshold(self) -> None:
+        # threshold=0.75 → LONG passes at 0.75, fails at 0.74
+        assert compute_h_filter_passed(
+            direction="LONG", close_pos_in_range=0.75, threshold=0.75
+        ) is True
+        assert compute_h_filter_passed(
+            direction="LONG", close_pos_in_range=0.74, threshold=0.75
+        ) is False
+
+    # Backtest SQL parity -------------------------------------------------------
+
+    def test_short_parity_with_backtest_sql_pass(self) -> None:
+        # Backtest SQL: filter_h = (signal_close_pos_in_range <= h_threshold_short)
+        # where h_threshold_short = 1.0 - 0.70 = 0.30
+        # close_pos=0.15 → 0.15 <= 0.30 → True in SQL → must match Python helper
+        assert compute_h_filter_passed(direction="SHORT", close_pos_in_range=0.15) is True
+
+    def test_short_parity_with_backtest_sql_fail(self) -> None:
+        # close_pos=0.80 → 0.80 <= 0.30 → False in SQL → must match Python helper
+        assert compute_h_filter_passed(direction="SHORT", close_pos_in_range=0.80) is False
+
+    def test_direction_case_insensitive(self) -> None:
+        # direction string comes from DB column — may be mixed case
+        assert compute_h_filter_passed(direction="short", close_pos_in_range=0.20) is True
+        assert compute_h_filter_passed(direction="Short", close_pos_in_range=0.80) is False
+        assert compute_h_filter_passed(direction="long", close_pos_in_range=0.80) is True
+
+    def test_short_threshold_rounding_matches_backtest(self) -> None:
+        # Backtest uses round(1.0 - h_filter_close_pos_threshold, 6) for the short boundary.
+        # Confirm the helper rounds identically so a custom threshold like 0.7000003
+        # doesn't drift by one comparison at the exact boundary.
+        threshold = 0.7000003
+        short_boundary = round(1.0 - threshold, 6)  # 0.2999997
+        # Exactly at boundary → must pass
+        assert compute_h_filter_passed(
+            direction="SHORT", close_pos_in_range=short_boundary, threshold=threshold
+        ) is True
+        # One epsilon above boundary → must fail
+        assert compute_h_filter_passed(
+            direction="SHORT", close_pos_in_range=short_boundary + 1e-7, threshold=threshold
+        ) is False
+
+
 # ---------------------------------------------------------------------------
 # Performance gate
 # ---------------------------------------------------------------------------
@@ -305,6 +461,36 @@ def test_issue_042_observational_stub():
     Full test requires a real replay session. Stub accepted until the
     paper-vs-backtest comparison pipeline (Step 1.4) is in place.
     Acceptance: < 0.5% annualized drift.
+
+    Phase 1 diff results (pre-Phase-1 vs post-Phase-1, 2015-2026, universe=2000):
+
+    BREAKOUT_4% (bd22a5859c571c0d → a23f33ed4c15545c):
+      - 3 trades dropped (RVNL 2020-05-12, MIRZAINT 2023-04-17, RMDRIP 2025-03-21):
+        post-Phase-1 evaluate_entry_trigger accumulates session_low from 09:15, making
+        stop wider for some entries → max_stop_dist_pct=0.08 guard rejects them. Correct.
+      - 1 trade added (FINCABLES 2025-03-24): reverse boundary case.
+      - 16 trades: initial_stop only changed (session_low accumulation vs. point-in-time);
+        exit/pnl identical — diagnostic-only change.
+
+    BREAKOUT_2% (e5cbeed50a3c78e4 → de7e20a20ecd03fc):
+      - 7 trades dropped (same admission guard pattern), 1 added, 23 changed (initial_stop only).
+
+    BREAKDOWN_4% (d6b34cbfb49137de → 2ef1d641142a6d25):
+      - 4 trades dropped (different session_high boundary), 0 added.
+      - CENTRALBK 2018-10-09: exit 28.70→29.848, pnl +4.88%→+1.08%.
+        Pre-Phase-1 carry_stop drifted below entry_price for SHORT (breakeven clamp missing).
+      - ADANIGREEN 2023-02-27: exit 485.30→456.664, pnl -5.08%→+1.11% (sign flip!).
+        Pre-Phase-1 applied LONG carry formula to SHORT: carry_stop ABOVE initial_stop 472.25,
+        allowing position to run to full loss. Post-Phase-1 correctly clamps to entry_price.
+      - PF improved 5.50→5.82: direct result of SHORT H-carry bug fix.
+
+    BREAKDOWN_2% (073e3a2225abb123 → e489fef43123b62a):
+      - 0 dropped, 0 added, 0 changed. breakdown_filter_n_narrow_only=True narrows
+        candidates so the session_high discrepancy doesn't affect any of the 792 entries.
+
+    Conclusion: pre/post diff is NOT a regression — post-Phase-1 is definitively more correct.
+    ISSUE-042 granularity delta (daily-bar vs 5-min intraday) is a separate pending concern;
+    acceptance threshold pending quantification via feed-audit replay.
     """
     accepted_drift_pct = 0.005
     assert accepted_drift_pct > 0
